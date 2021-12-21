@@ -1,0 +1,13 @@
+[package]
+name = "pseudosync"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+structopt = "0.3"
+liberty-parse = { git = "https://github.com/marlls1989/liberty-parse.git" }
+simple-error = "0.2"
+ndarray = "0.15.4"
+regex = "1"
