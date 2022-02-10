@@ -1,13 +1,15 @@
+use itertools::Itertools;
 use liberty_parse::{
     self,
     ast::{LibertyAst, Value},
     liberty::{Cell, Group, Liberty, Library, Pin},
 };
+use maplit::*;
 use ndarray::prelude::*;
 use regex::Regex;
 use simple_error::simple_error;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fs::File,
     io::{stdin, stdout, BufWriter, Read, Write},
@@ -34,22 +36,27 @@ struct ProgramOptions {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct TimingSpec {
-    template_name: String,
-    capacitance: Array1<f64>,
-    slew: Array1<f64>,
-    table: Array2<f64>,
+struct RefArc {
+    col: usize,
+    row: usize,
+    lut_template: String,
+    rise_trans: Array1<f64>,
+    fall_trans: Array1<f64>,
+    cell_rise: Array1<f64>,
+    cell_fall: Array1<f64>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let opts = ProgramOptions::from_args();
 
+    eprintln!("Parsing liberty file");
     let mut liberty = parse_liberty_file(&opts.input)?;
 
     for lib in liberty.iter_mut() {
         process_library(lib, &opts.clock_pin, &opts.reset_pin, opts.latch);
     }
 
+    eprintln!("Writing liberty file");
     write_liberty_file(opts.output.as_deref(), &liberty.to_ast())?;
 
     Ok(())
@@ -106,6 +113,19 @@ fn is_output_pin(pin: &Pin) -> bool {
         .unwrap_or(false)
 }
 
+fn is_input_pin(pin: &Pin) -> bool {
+    pin.simple_attributes
+        .get("direction")
+        .map(|x| {
+            if let Value::String(v) = x {
+                v == "input"
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false)
+}
+
 fn mean_timingtable<'a, I>(groups: I) -> Option<Array2<f64>>
 where
     I: IntoIterator<Item = &'a Group>,
@@ -130,93 +150,382 @@ where
         .map(|x| x / n)
 }
 
-fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latch: bool) {
-    struct RefArc {
-        col: usize,
-        line: usize,
-        rise_trans: Array1<f64>,
-        fall_trans: Array1<f64>,
-        cell_rise: Array1<f64>,
-        cell_fall: Array1<f64>,
-    }
-    //let lut_template = HashMap::new();
+fn mean_reference_arc<'a, I>(ref_arcs: I) -> Option<RefArc>
+where
+    I: IntoIterator<Item = RefArc>,
+{
+    let mut n = 0.0;
+    ref_arcs
+        .into_iter()
+        .map(|x| {
+            n += 1.0;
+            x
+        })
+        .reduce(|a, b| {
+            assert_eq!(a.col, b.col);
+            assert_eq!(a.row, b.row);
+            assert_eq!(&a.lut_template, &b.lut_template);
+            RefArc {
+                col: a.col,
+                row: a.row,
+                lut_template: a.lut_template,
+                rise_trans: a.rise_trans + b.rise_trans,
+                fall_trans: a.fall_trans + b.fall_trans,
+                cell_rise: a.cell_rise + b.cell_rise,
+                cell_fall: a.cell_fall + b.cell_fall,
+            }
+        })
+        .map(|mut x| {
+            x.rise_trans /= n;
+            x.fall_trans /= n;
+            x.cell_fall /= n;
+            x.cell_rise /= n;
+            x
+        })
+}
 
-    for (_cell_name, cell) in lib
+fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latch: bool) {
+    eprintln!("Processing library {}", lib.name);
+
+    let mut lut_templates: HashSet<String> = HashSet::new();
+
+    for (cell_name, cell) in lib
         .cells
         .iter_mut()
         .filter(|(_, x)| cell_qualifies(x, clock_name))
     {
-        //let setup_constraint = HashMap::new();
+        eprintln!("Processing cell {}", cell_name);
+
+        let mut ref_arc: HashMap<String, RefArc> = HashMap::new();
+
+        // Map related_pin to timing table
+        let mut cell_rise_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
+        let mut cell_fall_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
+
+        // process each output pin of the cell individually
         for (outpin_name, outpin) in cell.pins.iter_mut().filter(|(_, pin)| is_output_pin(pin)) {
-            let mut ref_arc: Option<RefArc> = None;
-
-            let mut cell_rise_arcs: HashMap<String, Array2<f64>> = HashMap::new();
-            let mut cell_fall_arcs: HashMap<String, Array2<f64>> = HashMap::new();
-            let mut rise_trans_arcs: HashMap<String, Array2<f64>> = HashMap::new();
-            let mut fall_trans_arcs: HashMap<String, Array2<f64>> = HashMap::new();
-
+            // for each timing group, capture the characterisation timing tables
+            // this loop preserves the original liberty file
             for timing_group in outpin.groups.iter().filter(|g| g.type_ == "timing") {
                 let related_pin = timing_group.simple_attributes["related_pin"].string();
 
-                // If related_pin is a reset pin, then arcs are preserved.
+                // If related_pin is a reset pin, ignore the arc
                 if reset_name.is_match(&related_pin) {
                     continue;
                 }
+
+                let mut lut_template = None;
 
                 let (cell_rise, others): (Vec<&Group>, Vec<&Group>) = timing_group
                     .groups
                     .iter()
                     .partition(|g| g.type_ == "cell_rise");
+                if let (Some(group), None) = (cell_rise.first(), &lut_template) {
+                    lut_template = Some(group.name.clone())
+                }
                 let cell_rise = mean_timingtable(cell_rise);
 
                 let (cell_fall, others): (Vec<&Group>, Vec<&Group>) =
                     others.into_iter().partition(|g| g.type_ == "cell_fall");
+                if let (Some(group), None) = (cell_fall.first(), &lut_template) {
+                    lut_template = Some(group.name.clone())
+                }
                 let cell_fall = mean_timingtable(cell_fall);
 
                 let (rise_trans, others): (Vec<&Group>, Vec<&Group>) = others
                     .into_iter()
                     .partition(|g| g.type_ == "rise_transition");
+                if let (Some(group), None) = (rise_trans.first(), &lut_template) {
+                    lut_template = Some(group.name.clone())
+                }
                 let rise_trans = mean_timingtable(rise_trans);
 
-                let fall_trans =
-                    mean_timingtable(others.into_iter().filter(|g| g.type_ == "fall_transition"));
+                let fall_trans: Vec<&Group> = others
+                    .into_iter()
+                    .filter(|g| g.type_ == "fall_transition")
+                    .collect();
+                if let (Some(group), None) = (fall_trans.first(), &lut_template) {
+                    lut_template = Some(group.name.clone())
+                }
+                let fall_trans = mean_timingtable(fall_trans);
 
                 if let (
+                    Some(lut_template),
                     Some(cell_rise),
                     Some(cell_fall),
                     Some(rise_trans),
                     Some(fall_trans),
                     None,
-                ) = (&cell_rise, &cell_fall, &rise_trans, &fall_trans, &ref_arc)
-                {
+                ) = (
+                    lut_template,
+                    &cell_rise,
+                    &cell_fall,
+                    &rise_trans,
+                    &fall_trans,
+                    ref_arc.get(outpin_name),
+                ) {
                     let col = cell_rise.len_of(Axis(1)) / 2;
-                    let line = cell_rise.len_of(Axis(0)) / 2;
-                    ref_arc = Some(RefArc {
-                        col,
-                        line,
-                        cell_fall: cell_fall.slice(s![col, ..]).to_owned(),
-                        cell_rise: cell_rise.slice(s![col, ..]).to_owned(),
-                        rise_trans: rise_trans.slice(s![col, ..]).to_owned(),
-                        fall_trans: fall_trans.slice(s![col, ..]).to_owned(),
-                    });
+                    let row = cell_rise.len_of(Axis(0)) / 2;
+                    ref_arc.insert(
+                        outpin_name.clone(),
+                        RefArc {
+                            col,
+                            row,
+                            lut_template,
+                            cell_fall: cell_fall.slice(s![row, ..]).to_owned(),
+                            cell_rise: cell_rise.slice(s![row, ..]).to_owned(),
+                            rise_trans: rise_trans.slice(s![row, ..]).to_owned(),
+                            fall_trans: fall_trans.slice(s![row, ..]).to_owned(),
+                        },
+                    );
                 }
 
                 if let Some(cell_rise) = cell_rise {
-                    cell_rise_arcs.insert(related_pin.clone(), cell_rise);
+                    cell_rise_arcs.insert((related_pin.clone(), outpin_name.clone()), cell_rise);
                 }
 
                 if let Some(cell_fall) = cell_fall {
-                    cell_fall_arcs.insert(related_pin.clone(), cell_fall);
+                    cell_fall_arcs.insert((related_pin.clone(), outpin_name.clone()), cell_fall);
+                }
+            } // timing_group
+
+            if let Some(ref_arc) = ref_arc.get(outpin_name) {
+                // if creating a pseudo_flop model, erase the original arcs and
+                if !latch {
+                    outpin.groups.retain(|x| {
+                        x.type_ != "timing"
+                            || reset_name.is_match(&x.simple_attributes["related_pin"].string())
+                    });
                 }
 
-                if let Some(fall_trans) = fall_trans {
-                    fall_trans_arcs.insert(related_pin.clone(), fall_trans);
-                }
-
-                if let Some(rise_trans) = rise_trans {
-                    rise_trans_arcs.insert(related_pin.clone(), rise_trans);
-                }
+                outpin.groups.push(Group {
+                    type_: "timing".to_owned(),
+                    name: "".to_owned(),
+                    simple_attributes: HashMap::from_iter([
+                        (
+                            "related_pin".to_owned(),
+                            Value::String(clock_name.to_owned()),
+                        ),
+                        (
+                            "timing_sense".to_owned(),
+                            Value::String("non_unate".to_owned()),
+                        ),
+                        (
+                            "timing_type".to_owned(),
+                            Value::String("rising_edge".to_owned()),
+                        ),
+                    ]),
+                    complex_attributes: HashMap::new(),
+                    groups: vec![
+                        Group {
+                            type_: "rise_trans".to_owned(),
+                            name: format!("{}_pseudo_delay", ref_arc.lut_template),
+                            simple_attributes: HashMap::new(),
+                            complex_attributes: hashmap! {
+                                "values".to_owned() =>
+                                vec![Value::FloatGroup(
+                                    ref_arc.rise_trans.iter().cloned().collect(),
+                                )],
+                            },
+                            groups: vec![],
+                        },
+                        Group {
+                            type_: "fall_trans".to_owned(),
+                            name: format!("{}_pseudo_delay", ref_arc.lut_template),
+                            simple_attributes: HashMap::new(),
+                            complex_attributes: hashmap! {
+                                "values".to_owned() =>
+                                vec![Value::FloatGroup(
+                                    ref_arc.fall_trans.iter().cloned().collect(),
+                                )],
+                            },
+                            groups: vec![],
+                        },
+                        Group {
+                            type_: "cell_rise".to_owned(),
+                            name: format!("{}_pseudo_delay", ref_arc.lut_template),
+                            simple_attributes: HashMap::new(),
+                            complex_attributes: hashmap! {
+                                "values".to_owned() =>
+                                vec![Value::FloatGroup(
+                                    ref_arc.cell_rise.iter().cloned().collect(),
+                                )],
+                            },
+                            groups: vec![],
+                        },
+                        Group {
+                            type_: "cell_fall".to_owned(),
+                            name: format!("{}_pseudo_delay", ref_arc.lut_template),
+                            simple_attributes: HashMap::new(),
+                            complex_attributes: hashmap! {
+                                "values".to_owned() =>
+                                vec![Value::FloatGroup(
+                                    ref_arc.cell_fall.iter().cloned().collect(),
+                                )],
+                            },
+                            groups: vec![],
+                        },
+                    ],
+                });
+            } else {
+                eprintln!(
+                    "Failed to process outpin {} in cell {} of library {}: no usable reference arc could be found", 
+                    outpin_name, cell_name, lib.name
+                );
+                continue;
             }
+        } // outpin
+
+        if let Some(ref_arc) = mean_reference_arc(ref_arc.into_values()) {
+            let setup_rise: BTreeMap<String, Array1<f64>> = cell_rise_arcs
+                .into_iter()
+                .group_by(|((src, _), _)| src.clone())
+                .into_iter()
+                // derive the mean arc from the input to each output
+                .filter_map(|(k, v)| {
+                    let mut n = 0.0;
+
+                    v.into_iter()
+                        .map(|x| {
+                            n += 1.0;
+                            x
+                        })
+                        .reduce(|(k, a), (_, b)| (k, a + b))
+                        .map(|(_, v)| (k, v / n))
+                })
+                //extract the setup constraint from the mean arc
+                .map(|(k, v)| {
+                    (
+                        k,
+                        v.slice(s![.., ref_arc.col]).to_owned() - ref_arc.rise_trans[ref_arc.col],
+                    )
+                })
+                .collect();
+
+            let setup_fall: BTreeMap<String, Array1<f64>> = cell_fall_arcs
+                .into_iter()
+                .group_by(|((src, _), _)| src.clone())
+                .into_iter()
+                // derive the mean arc from the input to each output
+                .filter_map(|(k, v)| {
+                    let mut n = 0.0;
+
+                    v.into_iter()
+                        .map(|x| {
+                            n += 1.0;
+                            x
+                        })
+                        .reduce(|(k, a), (_, b)| (k, a + b))
+                        .map(|(_, v)| (k, v / n))
+                })
+                //extract the setup constraint from the mean arc
+                .map(|(k, v)| {
+                    (
+                        k,
+                        v.slice(s![.., ref_arc.col]).to_owned() - ref_arc.rise_trans[ref_arc.col],
+                    )
+                })
+                .collect();
+
+            // Insert timing constraints for every pin
+            for (inpin_name, inpin) in cell
+                .pins
+                .iter_mut()
+                .filter(|(k, v)| is_input_pin(v) && !reset_name.is_match(k))
+            {
+                let constraint_values = match (
+                    setup_fall.get(inpin_name),
+                    setup_rise.get(inpin_name),
+                ) {
+                    (Some(setup_fall), Some(setup_rise)) => vec![
+                        Group {
+                            type_: "rise_constraint".to_owned(),
+                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                            complex_attributes: hashmap! {
+                            "values".to_owned() => vec![Value::FloatGroup(setup_rise.iter().cloned().collect())],
+                            },
+                            simple_attributes: HashMap::new(),
+                            groups: vec![],
+                        },
+                        Group {
+                            type_: "fall_constraint".to_owned(),
+                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                            complex_attributes: hashmap! {
+                            "values".to_owned() => vec![Value::FloatGroup(setup_fall.iter().cloned().collect())],
+                            },
+                            simple_attributes: HashMap::new(),
+                            groups: vec![],
+                        },
+                    ],
+                    (Some(setup_fall), None) => vec![Group {
+                        type_: "fall_constraint".to_owned(),
+                        name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                        complex_attributes: hashmap! {
+                            "values".to_owned() => vec![Value::FloatGroup(setup_fall.iter().cloned().collect())],
+                        },
+                        simple_attributes: HashMap::new(),
+                        groups: vec![],
+                    }],
+                    (None, Some(setup_rise)) => vec![Group {
+                        type_: "rise_constraint".to_owned(),
+                        name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                        complex_attributes: hashmap! {
+                            "values".to_owned() => vec![Value::FloatGroup(setup_rise.iter().cloned().collect())],
+                        },
+                        simple_attributes: HashMap::new(),
+                        groups: vec![],
+                    }],
+                    (None, None) => continue,
+                };
+                inpin.groups.push(Group {
+                    type_: "timing".to_owned(),
+                    name: "".to_owned(),
+                    simple_attributes: hashmap! {
+                        "related_pin".to_owned() => Value::String(clock_name.to_owned()),
+                        "timing_type".to_owned() => Value::String("setup_rising".to_owned()),
+                    },
+                    complex_attributes: HashMap::new(),
+                    groups: constraint_values,
+                });
+            }
+            lut_templates.insert(ref_arc.lut_template);
+        } else {
+            eprintln!(
+                "Failed to process cell {} of library {}: no reference arc found",
+                cell_name, lib.name
+            );
+            continue;
         }
-    }
+    } // cell
+    let mut new_lut_templates: Vec<Group> = lib
+        .groups
+        .iter()
+        .filter(|g| g.type_ == "lu_table_template" && lut_templates.contains(&g.name))
+        .flat_map(|g| {
+            vec![
+                Group {
+                    type_: "lu_table_template".to_owned(),
+                    name: format!("{}_pseudo_constraint", g.name),
+                    simple_attributes: hashmap! {
+                        "variable_1".to_owned() => Value::String("constrained_pin_transition".to_owned()),
+                    },
+                    complex_attributes: hashmap! {
+                        "index_1".to_owned() => g.complex_attributes["index_1"].clone(),
+                    },
+                    groups: vec![],
+                },
+                Group {
+                    type_: "lu_table_template".to_owned(),
+                    name: format!("{}_pseudo_delay", g.name),
+                    simple_attributes: hashmap! {
+                        "variable_1".to_owned() => Value::String("total_output_net_capacitance".to_owned()),
+                    },
+                    complex_attributes: hashmap! {
+                        "index_1".to_owned() => g.complex_attributes["index_2"].clone(),
+                    },
+                    groups: vec![],
+                },
+            ]
+        }).collect();
+    lib.groups.append(&mut new_lut_templates);
 }
