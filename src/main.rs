@@ -103,12 +103,10 @@ fn cell_qualifies(cell: &Cell, clock_name: &str) -> bool {
 fn is_output_pin(pin: &Pin) -> bool {
     pin.simple_attributes
         .get("direction")
-        .map(|x| {
-            if let Value::String(v) = x {
-                v == "output"
-            } else {
-                false
-            }
+        .map(|x| match x {
+            Value::String(v) => v == "output",
+            Value::Expression(v) => v == "output",
+            _ => false,
         })
         .unwrap_or(false)
 }
@@ -116,12 +114,10 @@ fn is_output_pin(pin: &Pin) -> bool {
 fn is_input_pin(pin: &Pin) -> bool {
     pin.simple_attributes
         .get("direction")
-        .map(|x| {
-            if let Value::String(v) = x {
-                v == "input"
-            } else {
-                false
-            }
+        .map(|x| match x {
+            Value::String(v) => v == "input",
+            Value::Expression(v) => v == "input",
+            _ => false,
         })
         .unwrap_or(false)
 }
@@ -301,20 +297,11 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 outpin.groups.push(Group {
                     type_: "timing".to_owned(),
                     name: "".to_owned(),
-                    simple_attributes: HashMap::from_iter([
-                        (
-                            "related_pin".to_owned(),
-                            Value::String(clock_name.to_owned()),
-                        ),
-                        (
-                            "timing_sense".to_owned(),
-                            Value::String("non_unate".to_owned()),
-                        ),
-                        (
-                            "timing_type".to_owned(),
-                            Value::String("rising_edge".to_owned()),
-                        ),
-                    ]),
+                    simple_attributes: hashmap! {
+                        "related_pin".to_owned() => Value::String(clock_name.to_owned()),
+                        "timing_sense".to_owned() => Value::Expression("non_unate".to_owned()),
+                        "timing_type".to_owned() => Value::Expression("rising_edge".to_owned()),
+                    },
                     complex_attributes: HashMap::new(),
                     groups: vec![
                         Group {
@@ -482,7 +469,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     name: "".to_owned(),
                     simple_attributes: hashmap! {
                         "related_pin".to_owned() => Value::String(clock_name.to_owned()),
-                        "timing_type".to_owned() => Value::String("setup_rising".to_owned()),
+                        "timing_type".to_owned() => Value::Expression("setup_rising".to_owned()),
                     },
                     complex_attributes: HashMap::new(),
                     groups: constraint_values,
@@ -507,7 +494,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     type_: "lu_table_template".to_owned(),
                     name: format!("{}_pseudo_constraint", g.name),
                     simple_attributes: hashmap! {
-                        "variable_1".to_owned() => Value::String("constrained_pin_transition".to_owned()),
+                        "variable_1".to_owned() => Value::Expression("constrained_pin_transition".to_owned()),
                     },
                     complex_attributes: hashmap! {
                         "index_1".to_owned() => g.complex_attributes["index_1"].clone(),
@@ -518,7 +505,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     type_: "lu_table_template".to_owned(),
                     name: format!("{}_pseudo_delay", g.name),
                     simple_attributes: hashmap! {
-                        "variable_1".to_owned() => Value::String("total_output_net_capacitance".to_owned()),
+                        "variable_1".to_owned() => Value::Expression("total_output_net_capacitance".to_owned()),
                     },
                     complex_attributes: hashmap! {
                         "index_1".to_owned() => g.complex_attributes["index_2"].clone(),
