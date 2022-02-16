@@ -318,7 +318,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     complex_attributes: BTreeMap::new(),
                     groups: vec![
                         Group {
-                            type_: "rise_trans".to_owned(),
+                            type_: "rise_transition".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
                             simple_attributes: BTreeMap::new(),
                             complex_attributes: btreemap! {
@@ -330,7 +330,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                             groups: vec![],
                         },
                         Group {
-                            type_: "fall_trans".to_owned(),
+                            type_: "fall_transition".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
                             simple_attributes: BTreeMap::new(),
                             complex_attributes: btreemap! {
