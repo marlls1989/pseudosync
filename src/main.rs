@@ -479,6 +479,10 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     }],
                     (None, None) => continue,
                 };
+                inpin.simple_attributes.insert(
+                    "next_state_type".to_owned(),
+                    Value::Expression("data".to_owned()),
+                );
                 inpin.groups.push(Group {
                     type_: "timing".to_owned(),
                     name: "".to_owned(),
@@ -490,7 +494,9 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     groups: constraint_values,
                 });
             } // inpin
+              // storing lut_template name for later inclusing in liberty file
             lut_templates.insert(ref_arc.lut_template);
+            // fixing latch group on ff model
             if !latch {
                 for g in cell.groups.iter_mut().filter(|g| g.type_ == "latch") {
                     g.type_ = "ff".to_owned();
