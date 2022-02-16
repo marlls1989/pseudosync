@@ -480,7 +480,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     (None, None) => continue,
                 };
                 inpin.simple_attributes.insert(
-                    "next_state_type".to_owned(),
+                    "nextstate_type".to_owned(),
                     Value::Expression("data".to_owned()),
                 );
                 inpin.groups.push(Group {
