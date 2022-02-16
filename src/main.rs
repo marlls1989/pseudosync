@@ -9,7 +9,7 @@ use ndarray::prelude::*;
 use regex::Regex;
 use simple_error::simple_error;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     error::Error,
     fs::File,
     io::{stdin, stdout, BufWriter, Read, Write},
@@ -180,6 +180,15 @@ where
         })
 }
 
+fn restore_arc(slew_dependent: &Array1<f64>, capacitance_dependent: &Array1<f64>) -> Array2<f64> {
+    let cap: Array2<f64> =
+        Array::ones((slew_dependent.len(), capacitance_dependent.len())) * capacitance_dependent;
+    let slw: Array2<f64> =
+        Array::ones((capacitance_dependent.len(), slew_dependent.len())) * slew_dependent;
+
+    cap + slw.t()
+}
+
 fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latch: bool) {
     eprintln!("Processing library {}", lib.name);
 
@@ -192,7 +201,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
     {
         eprintln!("Processing cell {}", cell_name);
 
-        let mut ref_arc: HashMap<String, RefArc> = HashMap::new();
+        let mut ref_arcs: BTreeMap<String, RefArc> = BTreeMap::new();
 
         // Map related_pin to timing table
         let mut cell_rise_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
@@ -258,11 +267,15 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                     &cell_fall,
                     &rise_trans,
                     &fall_trans,
-                    ref_arc.get(outpin_name),
+                    ref_arcs.get(outpin_name),
                 ) {
+                    eprintln!(
+                        "  Pin {} selected as reference arc for output {}",
+                        related_pin, outpin_name
+                    );
                     let col = cell_rise.len_of(Axis(1)) / 2;
                     let row = cell_rise.len_of(Axis(0)) / 2;
-                    ref_arc.insert(
+                    ref_arcs.insert(
                         outpin_name.clone(),
                         RefArc {
                             col,
@@ -285,7 +298,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 }
             } // timing_group
 
-            if let Some(ref_arc) = ref_arc.get(outpin_name) {
+            if let Some(ref_arc) = ref_arcs.get(outpin_name) {
                 // if creating a pseudo_flop model, erase the original arcs and
                 if !latch {
                     outpin.groups.retain(|x| {
@@ -297,18 +310,18 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 outpin.groups.push(Group {
                     type_: "timing".to_owned(),
                     name: "".to_owned(),
-                    simple_attributes: hashmap! {
+                    simple_attributes: btreemap! {
                         "related_pin".to_owned() => Value::String(clock_name.to_owned()),
                         "timing_sense".to_owned() => Value::Expression("non_unate".to_owned()),
                         "timing_type".to_owned() => Value::Expression("rising_edge".to_owned()),
                     },
-                    complex_attributes: HashMap::new(),
+                    complex_attributes: BTreeMap::new(),
                     groups: vec![
                         Group {
                             type_: "rise_trans".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: HashMap::new(),
-                            complex_attributes: hashmap! {
+                            simple_attributes: BTreeMap::new(),
+                            complex_attributes: btreemap! {
                                 "values".to_owned() =>
                                 vec![Value::FloatGroup(
                                     ref_arc.rise_trans.iter().cloned().collect(),
@@ -319,8 +332,8 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                         Group {
                             type_: "fall_trans".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: HashMap::new(),
-                            complex_attributes: hashmap! {
+                            simple_attributes: BTreeMap::new(),
+                            complex_attributes: btreemap! {
                                 "values".to_owned() =>
                                 vec![Value::FloatGroup(
                                     ref_arc.fall_trans.iter().cloned().collect(),
@@ -331,8 +344,8 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                         Group {
                             type_: "cell_rise".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: HashMap::new(),
-                            complex_attributes: hashmap! {
+                            simple_attributes: BTreeMap::new(),
+                            complex_attributes: btreemap! {
                                 "values".to_owned() =>
                                 vec![Value::FloatGroup(
                                     ref_arc.cell_rise.iter().cloned().collect(),
@@ -343,8 +356,8 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                         Group {
                             type_: "cell_fall".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: HashMap::new(),
-                            complex_attributes: hashmap! {
+                            simple_attributes: BTreeMap::new(),
+                            complex_attributes: btreemap! {
                                 "values".to_owned() =>
                                 vec![Value::FloatGroup(
                                     ref_arc.cell_fall.iter().cloned().collect(),
@@ -363,8 +376,9 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
             }
         } // outpin
 
-        if let Some(ref_arc) = mean_reference_arc(ref_arc.into_values()) {
+        if let Some(ref_arc) = mean_reference_arc(ref_arcs.clone().into_values()) {
             let setup_rise: BTreeMap<String, Array1<f64>> = cell_rise_arcs
+                .clone()
                 .into_iter()
                 .group_by(|((src, _), _)| src.clone())
                 .into_iter()
@@ -390,6 +404,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 .collect();
 
             let setup_fall: BTreeMap<String, Array1<f64>> = cell_fall_arcs
+                .clone()
                 .into_iter()
                 .group_by(|((src, _), _)| src.clone())
                 .into_iter()
@@ -428,38 +443,38 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                         Group {
                             type_: "rise_constraint".to_owned(),
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                            complex_attributes: hashmap! {
+                            complex_attributes: btreemap! {
                             "values".to_owned() => vec![Value::FloatGroup(setup_rise.iter().cloned().collect())],
                             },
-                            simple_attributes: HashMap::new(),
+                            simple_attributes: BTreeMap::new(),
                             groups: vec![],
                         },
                         Group {
                             type_: "fall_constraint".to_owned(),
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                            complex_attributes: hashmap! {
+                            complex_attributes: btreemap! {
                             "values".to_owned() => vec![Value::FloatGroup(setup_fall.iter().cloned().collect())],
                             },
-                            simple_attributes: HashMap::new(),
+                            simple_attributes: BTreeMap::new(),
                             groups: vec![],
                         },
                     ],
                     (Some(setup_fall), None) => vec![Group {
                         type_: "fall_constraint".to_owned(),
                         name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                        complex_attributes: hashmap! {
+                        complex_attributes: btreemap! {
                             "values".to_owned() => vec![Value::FloatGroup(setup_fall.iter().cloned().collect())],
                         },
-                        simple_attributes: HashMap::new(),
+                        simple_attributes: BTreeMap::new(),
                         groups: vec![],
                     }],
                     (None, Some(setup_rise)) => vec![Group {
                         type_: "rise_constraint".to_owned(),
                         name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                        complex_attributes: hashmap! {
+                        complex_attributes: btreemap! {
                             "values".to_owned() => vec![Value::FloatGroup(setup_rise.iter().cloned().collect())],
                         },
-                        simple_attributes: HashMap::new(),
+                        simple_attributes: BTreeMap::new(),
                         groups: vec![],
                     }],
                     (None, None) => continue,
@@ -467,15 +482,48 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 inpin.groups.push(Group {
                     type_: "timing".to_owned(),
                     name: "".to_owned(),
-                    simple_attributes: hashmap! {
+                    simple_attributes: btreemap! {
                         "related_pin".to_owned() => Value::String(clock_name.to_owned()),
                         "timing_type".to_owned() => Value::Expression("setup_rising".to_owned()),
                     },
-                    complex_attributes: HashMap::new(),
+                    complex_attributes: BTreeMap::new(),
                     groups: constraint_values,
                 });
-            }
+            } // inpin
             lut_templates.insert(ref_arc.lut_template);
+            if !latch {
+                for g in cell.groups.iter_mut().filter(|g| g.type_ == "latch") {
+                    g.type_ = "ff".to_owned();
+
+                    if let Some(clock) = g.simple_attributes.remove("enable") {
+                        g.simple_attributes.insert("clocked_on".to_owned(), clock);
+                    }
+
+                    if let Some(vf) = g.simple_attributes.remove("data_in") {
+                        g.simple_attributes.insert("next_state".to_owned(), vf);
+                    }
+                }
+            }
+            let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_rise_arcs
+                .iter()
+                .map(|((src, dst), val)| {
+                    let ref capacitance_dependent = ref_arcs[dst].cell_rise;
+                    let ref slew_dependent = setup_rise[src];
+                    let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
+
+                    ((src.clone(), dst.clone()), reconstructed_arc - val)
+                })
+                .collect();
+            let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_fall_arcs
+                .iter()
+                .map(|((src, dst), val)| {
+                    let ref capacitance_dependent = ref_arcs[dst].cell_fall;
+                    let ref slew_dependent = setup_fall[src];
+                    let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
+
+                    ((src.clone(), dst.clone()), reconstructed_arc - val)
+                })
+                .collect();
         } else {
             eprintln!(
                 "Failed to process cell {} of library {}: no reference arc found",
@@ -493,10 +541,10 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 Group {
                     type_: "lu_table_template".to_owned(),
                     name: format!("{}_pseudo_constraint", g.name),
-                    simple_attributes: hashmap! {
+                    simple_attributes: btreemap! {
                         "variable_1".to_owned() => Value::Expression("constrained_pin_transition".to_owned()),
                     },
-                    complex_attributes: hashmap! {
+                    complex_attributes: btreemap! {
                         "index_1".to_owned() => g.complex_attributes["index_1"].clone(),
                     },
                     groups: vec![],
@@ -504,10 +552,10 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 Group {
                     type_: "lu_table_template".to_owned(),
                     name: format!("{}_pseudo_delay", g.name),
-                    simple_attributes: hashmap! {
+                    simple_attributes: btreemap! {
                         "variable_1".to_owned() => Value::Expression("total_output_net_capacitance".to_owned()),
                     },
-                    complex_attributes: hashmap! {
+                    complex_attributes: btreemap! {
                         "index_1".to_owned() => g.complex_attributes["index_2"].clone(),
                     },
                     groups: vec![],
