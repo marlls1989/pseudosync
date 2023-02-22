@@ -100,7 +100,7 @@ fn write_liberty_file(path: Option<&Path>, liberty: &LibertyAst) -> Result<(), B
 fn cell_qualifies(cell: &Group, clock_name: &str) -> bool {
     cell.subgroups
         .iter()
-        .any(|group| group.type_ == "latch" || group.type_ == "latch_block")
+        .any(|group| LATCH_REGEX.is_match(&group.type_))
         && cell.iter_pins().any(|pin| pin.name == clock_name)
 }
 
