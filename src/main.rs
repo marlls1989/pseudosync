@@ -551,7 +551,7 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     ((src.clone(), dst.clone()), reconstructed_arc - val)
                 })
                 .collect();
-            let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_fall_arcs
+            let fall_error: BTreeMap<(String, String), Array2<f64>> = cell_fall_arcs
                 .iter()
                 .map(|((src, dst), val)| {
                     let ref capacitance_dependent = ref_arcs[dst].cell_fall;
@@ -561,6 +561,11 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     ((src.clone(), dst.clone()), reconstructed_arc - val)
                 })
                 .collect();
+
+            eprintln!(
+                "rise error: {:?}\n fall error: {:?}",
+                rise_error, fall_error
+            );
         } else {
             eprintln!(
                 "Failed to process cell {} of library {}: no reference arc found",
