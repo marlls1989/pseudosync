@@ -192,7 +192,7 @@ fn restore_arc(slew_dependent: &Array1<f64>, capacitance_dependent: &Array1<f64>
     let slw: Array2<f64> =
         Array::ones((capacitance_dependent.len(), slew_dependent.len())) * slew_dependent;
 
-    cap + slw.t()
+    slw + cap.t()
 }
 
 fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch: bool) {
@@ -610,5 +610,6 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
             ]
         })
         .collect();
-    lib.subgroups.append(&mut new_lut_templates);
+    new_lut_templates.append(&mut lib.subgroups);
+    lib.subgroups = new_lut_templates;
 }
