@@ -1,10 +1,11 @@
+use indexmap::IndexMap;
 use itertools::Itertools;
+use lazy_static::lazy_static;
 use liberty_parse::{
     self,
     ast::{LibertyAst, Value},
-    liberty::{Cell, Group, Liberty, Library, Pin},
+    liberty::{Attribute, Group, Liberty},
 };
-use maplit::*;
 use ndarray::prelude::*;
 use regex::Regex;
 use simple_error::simple_error;
@@ -16,6 +17,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use structopt::StructOpt;
+
+lazy_static! {
+    static ref LATCH_REGEX: Regex = Regex::new(r"^latch").unwrap();
+}
 
 #[derive(Debug, StructOpt)]
 struct ProgramOptions {
@@ -92,34 +97,35 @@ fn write_liberty_file(path: Option<&Path>, liberty: &LibertyAst) -> Result<(), B
 }
 
 /// Tests if the cell contains a latch group and a pin with the expected clock_pin name
-fn cell_qualifies(cell: &Cell, clock_name: &str) -> bool {
-    cell.groups.iter().any(|group| group.type_ == "latch")
-        && cell
-            .pins
-            .iter()
-            .any(|(pin_name, _pin)| pin_name == clock_name)
+fn cell_qualifies(cell: &Group, clock_name: &str) -> bool {
+    cell.subgroups
+        .iter()
+        .any(|group| group.type_ == "latch" || group.type_ == "latch_block")
+        && cell.iter_pins().any(|pin| pin.name == clock_name)
 }
 
-fn is_output_pin(pin: &Pin) -> bool {
-    pin.simple_attributes
-        .get("direction")
-        .map(|x| match x {
-            Value::String(v) => v == "output",
-            Value::Expression(v) => v == "output",
-            _ => false,
-        })
-        .unwrap_or(false)
+fn is_output_pin(pin: &Group) -> bool {
+    (pin.type_ == "pin" || pin.type_ == "bundle")
+        && pin
+            .simple_attribute("direction")
+            .map(|x| match x {
+                Value::String(v) => v == "output",
+                Value::Expression(v) => v == "output",
+                _ => false,
+            })
+            .unwrap_or(false)
 }
 
-fn is_input_pin(pin: &Pin) -> bool {
-    pin.simple_attributes
-        .get("direction")
-        .map(|x| match x {
-            Value::String(v) => v == "input",
-            Value::Expression(v) => v == "input",
-            _ => false,
-        })
-        .unwrap_or(false)
+fn is_input_pin(pin: &Group) -> bool {
+    (pin.type_ == "pin" || pin.type_ == "bundle")
+        & pin
+            .simple_attribute("direction")
+            .map(|x| match x {
+                Value::String(v) => v == "input",
+                Value::Expression(v) => v == "input",
+                _ => false,
+            })
+            .unwrap_or(false)
 }
 
 fn mean_timingtable<'a, I>(groups: I) -> Option<Array2<f64>>
@@ -131,7 +137,7 @@ where
         .into_iter()
         .map(|g| {
             n += 1.0;
-            let ref v = g.complex_attributes["values"];
+            let v = g.complex_attribute("values").unwrap();
             let m: Vec<f64> = v
                 .iter()
                 .flat_map(|v| match v {
@@ -189,16 +195,17 @@ fn restore_arc(slew_dependent: &Array1<f64>, capacitance_dependent: &Array1<f64>
     cap + slw.t()
 }
 
-fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latch: bool) {
+fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch: bool) {
     eprintln!("Processing library {}", lib.name);
 
     let mut lut_templates: HashSet<String> = HashSet::new();
+    let lib_name = lib.name.clone();
 
-    for (cell_name, cell) in lib
-        .cells
-        .iter_mut()
-        .filter(|(_, x)| cell_qualifies(x, clock_name))
+    for cell in lib
+        .iter_cells_mut()
+        .filter(|x| cell_qualifies(x, clock_name))
     {
+        let cell_name = cell.name.clone();
         eprintln!("Processing cell {}", cell_name);
 
         let mut ref_arcs: BTreeMap<String, RefArc> = BTreeMap::new();
@@ -208,11 +215,15 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
         let mut cell_fall_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
 
         // process each output pin of the cell individually
-        for (outpin_name, outpin) in cell.pins.iter_mut().filter(|(_, pin)| is_output_pin(pin)) {
+        for outpin in cell.iter_subgroups_mut().filter(|pin| is_output_pin(pin)) {
+            let outpin_name = &outpin.name;
             // for each timing group, capture the characterisation timing tables
             // this loop preserves the original liberty file
-            for timing_group in outpin.groups.iter().filter(|g| g.type_ == "timing") {
-                let related_pin = timing_group.simple_attributes["related_pin"].string();
+            for timing_group in outpin.iter_subgroups_of_type("timing") {
+                let related_pin = timing_group
+                    .simple_attribute("related_pin")
+                    .unwrap()
+                    .string();
 
                 // If related_pin is a reset pin, ignore the arc
                 if reset_name.is_match(&related_pin) {
@@ -222,8 +233,7 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 let mut lut_template = None;
 
                 let (cell_rise, others): (Vec<&Group>, Vec<&Group>) = timing_group
-                    .groups
-                    .iter()
+                    .iter_subgroups()
                     .partition(|g| g.type_ == "cell_rise");
                 if let (Some(group), None) = (cell_rise.first(), &lut_template) {
                     lut_template = Some(group.name.clone())
@@ -301,76 +311,83 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
             if let Some(ref_arc) = ref_arcs.get(outpin_name) {
                 // if creating a pseudo_flop model, erase the original arcs and
                 if !latch {
-                    outpin.groups.retain(|x| {
+                    outpin.subgroups.retain(|x| {
                         x.type_ != "timing"
-                            || reset_name.is_match(&x.simple_attributes["related_pin"].string())
+                            || reset_name.is_match(
+                                &x.simple_attribute("related_pin")
+                                    .map_or("".to_owned(), |x| x.string()),
+                            )
                     });
                 }
 
-                outpin.groups.push(Group {
+                outpin.subgroups.push(Group {
                     type_: "timing".to_owned(),
                     name: "".to_owned(),
-                    simple_attributes: btreemap! {
-                        "related_pin".to_owned() => Value::String(clock_name.to_owned()),
-                        "timing_sense".to_owned() => Value::Expression("non_unate".to_owned()),
-                        "timing_type".to_owned() => Value::Expression("rising_edge".to_owned()),
-                    },
-                    complex_attributes: BTreeMap::new(),
-                    groups: vec![
+                    attributes: IndexMap::from([
+                        (
+                            "related_pin".to_owned(),
+                            Attribute::Simple(Value::String(clock_name.to_owned())),
+                        ),
+                        (
+                            "timing_sense".to_owned(),
+                            Attribute::Simple(Value::Expression("non_unate".to_owned())),
+                        ),
+                        (
+                            "timing_type".to_owned(),
+                            Attribute::Simple(Value::Expression("rising_edge".to_owned())),
+                        ),
+                    ]),
+                    subgroups: vec![
                         Group {
                             type_: "rise_transition".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: BTreeMap::new(),
-                            complex_attributes: btreemap! {
-                                "values".to_owned() =>
-                                vec![Value::FloatGroup(
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.rise_trans.iter().cloned().collect(),
-                                )],
-                            },
-                            groups: vec![],
+                                )]),
+                            )]),
+                            subgroups: vec![],
                         },
                         Group {
                             type_: "fall_transition".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: BTreeMap::new(),
-                            complex_attributes: btreemap! {
-                                "values".to_owned() =>
-                                vec![Value::FloatGroup(
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.fall_trans.iter().cloned().collect(),
-                                )],
-                            },
-                            groups: vec![],
+                                )]),
+                            )]),
+                            subgroups: vec![],
                         },
                         Group {
                             type_: "cell_rise".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: BTreeMap::new(),
-                            complex_attributes: btreemap! {
-                                "values".to_owned() =>
-                                vec![Value::FloatGroup(
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.cell_rise.iter().cloned().collect(),
-                                )],
-                            },
-                            groups: vec![],
+                                )]),
+                            )]),
+                            subgroups: vec![],
                         },
                         Group {
                             type_: "cell_fall".to_owned(),
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
-                            simple_attributes: BTreeMap::new(),
-                            complex_attributes: btreemap! {
-                                "values".to_owned() =>
-                                vec![Value::FloatGroup(
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.cell_fall.iter().cloned().collect(),
-                                )],
-                            },
-                            groups: vec![],
+                                )]),
+                            )]),
+                            subgroups: vec![],
                         },
                     ],
                 });
             } else {
                 eprintln!(
                     "Failed to process outpin {} in cell {} of library {}: no usable reference arc could be found", 
-                    outpin_name, cell_name, lib.name
+                    outpin_name, cell_name, lib_name
                 );
                 continue;
             }
@@ -430,83 +447,97 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
                 .collect();
 
             // Insert timing constraints for every pin
-            for (inpin_name, inpin) in cell
-                .pins
-                .iter_mut()
-                .filter(|(k, v)| is_input_pin(v) && !reset_name.is_match(k))
+            for inpin in cell
+                .iter_subgroups_mut()
+                .filter(|v| is_input_pin(v) && !reset_name.is_match(&v.name))
             {
-                let constraint_values = match (
-                    setup_fall.get(inpin_name),
-                    setup_rise.get(inpin_name),
-                ) {
-                    (Some(setup_fall), Some(setup_rise)) => vec![
-                        Group {
-                            type_: "rise_constraint".to_owned(),
-                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                            complex_attributes: btreemap! {
-                            "values".to_owned() => vec![Value::FloatGroup(setup_rise.iter().cloned().collect())],
+                let inpin_name = &inpin.name;
+                let constraint_values =
+                    match (setup_fall.get(inpin_name), setup_rise.get(inpin_name)) {
+                        (Some(setup_fall), Some(setup_rise)) => vec![
+                            Group {
+                                type_: "rise_constraint".to_owned(),
+                                name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                                attributes: IndexMap::from([(
+                                    "values".to_owned(),
+                                    Attribute::Complex(vec![Value::FloatGroup(
+                                        setup_rise.iter().cloned().collect(),
+                                    )]),
+                                )]),
+                                subgroups: vec![],
                             },
-                            simple_attributes: BTreeMap::new(),
-                            groups: vec![],
-                        },
-                        Group {
+                            Group {
+                                type_: "fall_constraint".to_owned(),
+                                name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                                attributes: IndexMap::from([(
+                                    "values".to_owned(),
+                                    Attribute::Complex(vec![Value::FloatGroup(
+                                        setup_fall.iter().cloned().collect(),
+                                    )]),
+                                )]),
+                                subgroups: vec![],
+                            },
+                        ],
+                        (Some(setup_fall), None) => vec![Group {
                             type_: "fall_constraint".to_owned(),
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                            complex_attributes: btreemap! {
-                            "values".to_owned() => vec![Value::FloatGroup(setup_fall.iter().cloned().collect())],
-                            },
-                            simple_attributes: BTreeMap::new(),
-                            groups: vec![],
-                        },
-                    ],
-                    (Some(setup_fall), None) => vec![Group {
-                        type_: "fall_constraint".to_owned(),
-                        name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                        complex_attributes: btreemap! {
-                            "values".to_owned() => vec![Value::FloatGroup(setup_fall.iter().cloned().collect())],
-                        },
-                        simple_attributes: BTreeMap::new(),
-                        groups: vec![],
-                    }],
-                    (None, Some(setup_rise)) => vec![Group {
-                        type_: "rise_constraint".to_owned(),
-                        name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                        complex_attributes: btreemap! {
-                            "values".to_owned() => vec![Value::FloatGroup(setup_rise.iter().cloned().collect())],
-                        },
-                        simple_attributes: BTreeMap::new(),
-                        groups: vec![],
-                    }],
-                    (None, None) => continue,
-                };
-                inpin.simple_attributes.insert(
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
+                                    setup_fall.iter().cloned().collect(),
+                                )]),
+                            )]),
+                            subgroups: vec![],
+                        }],
+                        (None, Some(setup_rise)) => vec![Group {
+                            type_: "rise_constraint".to_owned(),
+                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
+                                    setup_rise.iter().cloned().collect(),
+                                )]),
+                            )]),
+                            subgroups: vec![],
+                        }],
+                        (None, None) => continue,
+                    };
+                inpin.attributes.insert(
                     "nextstate_type".to_owned(),
-                    Value::Expression("data".to_owned()),
+                    Attribute::Simple(Value::Expression("data".to_owned())),
                 );
-                inpin.groups.push(Group {
+                inpin.subgroups.push(Group {
                     type_: "timing".to_owned(),
                     name: "".to_owned(),
-                    simple_attributes: btreemap! {
-                        "related_pin".to_owned() => Value::String(clock_name.to_owned()),
-                        "timing_type".to_owned() => Value::Expression("setup_rising".to_owned()),
-                    },
-                    complex_attributes: BTreeMap::new(),
-                    groups: constraint_values,
+                    attributes: IndexMap::from([
+                        (
+                            "related_pin".to_owned(),
+                            Attribute::Simple(Value::String(clock_name.to_owned())),
+                        ),
+                        (
+                            "timing_type".to_owned(),
+                            Attribute::Simple(Value::Expression("setup_rising".to_owned())),
+                        ),
+                    ]),
+                    subgroups: constraint_values,
                 });
             } // inpin
               // storing lut_template name for later inclusing in liberty file
             lut_templates.insert(ref_arc.lut_template);
             // fixing latch group on ff model
             if !latch {
-                for g in cell.groups.iter_mut().filter(|g| g.type_ == "latch") {
-                    g.type_ = "ff".to_owned();
+                for g in cell
+                    .iter_subgroups_mut()
+                    .filter(|g| LATCH_REGEX.is_match(&g.type_))
+                {
+                    g.type_ = LATCH_REGEX.replace(&g.type_, "ff").into();
 
-                    if let Some(clock) = g.simple_attributes.remove("enable") {
-                        g.simple_attributes.insert("clocked_on".to_owned(), clock);
+                    if let Some(clock) = g.attributes.remove("enable") {
+                        g.attributes.insert("clocked_on".to_owned(), clock);
                     }
 
-                    if let Some(vf) = g.simple_attributes.remove("data_in") {
-                        g.simple_attributes.insert("next_state".to_owned(), vf);
+                    if let Some(vf) = g.attributes.remove("data_in") {
+                        g.attributes.insert("next_state".to_owned(), vf);
                     }
                 }
             }
@@ -533,40 +564,46 @@ fn process_library(lib: &mut Library, clock_name: &str, reset_name: &Regex, latc
         } else {
             eprintln!(
                 "Failed to process cell {} of library {}: no reference arc found",
-                cell_name, lib.name
+                cell_name, lib_name
             );
             continue;
         }
     } // cell
     let mut new_lut_templates: Vec<Group> = lib
-        .groups
-        .iter()
+        .iter_subgroups()
         .filter(|g| g.type_ == "lu_table_template" && lut_templates.contains(&g.name))
         .flat_map(|g| {
             vec![
                 Group {
                     type_: "lu_table_template".to_owned(),
                     name: format!("{}_pseudo_constraint", g.name),
-                    simple_attributes: btreemap! {
-                        "variable_1".to_owned() => Value::Expression("constrained_pin_transition".to_owned()),
-                    },
-                    complex_attributes: btreemap! {
-                        "index_1".to_owned() => g.complex_attributes["index_1"].clone(),
-                    },
-                    groups: vec![],
+                    attributes: IndexMap::from([
+                        (
+                            "variable_1".to_owned(),
+                            Attribute::Simple(Value::Expression(
+                                "constrained_pin_transition".to_owned(),
+                            )),
+                        ),
+                        ("index_1".to_owned(), g.attributes["index_1"].clone()),
+                    ]),
+                    subgroups: vec![],
                 },
                 Group {
                     type_: "lu_table_template".to_owned(),
                     name: format!("{}_pseudo_delay", g.name),
-                    simple_attributes: btreemap! {
-                        "variable_1".to_owned() => Value::Expression("total_output_net_capacitance".to_owned()),
-                    },
-                    complex_attributes: btreemap! {
-                        "index_1".to_owned() => g.complex_attributes["index_2"].clone(),
-                    },
-                    groups: vec![],
+                    attributes: IndexMap::from([
+                        (
+                            "variable_1".to_owned(),
+                            Attribute::Simple(Value::Expression(
+                                "total_output_net_capacitance".to_owned(),
+                            )),
+                        ),
+                        ("index_1".to_owned(), g.attributes["index_2"].clone()),
+                    ]),
+                    subgroups: vec![],
                 },
             ]
-        }).collect();
-    lib.groups.append(&mut new_lut_templates);
+        })
+        .collect();
+    lib.subgroups.append(&mut new_lut_templates);
 }
