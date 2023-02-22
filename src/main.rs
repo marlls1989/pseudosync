@@ -15,11 +15,14 @@ use std::{
     fs::File,
     io::{stdin, stdout, BufWriter, Read, Write},
     path::{Path, PathBuf},
+    sync::RwLock,
 };
 use structopt::StructOpt;
 
 lazy_static! {
     static ref LATCH_REGEX: Regex = Regex::new(r"^latch").unwrap();
+    static ref DEBUG_FILE: RwLock<Result<BufWriter<File>, std::io::Error>> =
+        RwLock::new(File::create("pseudosync.txt").map(|f| BufWriter::new(f)));
 }
 
 #[derive(Debug, StructOpt)]
@@ -541,31 +544,35 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     }
                 }
             }
-            let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_rise_arcs
-                .iter()
-                .map(|((src, dst), val)| {
-                    let ref capacitance_dependent = ref_arcs[dst].cell_rise;
-                    let ref slew_dependent = setup_rise[src];
-                    let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
+            if let Ok(debug_file) = DEBUG_FILE.write().unwrap().as_mut() {
+                let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_rise_arcs
+                    .iter()
+                    .map(|((src, dst), val)| {
+                        let ref capacitance_dependent = ref_arcs[dst].cell_rise;
+                        let ref slew_dependent = setup_rise[src];
+                        let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
 
-                    ((src.clone(), dst.clone()), reconstructed_arc - val)
-                })
-                .collect();
-            let fall_error: BTreeMap<(String, String), Array2<f64>> = cell_fall_arcs
-                .iter()
-                .map(|((src, dst), val)| {
-                    let ref capacitance_dependent = ref_arcs[dst].cell_fall;
-                    let ref slew_dependent = setup_fall[src];
-                    let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
+                        ((src.clone(), dst.clone()), reconstructed_arc - val)
+                    })
+                    .collect();
+                let fall_error: BTreeMap<(String, String), Array2<f64>> = cell_fall_arcs
+                    .iter()
+                    .map(|((src, dst), val)| {
+                        let ref capacitance_dependent = ref_arcs[dst].cell_fall;
+                        let ref slew_dependent = setup_fall[src];
+                        let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
 
-                    ((src.clone(), dst.clone()), reconstructed_arc - val)
-                })
-                .collect();
+                        ((src.clone(), dst.clone()), reconstructed_arc - val)
+                    })
+                    .collect();
 
-            eprintln!(
-                "rise error: {:?}\n fall error: {:?}",
-                rise_error, fall_error
-            );
+                let _ = writeln!(debug_file, "cell {} of library {}", cell_name, lib_name);
+                let _ = writeln!(
+                    debug_file,
+                    "rise error: {:?}\n fall error: {:?}",
+                    rise_error, fall_error
+                );
+            }
         } else {
             eprintln!(
                 "Failed to process cell {} of library {}: no reference arc found",
