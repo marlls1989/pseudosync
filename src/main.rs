@@ -16,7 +16,6 @@ use std::{
     error::Error,
     fs::File,
     io::{stdin, stdout, BufWriter, Read, Write},
-    iter,
     path::{Path, PathBuf},
     sync::RwLock,
 };
@@ -200,7 +199,7 @@ fn restore_arc(slew_dependent: &Array1<f64>, capacitance_dependent: &Array1<f64>
     let slw: Array2<f64> =
         Array::ones((capacitance_dependent.len(), slew_dependent.len())) * slew_dependent;
 
-    slw + cap.t()
+    cap + slw.t()
 }
 
 fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch: bool) {
@@ -551,26 +550,36 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                 }
             }
             if let Ok(debug_file) = DEBUG_FILE.as_ref() {
-                let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_rise_arcs
-                    .iter()
-                    .map(|((src, dst), val)| {
-                        let ref capacitance_dependent = ref_arcs[dst].cell_rise;
-                        let ref slew_dependent = setup_rise[src];
-                        let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
+                let rise_error: BTreeMap<(String, String), (Array2<f64>, Array2<f64>)> =
+                    cell_rise_arcs
+                        .iter()
+                        .map(|((src, dst), val)| {
+                            let ref capacitance_dependent = ref_arcs[dst].cell_rise;
+                            let ref slew_dependent = setup_rise[src];
+                            let reconstructed_arc =
+                                restore_arc(slew_dependent, capacitance_dependent);
 
-                        ((src.clone(), dst.clone()), reconstructed_arc - val)
-                    })
-                    .collect();
-                let fall_error: BTreeMap<(String, String), Array2<f64>> = cell_fall_arcs
-                    .iter()
-                    .map(|((src, dst), val)| {
-                        let ref capacitance_dependent = ref_arcs[dst].cell_fall;
-                        let ref slew_dependent = setup_fall[src];
-                        let reconstructed_arc = restore_arc(slew_dependent, capacitance_dependent);
+                            (
+                                (src.clone(), dst.clone()),
+                                (reconstructed_arc.clone(), reconstructed_arc - val),
+                            )
+                        })
+                        .collect();
+                let fall_error: BTreeMap<(String, String), (Array2<f64>, Array2<f64>)> =
+                    cell_fall_arcs
+                        .iter()
+                        .map(|((src, dst), val)| {
+                            let ref capacitance_dependent = ref_arcs[dst].cell_fall;
+                            let ref slew_dependent = setup_fall[src];
+                            let reconstructed_arc =
+                                restore_arc(slew_dependent, capacitance_dependent);
 
-                        ((src.clone(), dst.clone()), reconstructed_arc - val)
-                    })
-                    .collect();
+                            (
+                                (src.clone(), dst.clone()),
+                                (reconstructed_arc.clone(), reconstructed_arc - val),
+                            )
+                        })
+                        .collect();
 
                 let mut debug_file = debug_file.write().unwrap();
 
@@ -658,10 +667,21 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     let _ = writeln!(debug_file, "{}", table);
                 }
 
-                for (k, v) in &rise_error {
+                for (k, (reconstructed, error)) in &rise_error {
+                    let _ = writeln!(debug_file, "reconstructed rise arc {} -> {}:", k.0, k.1);
+                    let mut table = prettytable::Table::new();
+                    for row in reconstructed.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
+
                     let _ = writeln!(debug_file, "rise error {} -> {}:", k.0, k.1);
                     let mut table = prettytable::Table::new();
-                    for row in v.rows() {
+                    for row in error.rows() {
                         table.add_row(prettytable::Row::new(
                             row.iter()
                                 .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
@@ -671,10 +691,21 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     let _ = writeln!(debug_file, "{}", table);
                 }
 
-                for (k, v) in &fall_error {
+                for (k, (reconstructed, error)) in &fall_error {
+                    let _ = writeln!(debug_file, "reconstructed fall arc {} -> {}:", k.0, k.1);
+                    let mut table = prettytable::Table::new();
+                    for row in reconstructed.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
+
                     let _ = writeln!(debug_file, "fall error {} -> {}:", k.0, k.1);
                     let mut table = prettytable::Table::new();
-                    for row in v.rows() {
+                    for row in error.rows() {
                         table.add_row(prettytable::Row::new(
                             row.iter()
                                 .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
