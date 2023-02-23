@@ -569,16 +569,41 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     .collect();
 
                 let _ = writeln!(debug_file, "cell {} of library {}", cell_name, lib_name);
-                let _ = writeln!(debug_file, "rise arcs: {:?}", cell_rise_arcs);
-                let _ = writeln!(debug_file, "fall arcs: {:?}", cell_fall_arcs);
-                let _ = writeln!(debug_file, "ref arcs: {:?}", ref_arcs);
-                let _ = writeln!(debug_file, "setup rise: {:?}", setup_rise);
-                let _ = writeln!(debug_file, "setup fall: {:?}", setup_fall);
-                let _ = writeln!(
-                    debug_file,
-                    "rise error: {:?}\n fall error: {:?}\n",
-                    rise_error, fall_error
-                );
+                for (k, v) in &cell_rise_arcs {
+                    let _ = writeln!(debug_file, "rise arc {} -> {}:", k.0, k.1);
+                    let _ = writeln!(debug_file, "{}", v);
+                }
+                for (k, v) in &cell_fall_arcs {
+                    let _ = writeln!(debug_file, "fall arc {} -> {}:", k.0, k.1);
+                    let _ = writeln!(debug_file, "{}", v);
+                }
+
+                for (k, v) in &rise_error {
+                    let _ = writeln!(debug_file, "rise error {} -> {}:", k.0, k.1);
+                    let _ = writeln!(debug_file, "{}", v);
+                }
+
+                for (k, v) in &fall_error {
+                    let _ = writeln!(debug_file, "fall error {} -> {}:", k.0, k.1);
+                    let _ = writeln!(debug_file, "{}", v);
+                }
+
+                for (k, v) in &ref_arcs {
+                    let _ = writeln!(debug_file, "ref rise arc {}:", k);
+                    let _ = writeln!(debug_file, "{}", v.cell_rise);
+                    let _ = writeln!(debug_file, "ref fall arc {}:", k);
+                    let _ = writeln!(debug_file, "{}", v.cell_fall);
+                }
+
+                for (k, v) in &setup_rise {
+                    let _ = writeln!(debug_file, "setup rise arc {}:", k);
+                    let _ = writeln!(debug_file, "{}", v);
+                }
+
+                for (k, v) in &setup_fall {
+                    let _ = writeln!(debug_file, "setup fall arc {}:", k);
+                    let _ = writeln!(debug_file, "{}", v);
+                }
             }
         } else {
             eprintln!(
