@@ -21,8 +21,8 @@ use structopt::StructOpt;
 
 lazy_static! {
     static ref LATCH_REGEX: Regex = Regex::new(r"^latch").unwrap();
-    static ref DEBUG_FILE: RwLock<Result<BufWriter<File>, std::io::Error>> =
-        RwLock::new(File::create("pseudosync.txt").map(|f| BufWriter::new(f)));
+    static ref DEBUG_FILE: Result<RwLock<BufWriter<File>>, std::io::Error> =
+        File::create("pseudosync.txt").map(|f| RwLock::new(BufWriter::new(f)));
 }
 
 #[derive(Debug, StructOpt)]
@@ -544,7 +544,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     }
                 }
             }
-            if let Ok(debug_file) = DEBUG_FILE.write().unwrap().as_mut() {
+            if let Ok(debug_file) = DEBUG_FILE.as_ref() {
+                let mut debug_file = debug_file.write().unwrap();
+
                 let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_rise_arcs
                     .iter()
                     .map(|((src, dst), val)| {
@@ -567,9 +569,14 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     .collect();
 
                 let _ = writeln!(debug_file, "cell {} of library {}", cell_name, lib_name);
+                let _ = writeln!(debug_file, "rise arcs: {:?}", cell_rise_arcs);
+                let _ = writeln!(debug_file, "fall arcs: {:?}", cell_fall_arcs);
+                let _ = writeln!(debug_file, "ref arcs: {:?}", ref_arcs);
+                let _ = writeln!(debug_file, "setup rise: {:?}", setup_rise);
+                let _ = writeln!(debug_file, "setup fall: {:?}", setup_fall);
                 let _ = writeln!(
                     debug_file,
-                    "rise error: {:?}\n fall error: {:?}",
+                    "rise error: {:?}\n fall error: {:?}\n",
                     rise_error, fall_error
                 );
             }
