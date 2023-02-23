@@ -14,7 +14,7 @@ use simple_error::simple_error;
 use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{stdin, stdout, BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::RwLock,
@@ -23,8 +23,12 @@ use structopt::StructOpt;
 
 lazy_static! {
     static ref LATCH_REGEX: Regex = Regex::new(r"^latch").unwrap();
-    static ref DEBUG_FILE: Result<RwLock<BufWriter<File>>, std::io::Error> =
-        File::create("pseudosync.txt").map(|f| RwLock::new(BufWriter::new(f)));
+    static ref DEBUG_FILE: Result<RwLock<BufWriter<File>>, std::io::Error> = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .write(true)
+        .open("pseudosync.txt")
+        .map(|f| RwLock::new(BufWriter::new(f)));
 }
 
 #[derive(Debug, StructOpt)]
@@ -423,7 +427,7 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                 .map(|(k, v)| {
                     (
                         k,
-                        v.slice(s![.., ref_arc.col]).to_owned() - ref_arc.rise_trans[ref_arc.col],
+                        v.slice(s![.., ref_arc.col]).to_owned() - ref_arc.cell_rise[ref_arc.col],
                     )
                 })
                 .collect();
@@ -449,7 +453,7 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                 .map(|(k, v)| {
                     (
                         k,
-                        v.slice(s![.., ref_arc.col]).to_owned() - ref_arc.rise_trans[ref_arc.col],
+                        v.slice(s![.., ref_arc.col]).to_owned() - ref_arc.cell_fall[ref_arc.col],
                     )
                 })
                 .collect();
