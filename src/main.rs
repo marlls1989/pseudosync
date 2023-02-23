@@ -1,3 +1,4 @@
+use gpoint::GPoint;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -7,6 +8,7 @@ use liberty_parse::{
     liberty::{Attribute, Group, Liberty},
 };
 use ndarray::prelude::*;
+use prettytable;
 use regex::Regex;
 use simple_error::simple_error;
 use std::{
@@ -571,38 +573,103 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                 let _ = writeln!(debug_file, "cell {} of library {}", cell_name, lib_name);
                 for (k, v) in &cell_rise_arcs {
                     let _ = writeln!(debug_file, "rise arc {} -> {}:", k.0, k.1);
-                    let _ = writeln!(debug_file, "{}", v);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
                 }
                 for (k, v) in &cell_fall_arcs {
                     let _ = writeln!(debug_file, "fall arc {} -> {}:", k.0, k.1);
-                    let _ = writeln!(debug_file, "{}", v);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
                 }
 
                 for (k, v) in &rise_error {
                     let _ = writeln!(debug_file, "rise error {} -> {}:", k.0, k.1);
-                    let _ = writeln!(debug_file, "{}", v);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
                 }
 
                 for (k, v) in &fall_error {
                     let _ = writeln!(debug_file, "fall error {} -> {}:", k.0, k.1);
-                    let _ = writeln!(debug_file, "{}", v);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
                 }
 
                 for (k, v) in &ref_arcs {
                     let _ = writeln!(debug_file, "ref rise arc {}:", k);
-                    let _ = writeln!(debug_file, "{}", v.cell_rise);
+                    let mut table = prettytable::Table::new();
+                    for row in v.cell_rise.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
+
                     let _ = writeln!(debug_file, "ref fall arc {}:", k);
-                    let _ = writeln!(debug_file, "{}", v.cell_fall);
+                    let mut table = prettytable::Table::new();
+                    for row in v.cell_fall.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
                 }
 
                 for (k, v) in &setup_rise {
                     let _ = writeln!(debug_file, "setup rise arc {}:", k);
-                    let _ = writeln!(debug_file, "{}", v);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
                 }
 
                 for (k, v) in &setup_fall {
                     let _ = writeln!(debug_file, "setup fall arc {}:", k);
-                    let _ = writeln!(debug_file, "{}", v);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
                 }
             }
         } else {
