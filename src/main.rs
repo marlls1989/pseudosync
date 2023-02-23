@@ -16,6 +16,7 @@ use std::{
     error::Error,
     fs::File,
     io::{stdin, stdout, BufWriter, Read, Write},
+    iter,
     path::{Path, PathBuf},
     sync::RwLock,
 };
@@ -49,6 +50,7 @@ struct ProgramOptions {
 struct RefArc {
     col: usize,
     row: usize,
+    related_pin: String,
     lut_template: String,
     rise_trans: Array1<f64>,
     fall_trans: Array1<f64>,
@@ -175,6 +177,7 @@ where
             RefArc {
                 col: a.col,
                 row: a.row,
+                related_pin: a.related_pin,
                 lut_template: a.lut_template,
                 rise_trans: a.rise_trans + b.rise_trans,
                 fall_trans: a.fall_trans + b.fall_trans,
@@ -296,6 +299,7 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             col,
                             row,
                             lut_template,
+                            related_pin: related_pin.clone(),
                             cell_fall: cell_fall.slice(s![row, ..]).to_owned(),
                             cell_rise: cell_rise.slice(s![row, ..]).to_owned(),
                             rise_trans: rise_trans.slice(s![row, ..]).to_owned(),
@@ -547,8 +551,6 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                 }
             }
             if let Ok(debug_file) = DEBUG_FILE.as_ref() {
-                let mut debug_file = debug_file.write().unwrap();
-
                 let rise_error: BTreeMap<(String, String), Array2<f64>> = cell_rise_arcs
                     .iter()
                     .map(|((src, dst), val)| {
@@ -569,6 +571,8 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                         ((src.clone(), dst.clone()), reconstructed_arc - val)
                     })
                     .collect();
+
+                let mut debug_file = debug_file.write().unwrap();
 
                 let _ = writeln!(debug_file, "cell {} of library {}", cell_name, lib_name);
                 for (k, v) in &cell_rise_arcs {
@@ -596,34 +600,12 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     let _ = writeln!(debug_file, "{}", table);
                 }
 
-                for (k, v) in &rise_error {
-                    let _ = writeln!(debug_file, "rise error {} -> {}:", k.0, k.1);
-                    let mut table = prettytable::Table::new();
-                    for row in v.rows() {
-                        table.add_row(prettytable::Row::new(
-                            row.iter()
-                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
-                                .collect(),
-                        ));
-                    }
-                    let _ = writeln!(debug_file, "{}", table);
-                }
-
-                for (k, v) in &fall_error {
-                    let _ = writeln!(debug_file, "fall error {} -> {}:", k.0, k.1);
-                    let mut table = prettytable::Table::new();
-                    for row in v.rows() {
-                        table.add_row(prettytable::Row::new(
-                            row.iter()
-                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
-                                .collect(),
-                        ));
-                    }
-                    let _ = writeln!(debug_file, "{}", table);
-                }
-
                 for (k, v) in &ref_arcs {
-                    let _ = writeln!(debug_file, "ref rise arc {}:", k);
+                    let _ = writeln!(
+                        debug_file,
+                        "ref rise arc {} -> {} (row {}):",
+                        v.related_pin, k, v.row
+                    );
                     let mut table = prettytable::Table::new();
                     for row in v.cell_rise.rows() {
                         table.add_row(prettytable::Row::new(
@@ -634,7 +616,11 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     }
                     let _ = writeln!(debug_file, "{}", table);
 
-                    let _ = writeln!(debug_file, "ref fall arc {}:", k);
+                    let _ = writeln!(
+                        debug_file,
+                        "ref fall arc {} -> {} (row {}):",
+                        v.related_pin, k, v.row
+                    );
                     let mut table = prettytable::Table::new();
                     for row in v.cell_fall.rows() {
                         table.add_row(prettytable::Row::new(
@@ -661,6 +647,32 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
 
                 for (k, v) in &setup_fall {
                     let _ = writeln!(debug_file, "setup fall arc {}:", k);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
+                }
+
+                for (k, v) in &rise_error {
+                    let _ = writeln!(debug_file, "rise error {} -> {}:", k.0, k.1);
+                    let mut table = prettytable::Table::new();
+                    for row in v.rows() {
+                        table.add_row(prettytable::Row::new(
+                            row.iter()
+                                .map(|v| prettytable::Cell::new(&format!("{}", GPoint(*v))))
+                                .collect(),
+                        ));
+                    }
+                    let _ = writeln!(debug_file, "{}", table);
+                }
+
+                for (k, v) in &fall_error {
+                    let _ = writeln!(debug_file, "fall error {} -> {}:", k.0, k.1);
                     let mut table = prettytable::Table::new();
                     for row in v.rows() {
                         table.add_row(prettytable::Row::new(
