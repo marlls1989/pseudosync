@@ -718,6 +718,8 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     }
                     let _ = writeln!(debug_file, "{}", table);
                 }
+
+                let _ = debug_file.flush();
             }
         } else {
             eprintln!(
