@@ -463,45 +463,19 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                 .iter_subgroups_mut()
                 .filter(|v| is_input_pin(v) && !reset_name.is_match(&v.name))
             {
-                let inpin_name = &inpin.name;
-                let constraint_values =
-                    match (setup_fall.get(inpin_name), setup_rise.get(inpin_name)) {
-                        (Some(setup_fall), Some(setup_rise)) => vec![
-                            Group {
-                                type_: "rise_constraint".to_owned(),
-                                name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                                attributes: IndexMap::from([(
-                                    "values".to_owned(),
-                                    Attribute::Complex(vec![Value::FloatGroup(
-                                        setup_rise.iter().cloned().collect(),
-                                    )]),
-                                )]),
-                                subgroups: vec![],
-                            },
-                            Group {
-                                type_: "fall_constraint".to_owned(),
-                                name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                                attributes: IndexMap::from([(
-                                    "values".to_owned(),
-                                    Attribute::Complex(vec![Value::FloatGroup(
-                                        setup_fall.iter().cloned().collect(),
-                                    )]),
-                                )]),
-                                subgroups: vec![],
-                            },
-                        ],
-                        (Some(setup_fall), None) => vec![Group {
-                            type_: "fall_constraint".to_owned(),
-                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
-                            attributes: IndexMap::from([(
-                                "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
-                                    setup_fall.iter().cloned().collect(),
-                                )]),
-                            )]),
-                            subgroups: vec![],
-                        }],
-                        (None, Some(setup_rise)) => vec![Group {
+                let inpin_name = inpin.name.as_str();
+
+                inpin.attributes.insert(
+                    "nextstate_type".to_owned(),
+                    Attribute::Simple(Value::Expression("data".to_owned())),
+                );
+
+                // Create the setup constraint arcs
+                let setup_values = {
+                    let mut v = Vec::with_capacity(2);
+
+                    if let Some(setup_rise) = setup_rise.get(inpin_name) {
+                        v.push(Group {
                             type_: "rise_constraint".to_owned(),
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
                             attributes: IndexMap::from([(
@@ -511,13 +485,25 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                                 )]),
                             )]),
                             subgroups: vec![],
-                        }],
-                        (None, None) => continue,
-                    };
-                inpin.attributes.insert(
-                    "nextstate_type".to_owned(),
-                    Attribute::Simple(Value::Expression("data".to_owned())),
-                );
+                        });
+                    }
+
+                    if let Some(setup_fall) = setup_fall.get(inpin_name) {
+                        v.push(Group {
+                            type_: "fall_constraint".to_owned(),
+                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
+                                    setup_fall.iter().cloned().collect(),
+                                )]),
+                            )]),
+                            subgroups: vec![],
+                        })
+                    }
+
+                    v
+                };
                 inpin.subgroups.push(Group {
                     type_: "timing".to_owned(),
                     name: "".to_owned(),
@@ -531,7 +517,59 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             Attribute::Simple(Value::Expression("setup_rising".to_owned())),
                         ),
                     ]),
-                    subgroups: constraint_values,
+                    subgroups: setup_values,
+                });
+
+                // Create the hold constraint arcs
+                let hold_values = {
+                    let mut v = Vec::with_capacity(2);
+
+                    if let Some(hold_rise) = setup_rise.get(inpin_name) {
+                        let hold_rise = hold_rise.clone() * -1.0;
+                        v.push(Group {
+                            type_: "rise_constraint".to_owned(),
+                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
+                                    hold_rise.into_iter().collect(),
+                                )]),
+                            )]),
+                            subgroups: vec![],
+                        });
+                    }
+
+                    if let Some(hold_fall) = setup_fall.get(inpin_name) {
+                        let hold_fall = hold_fall.clone() * -1.0;
+                        v.push(Group {
+                            type_: "fall_constraint".to_owned(),
+                            name: format!("{}_pseudo_constraint", ref_arc.lut_template),
+                            attributes: IndexMap::from([(
+                                "values".to_owned(),
+                                Attribute::Complex(vec![Value::FloatGroup(
+                                    hold_fall.into_iter().collect(),
+                                )]),
+                            )]),
+                            subgroups: vec![],
+                        })
+                    }
+
+                    v
+                };
+                inpin.subgroups.push(Group {
+                    type_: "timing".to_owned(),
+                    name: "".to_owned(),
+                    attributes: IndexMap::from([
+                        (
+                            "related_pin".to_owned(),
+                            Attribute::Simple(Value::String(clock_name.to_owned())),
+                        ),
+                        (
+                            "timing_type".to_owned(),
+                            Attribute::Simple(Value::Expression("hold_rising".to_owned())),
+                        ),
+                    ]),
+                    subgroups: hold_values,
                 });
             } // inpin
               // storing lut_template name for later inclusing in liberty file
