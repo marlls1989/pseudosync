@@ -338,15 +338,17 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     attributes: IndexMap::from([
                         (
                             "related_pin".to_owned(),
-                            Attribute::Simple(Value::String(clock_name.to_owned())),
+                            vec![Attribute::Simple(Value::String(clock_name.to_owned()))],
                         ),
                         (
                             "timing_sense".to_owned(),
-                            Attribute::Simple(Value::Expression("non_unate".to_owned())),
+                            vec![Attribute::Simple(Value::Expression("non_unate".to_owned()))],
                         ),
                         (
                             "timing_type".to_owned(),
-                            Attribute::Simple(Value::Expression("rising_edge".to_owned())),
+                            vec![Attribute::Simple(Value::Expression(
+                                "rising_edge".to_owned(),
+                            ))],
                         ),
                     ]),
                     subgroups: vec![
@@ -355,9 +357,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.rise_trans.iter().cloned().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         },
@@ -366,9 +368,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.fall_trans.iter().cloned().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         },
@@ -377,9 +379,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.cell_rise.iter().cloned().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         },
@@ -388,9 +390,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_delay", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     ref_arc.cell_fall.iter().cloned().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         },
@@ -467,7 +469,7 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
 
                 inpin.attributes.insert(
                     "nextstate_type".to_owned(),
-                    Attribute::Simple(Value::Expression("data".to_owned())),
+                    vec![Attribute::Simple(Value::Expression("data".to_owned()))],
                 );
 
                 // Create the setup constraint arcs
@@ -480,9 +482,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     setup_rise.iter().cloned().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         });
@@ -494,9 +496,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     setup_fall.iter().cloned().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         })
@@ -510,11 +512,13 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     attributes: IndexMap::from([
                         (
                             "related_pin".to_owned(),
-                            Attribute::Simple(Value::String(clock_name.to_owned())),
+                            vec![Attribute::Simple(Value::String(clock_name.to_owned()))],
                         ),
                         (
                             "timing_type".to_owned(),
-                            Attribute::Simple(Value::Expression("setup_rising".to_owned())),
+                            vec![Attribute::Simple(Value::Expression(
+                                "setup_rising".to_owned(),
+                            ))],
                         ),
                     ]),
                     subgroups: setup_values,
@@ -531,9 +535,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     hold_rise.into_iter().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         });
@@ -546,9 +550,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                             name: format!("{}_pseudo_constraint", ref_arc.lut_template),
                             attributes: IndexMap::from([(
                                 "values".to_owned(),
-                                Attribute::Complex(vec![Value::FloatGroup(
+                                vec![Attribute::Complex(vec![Value::FloatGroup(
                                     hold_fall.into_iter().collect(),
-                                )]),
+                                )])],
                             )]),
                             subgroups: vec![],
                         })
@@ -562,11 +566,13 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     attributes: IndexMap::from([
                         (
                             "related_pin".to_owned(),
-                            Attribute::Simple(Value::String(clock_name.to_owned())),
+                            vec![Attribute::Simple(Value::String(clock_name.to_owned()))],
                         ),
                         (
                             "timing_type".to_owned(),
-                            Attribute::Simple(Value::Expression("hold_rising".to_owned())),
+                            vec![Attribute::Simple(Value::Expression(
+                                "hold_rising".to_owned(),
+                            ))],
                         ),
                     ]),
                     subgroups: hold_values,
@@ -778,9 +784,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     attributes: IndexMap::from([
                         (
                             "variable_1".to_owned(),
-                            Attribute::Simple(Value::Expression(
+                            vec![Attribute::Simple(Value::Expression(
                                 "constrained_pin_transition".to_owned(),
-                            )),
+                            ))],
                         ),
                         ("index_1".to_owned(), g.attributes["index_1"].clone()),
                     ]),
@@ -792,9 +798,9 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     attributes: IndexMap::from([
                         (
                             "variable_1".to_owned(),
-                            Attribute::Simple(Value::Expression(
+                            vec![Attribute::Simple(Value::Expression(
                                 "total_output_net_capacitance".to_owned(),
-                            )),
+                            ))],
                         ),
                         ("index_1".to_owned(), g.attributes["index_2"].clone()),
                     ]),
