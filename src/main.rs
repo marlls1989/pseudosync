@@ -8,7 +8,6 @@ use liberty_parse::{
     liberty::{Attribute, Group, Liberty},
 };
 use ndarray::prelude::*;
-use prettytable;
 use regex::Regex;
 use simple_error::simple_error;
 use std::{
@@ -26,7 +25,7 @@ lazy_static! {
     static ref DEBUG_FILE: Result<RwLock<BufWriter<File>>, std::io::Error> = OpenOptions::new()
         .create(true)
         .append(true)
-        .write(true)
+        
         .open("pseudosync.txt")
         .map(|f| RwLock::new(BufWriter::new(f)));
 }
@@ -81,7 +80,7 @@ fn parse_liberty_file(path: &Path) -> Result<Liberty, Box<dyn Error>> {
     let mut input_stream: Box<dyn Read> = if path.as_os_str() == "-" {
         Box::new(stdin())
     } else {
-        Box::new(File::open(&path)?)
+        Box::new(File::open(path)?)
     };
 
     let mut buf = String::new();
@@ -158,20 +157,19 @@ where
                 .collect();
             Array2::from_shape_vec((v.len(), m.len() / v.len()), m).unwrap()
         })
-        .reduce(|a, b| (a + b))
+        .reduce(|a, b| a + b)
         .map(|x| x / n)
 }
 
-fn mean_reference_arc<'a, I>(ref_arcs: I) -> Option<RefArc>
+fn mean_reference_arc<I>(ref_arcs: I) -> Option<RefArc>
 where
     I: IntoIterator<Item = RefArc>,
 {
     let mut n = 0.0;
     ref_arcs
         .into_iter()
-        .map(|x| {
+        .inspect(|_x| {
             n += 1.0;
-            x
         })
         .reduce(|a, b| {
             assert_eq!(a.col, b.col);
@@ -418,9 +416,8 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     let mut n = 0.0;
 
                     v.into_iter()
-                        .map(|x| {
+                        .inspect(|_x| {
                             n += 1.0;
-                            x
                         })
                         .reduce(|(k, a), (_, b)| (k, a + b))
                         .map(|(_, v)| (k, v / n))
@@ -444,9 +441,8 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     let mut n = 0.0;
 
                     v.into_iter()
-                        .map(|x| {
+                        .inspect(|_x| {
                             n += 1.0;
-                            x
                         })
                         .reduce(|(k, a), (_, b)| (k, a + b))
                         .map(|(_, v)| (k, v / n))
@@ -602,8 +598,8 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     cell_rise_arcs
                         .iter()
                         .map(|((src, dst), val)| {
-                            let ref capacitance_dependent = ref_arcs[dst].cell_rise;
-                            let ref slew_dependent = setup_rise[src];
+                            let capacitance_dependent = &ref_arcs[dst].cell_rise;
+                            let slew_dependent = &setup_rise[src];
                             let reconstructed_arc =
                                 restore_arc(slew_dependent, capacitance_dependent);
 
@@ -617,8 +613,8 @@ fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch:
                     cell_fall_arcs
                         .iter()
                         .map(|((src, dst), val)| {
-                            let ref capacitance_dependent = ref_arcs[dst].cell_fall;
-                            let ref slew_dependent = setup_fall[src];
+                            let capacitance_dependent = &ref_arcs[dst].cell_fall;
+                            let slew_dependent = &setup_fall[src];
                             let reconstructed_arc =
                                 restore_arc(slew_dependent, capacitance_dependent);
 
