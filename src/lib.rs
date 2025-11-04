@@ -85,12 +85,12 @@ pub fn write_liberty_file(path: Option<&Path>, liberty: &LibertyAst) -> Result<(
     Ok(())
 }
 
-/// Tests if the cell contains a latch group and a pin with the expected clock_pin name
-pub fn cell_qualifies(cell: &Group, clock_name: &str) -> bool {
+/// Tests if the cell contains a latch group and a pin matching the reset regex
+pub fn cell_qualifies(cell: &Group, reset_regex: &Regex) -> bool {
     cell.subgroups
         .iter()
         .any(|group| LATCH_REGEX.is_match(&group.type_))
-        && cell.iter_pins().any(|pin| pin.name == clock_name)
+        && cell.iter_pins().any(|pin| reset_regex.is_match(&pin.name))
 }
 
 /// Check if a pin is an output pin
@@ -523,18 +523,15 @@ fn add_pseudo_timing_to_output_pin(
     reset_name: &Regex,
     output_transitions: &RefArc,
     mean_delays: &RefArc,
-    latch: bool,
 ) {
-    // If creating a pseudo_flop model, erase the original arcs
-    if !latch {
-        outpin.subgroups.retain(|x| {
-            x.type_ != "timing"
-                || reset_name.is_match(
-                    &x.simple_attribute("related_pin")
-                        .map_or("".to_owned(), |x| x.string()),
-                )
-        });
-    }
+    // Erase the original timing arcs (except reset)
+    outpin.subgroups.retain(|x| {
+        x.type_ != "timing"
+            || reset_name.is_match(
+                &x.simple_attribute("related_pin")
+                    .map_or("".to_owned(), |x| x.string()),
+            )
+    });
 
     // Add the new pseudo-synchronous timing arc:
     // - Use this output's own transitions (decoupled from input)
@@ -639,15 +636,17 @@ fn generate_pseudo_lut_templates(lib: &Group, used_templates: &HashSet<String>) 
 }
 
 /// Process a single cell to add pseudo-synchronous timing
-fn process_cell(
-    cell: &mut Group,
-    clock_name: &str,
-    reset_name: &Regex,
-    latch: bool,
-    lib_name: &str,
-) -> Option<String> {
+fn process_cell(cell: &mut Group, reset_regex: &Regex, lib_name: &str) -> Option<String> {
     let cell_name = cell.name.clone();
     eprintln!("Processing cell {}", cell_name);
+
+    // Find the reset pin name to use as clock
+    let clock_name = cell
+        .iter_pins()
+        .find(|pin| reset_regex.is_match(&pin.name))
+        .map(|pin| pin.name.clone())?;
+
+    eprintln!("  Using reset pin '{}' as clock", clock_name);
 
     let mut ref_arcs: BTreeMap<String, RefArc> = BTreeMap::new();
     let mut cell_rise_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
@@ -664,8 +663,8 @@ fn process_cell(
                 .unwrap()
                 .string();
 
-            // Skip reset pins
-            if reset_name.is_match(&related_pin) {
+            // Skip reset pins (they will be preserved)
+            if reset_regex.is_match(&related_pin) {
                 continue;
             }
 
@@ -705,11 +704,10 @@ fn process_cell(
         if let Some(output_transitions) = ref_arcs.get(outpin_name) {
             add_pseudo_timing_to_output_pin(
                 outpin,
-                clock_name,
-                reset_name,
+                &clock_name,
+                reset_regex,
                 output_transitions,
                 &mean_ref_arc,
-                latch,
             );
         } else {
             eprintln!(
@@ -727,14 +725,14 @@ fn process_cell(
 
     let (hold_rise, hold_fall) = calculate_hold_constraints(&setup_rise, &setup_fall);
 
-    // Phase 5: Add constraints to all input pins
+    // Phase 5: Add constraints to all input pins (except reset)
     for inpin in cell
         .iter_subgroups_mut()
-        .filter(|v| is_input_pin(v) && !reset_name.is_match(&v.name))
+        .filter(|v| is_input_pin(v) && !reset_regex.is_match(&v.name))
     {
         add_constraints_to_input_pin(
             inpin,
-            clock_name,
+            &clock_name,
             &ref_arc,
             &setup_rise,
             &setup_fall,
@@ -743,17 +741,15 @@ fn process_cell(
         );
     }
 
-    // Phase 6: Convert latch to flip-flop if needed
-    if !latch {
-        convert_latch_to_flipflop(cell);
-    }
+    // Phase 6: Convert latch to flip-flop
+    convert_latch_to_flipflop(cell);
 
     // Return the lut_template name for library-level template generation
     Some(ref_arc.lut_template)
 }
 
-/// Process a library to convert latches to flip-flops or add pseudo-synchronous timing
-pub fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, latch: bool) {
+/// Process a library to convert latches to flip-flops and add pseudo-synchronous timing
+pub fn process_library(lib: &mut Group, reset_regex: &Regex) {
     eprintln!("Processing library {}", lib.name);
 
     let mut lut_templates: HashSet<String> = HashSet::new();
@@ -762,9 +758,9 @@ pub fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, la
     // Process each qualifying cell
     for cell in lib
         .iter_cells_mut()
-        .filter(|x| cell_qualifies(x, clock_name))
+        .filter(|x| cell_qualifies(x, reset_regex))
     {
-        if let Some(template_name) = process_cell(cell, clock_name, reset_name, latch, &lib_name) {
+        if let Some(template_name) = process_cell(cell, reset_regex, &lib_name) {
             lut_templates.insert(template_name);
         } else {
             eprintln!(
