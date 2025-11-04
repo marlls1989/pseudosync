@@ -3,6 +3,10 @@
 //! This library provides functions to process Liberty files and convert latch-based
 //! cells to flip-flop-based cells with pseudo-synchronous timing constraints.
 
+mod boolean_logic;
+
+pub use boolean_logic::parse_statetable;
+
 use indexmap::IndexMap;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -85,12 +89,15 @@ pub fn write_liberty_file(path: Option<&Path>, liberty: &LibertyAst) -> Result<(
     Ok(())
 }
 
-/// Tests if the cell contains a latch group and a pin matching the reset regex
+/// Tests if the cell contains a latch/statetable group and a pin matching the reset regex
 pub fn cell_qualifies(cell: &Group, reset_regex: &Regex) -> bool {
-    cell.subgroups
+    let has_sequential = cell
+        .subgroups
         .iter()
-        .any(|group| LATCH_REGEX.is_match(&group.type_))
-        && cell.iter_pins().any(|pin| reset_regex.is_match(&pin.name))
+        .any(|group| LATCH_REGEX.is_match(&group.type_) || group.type_ == "statetable");
+    let has_reset_pin = cell.iter_pins().any(|pin| reset_regex.is_match(&pin.name));
+
+    has_sequential && has_reset_pin
 }
 
 /// Check if a pin is an output pin
@@ -520,18 +527,11 @@ fn calculate_hold_constraints(
 fn add_pseudo_timing_to_output_pin(
     outpin: &mut Group,
     clock_name: &str,
-    reset_name: &Regex,
     output_transitions: &RefArc,
     mean_delays: &RefArc,
 ) {
-    // Erase the original timing arcs (except reset)
-    outpin.subgroups.retain(|x| {
-        x.type_ != "timing"
-            || reset_name.is_match(
-                &x.simple_attribute("related_pin")
-                    .map_or("".to_owned(), |x| x.string()),
-            )
-    });
+    // Erase all original timing arcs (including reset, since it's being repurposed as clock)
+    outpin.subgroups.retain(|x| x.type_ != "timing");
 
     // Add the new pseudo-synchronous timing arc:
     // - Use this output's own transitions (decoupled from input)
@@ -541,6 +541,15 @@ fn add_pseudo_timing_to_output_pin(
         output_transitions,
         mean_delays,
     ));
+}
+
+/// Mark a pin as a clock pin
+fn mark_pin_as_clock(pin: &mut Group) {
+    // Mark the pin as a clock according to Liberty spec
+    pin.attributes.insert(
+        "clock".to_owned(),
+        vec![Attribute::Simple(Value::Expression("true".to_owned()))],
+    );
 }
 
 /// Add setup and hold constraints to an input pin
@@ -578,20 +587,75 @@ fn add_constraints_to_input_pin(
     ));
 }
 
+/// Remove references to a pin from a Liberty boolean expression
+fn remove_pin_from_expression(expr: &str, pin_name: &str) -> Option<String> {
+    // Create a regex pattern to match the pin name with optional negation
+    let pin_pattern = format!(r"!?{}", regex::escape(pin_name));
+    let pin_regex = Regex::new(&pin_pattern).unwrap();
+
+    // Remove the pin and clean up the expression
+    let result = pin_regex.replace_all(expr, "").to_string();
+
+    // Clean up leftover operators and whitespace
+    let result = result
+        .replace("&&", "&")
+        .replace("||", "|")
+        .replace("&", " & ")
+        .replace("|", " | ");
+
+    // Remove extra whitespace and trim
+    let result: Vec<&str> = result.split_whitespace().collect();
+    let result = result.join(" ");
+
+    // Remove leading/trailing operators
+    let result = result
+        .trim_start_matches("& ")
+        .trim_start_matches("| ")
+        .trim_end_matches(" &")
+        .trim_end_matches(" |")
+        .trim();
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result.to_owned())
+    }
+}
+
 /// Convert latch groups to flip-flop groups
-fn convert_latch_to_flipflop(cell: &mut Group) {
+fn convert_latch_to_flipflop(cell: &mut Group, clock_name: &str) {
     for g in cell
         .iter_subgroups_mut()
         .filter(|g| LATCH_REGEX.is_match(&g.type_))
     {
         g.type_ = LATCH_REGEX.replace(&g.type_, "ff").into();
 
-        if let Some(clock) = g.attributes.remove("enable") {
-            g.attributes.insert("clocked_on".to_owned(), clock);
-        }
+        // Remove old enable attribute and set clocked_on to the reset pin (new clock)
+        g.attributes.remove("enable");
+        g.attributes.insert(
+            "clocked_on".to_owned(),
+            vec![Attribute::Simple(Value::String(clock_name.to_owned()))],
+        );
 
         if let Some(vf) = g.attributes.remove("data_in") {
             g.attributes.insert("next_state".to_owned(), vf);
+        }
+
+        // Remove reset pin references from clear and preset attributes
+        for attr_name in ["clear", "preset"] {
+            if let Some(attr) = g.attributes.remove(attr_name) {
+                if let Some(Attribute::Simple(value)) = attr.first() {
+                    let expr = value.string();
+                    if let Some(cleaned) = remove_pin_from_expression(&expr, clock_name) {
+                        // Keep the attribute with the cleaned expression
+                        g.attributes.insert(
+                            attr_name.to_owned(),
+                            vec![Attribute::Simple(Value::String(cleaned))],
+                        );
+                    }
+                    // If cleaning results in empty expression, don't re-insert the attribute
+                }
+            }
         }
     }
 }
@@ -702,13 +766,7 @@ fn process_cell(cell: &mut Group, reset_regex: &Regex, lib_name: &str) -> Option
         let outpin_name = &outpin.name;
 
         if let Some(output_transitions) = ref_arcs.get(outpin_name) {
-            add_pseudo_timing_to_output_pin(
-                outpin,
-                &clock_name,
-                reset_regex,
-                output_transitions,
-                &mean_ref_arc,
-            );
+            add_pseudo_timing_to_output_pin(outpin, &clock_name, output_transitions, &mean_ref_arc);
         } else {
             eprintln!(
                 "Failed to process outpin {} in cell {} of library {}: no usable reference arc could be found",
@@ -725,24 +783,27 @@ fn process_cell(cell: &mut Group, reset_regex: &Regex, lib_name: &str) -> Option
 
     let (hold_rise, hold_fall) = calculate_hold_constraints(&setup_rise, &setup_fall);
 
-    // Phase 5: Add constraints to all input pins (except reset)
-    for inpin in cell
-        .iter_subgroups_mut()
-        .filter(|v| is_input_pin(v) && !reset_regex.is_match(&v.name))
-    {
-        add_constraints_to_input_pin(
-            inpin,
-            &clock_name,
-            &ref_arc,
-            &setup_rise,
-            &setup_fall,
-            &hold_rise,
-            &hold_fall,
-        );
+    // Phase 5: Mark reset pin as clock and add constraints to data input pins
+    for inpin in cell.iter_subgroups_mut().filter(|v| is_input_pin(v)) {
+        if reset_regex.is_match(&inpin.name) {
+            // Mark reset pin as clock
+            mark_pin_as_clock(inpin);
+        } else {
+            // Add setup and hold constraints to data pins
+            add_constraints_to_input_pin(
+                inpin,
+                &clock_name,
+                &ref_arc,
+                &setup_rise,
+                &setup_fall,
+                &hold_rise,
+                &hold_fall,
+            );
+        }
     }
 
-    // Phase 6: Convert latch to flip-flop
-    convert_latch_to_flipflop(cell);
+    // Phase 6: Convert latch to flip-flop with reset pin as clock
+    convert_latch_to_flipflop(cell, &clock_name);
 
     // Return the lut_template name for library-level template generation
     Some(ref_arc.lut_template)
