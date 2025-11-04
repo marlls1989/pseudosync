@@ -1,8 +1,8 @@
 //! Integration tests using real Liberty file examples
 //! Tests the complete pseudosync workflow with actual Liberty file structures
 
-use pseudosync::*;
 use liberty_parse::parse_lib;
+use pseudosync::*;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -280,36 +280,52 @@ fn test_real_latch_to_ff_conversion() {
     let mut liberty = parse_lib(LBTIEX1_LATCH_CELL).expect("Failed to parse test library");
     let clock_name = "G";
     let reset_name = Regex::new(r"RN").unwrap();
-    
+
     // Process in FF mode (not latch mode)
     process_library(&mut liberty[0], clock_name, &reset_name, false);
-    
+
     let lib = &liberty[0];
     let cell = lib.get_cell("LBTIEX1").expect("LBTIEX1 cell not found");
-    
+
     // Verify latch was converted to ff
     let ff_group = cell.iter_subgroups_of_type("ff").next();
     assert!(ff_group.is_some(), "Latch should be converted to ff");
-    
+
     if let Some(ff) = ff_group {
         assert_eq!(ff.name, "IQ, IQN");
         assert_eq!(ff.simple_attribute("clear").unwrap().string(), "!RN");
         assert_eq!(ff.simple_attribute("clocked_on").unwrap().string(), "G");
         assert_eq!(ff.simple_attribute("next_state").unwrap().string(), "A");
-        
+
         // Original latch attributes should be removed
-        assert!(ff.simple_attribute("enable").is_none(), "enable should be removed");
-        assert!(ff.simple_attribute("data_in").is_none(), "data_in should be removed");
+        assert!(
+            ff.simple_attribute("enable").is_none(),
+            "enable should be removed"
+        );
+        assert!(
+            ff.simple_attribute("data_in").is_none(),
+            "data_in should be removed"
+        );
     }
-    
+
     // Verify no latch groups remain
-    assert_eq!(cell.iter_subgroups_of_type("latch").count(), 0, "No latch groups should remain");
-    
+    assert_eq!(
+        cell.iter_subgroups_of_type("latch").count(),
+        0,
+        "No latch groups should remain"
+    );
+
     // Verify pseudo LUT templates were generated
-    assert!(lib.iter_subgroups_of_type("lu_table_template")
-        .any(|t| t.name.contains("pseudo_delay")), "Pseudo delay template should be generated");
-    assert!(lib.iter_subgroups_of_type("lu_table_template")
-        .any(|t| t.name.contains("pseudo_constraint")), "Pseudo constraint template should be generated");
+    assert!(
+        lib.iter_subgroups_of_type("lu_table_template")
+            .any(|t| t.name.contains("pseudo_delay")),
+        "Pseudo delay template should be generated"
+    );
+    assert!(
+        lib.iter_subgroups_of_type("lu_table_template")
+            .any(|t| t.name.contains("pseudo_constraint")),
+        "Pseudo constraint template should be generated"
+    );
 }
 
 #[test]
@@ -317,26 +333,33 @@ fn test_real_latch_to_latch_preservation() {
     let mut liberty = parse_lib(LBTIEX1_LATCH_CELL).expect("Failed to parse test library");
     let clock_name = "G";
     let reset_name = Regex::new(r"RN").unwrap();
-    
+
     // Process in latch mode (preserve latch)
     process_library(&mut liberty[0], clock_name, &reset_name, true);
-    
+
     let lib = &liberty[0];
     let cell = lib.get_cell("LBTIEX1").expect("LBTIEX1 cell not found");
-    
+
     // Verify latch was preserved
     let latch_group = cell.iter_subgroups_of_type("latch").next();
-    assert!(latch_group.is_some(), "Latch should be preserved in latch mode");
-    
+    assert!(
+        latch_group.is_some(),
+        "Latch should be preserved in latch mode"
+    );
+
     if let Some(latch) = latch_group {
         assert_eq!(latch.name, "IQ, IQN");
         assert_eq!(latch.simple_attribute("clear").unwrap().string(), "!RN");
         assert_eq!(latch.simple_attribute("enable").unwrap().string(), "G");
         assert_eq!(latch.simple_attribute("data_in").unwrap().string(), "A");
     }
-    
+
     // Verify no ff groups were created
-    assert_eq!(cell.iter_subgroups_of_type("ff").count(), 0, "No ff groups should be created in latch mode");
+    assert_eq!(
+        cell.iter_subgroups_of_type("ff").count(),
+        0,
+        "No ff groups should be created in latch mode"
+    );
 }
 
 #[test]
@@ -344,51 +367,76 @@ fn test_pseudo_timing_constraints_generation() {
     let mut liberty = parse_lib(LBTIEX1_LATCH_CELL).expect("Failed to parse test library");
     let clock_name = "G";
     let reset_name = Regex::new(r"RN").unwrap();
-    
+
     process_library(&mut liberty[0], clock_name, &reset_name, false);
-    
+
     let lib = &liberty[0];
     let cell = lib.get_cell("LBTIEX1").expect("LBTIEX1 cell not found");
-    
+
     // Check that input pin A gets setup/hold timing constraints
     let a_pin = cell.get_pin("A").expect("A pin not found");
-    
+
     // Should have nextstate_type attribute
-    assert_eq!(a_pin.simple_attribute("nextstate_type").unwrap().expr(), "data");
-    
+    assert_eq!(
+        a_pin.simple_attribute("nextstate_type").unwrap().expr(),
+        "data"
+    );
+
     // Should have setup timing
-    let setup_timing = a_pin.iter_subgroups_of_type("timing")
-        .find(|t| {
-            t.simple_attribute("timing_type")
-                .map(|tt| tt.expr() == "setup_rising")
-                .unwrap_or(false)
-        });
-    assert!(setup_timing.is_some(), "Setup timing should be added to input pin");
-    
+    let setup_timing = a_pin.iter_subgroups_of_type("timing").find(|t| {
+        t.simple_attribute("timing_type")
+            .map(|tt| tt.expr() == "setup_rising")
+            .unwrap_or(false)
+    });
+    assert!(
+        setup_timing.is_some(),
+        "Setup timing should be added to input pin"
+    );
+
     if let Some(timing) = setup_timing {
-        assert_eq!(timing.simple_attribute("related_pin").unwrap().string(), "G");
+        assert_eq!(
+            timing.simple_attribute("related_pin").unwrap().string(),
+            "G"
+        );
         // Check if constraint tables exist, but don't require them if timing calculation fails
-        let has_constraints = timing.iter_subgroups_of_type("rise_constraint").next().is_some() ||
-                             timing.iter_subgroups_of_type("fall_constraint").next().is_some();
+        let has_constraints = timing
+            .iter_subgroups_of_type("rise_constraint")
+            .next()
+            .is_some()
+            || timing
+                .iter_subgroups_of_type("fall_constraint")
+                .next()
+                .is_some();
         if !has_constraints {
             eprintln!("Warning: Setup timing exists but no constraint tables generated - may be due to insufficient timing data");
         }
     }
-    
+
     // Should have hold timing
-    let hold_timing = a_pin.iter_subgroups_of_type("timing")
-        .find(|t| {
-            t.simple_attribute("timing_type")
-                .map(|tt| tt.expr() == "hold_rising")
-                .unwrap_or(false)
-        });
-    assert!(hold_timing.is_some(), "Hold timing should be added to input pin");
-    
+    let hold_timing = a_pin.iter_subgroups_of_type("timing").find(|t| {
+        t.simple_attribute("timing_type")
+            .map(|tt| tt.expr() == "hold_rising")
+            .unwrap_or(false)
+    });
+    assert!(
+        hold_timing.is_some(),
+        "Hold timing should be added to input pin"
+    );
+
     if let Some(timing) = hold_timing {
-        assert_eq!(timing.simple_attribute("related_pin").unwrap().string(), "G");
+        assert_eq!(
+            timing.simple_attribute("related_pin").unwrap().string(),
+            "G"
+        );
         // Check if constraint tables exist, but don't require them if timing calculation fails
-        let has_constraints = timing.iter_subgroups_of_type("rise_constraint").next().is_some() ||
-                             timing.iter_subgroups_of_type("fall_constraint").next().is_some();
+        let has_constraints = timing
+            .iter_subgroups_of_type("rise_constraint")
+            .next()
+            .is_some()
+            || timing
+                .iter_subgroups_of_type("fall_constraint")
+                .next()
+                .is_some();
         if !has_constraints {
             eprintln!("Warning: Hold timing exists but no constraint tables generated - may be due to insufficient timing data");
         }
@@ -400,44 +448,71 @@ fn test_output_pin_pseudo_timing_generation() {
     let mut liberty = parse_lib(LBTIEX1_LATCH_CELL).expect("Failed to parse test library");
     let clock_name = "G";
     let reset_name = Regex::new(r"RN").unwrap();
-    
+
     process_library(&mut liberty[0], clock_name, &reset_name, false);
-    
+
     let lib = &liberty[0];
     let cell = lib.get_cell("LBTIEX1").expect("LBTIEX1 cell not found");
-    
+
     // Check output pins Q and QN
     for pin_name in ["Q", "QN"].iter() {
-        let pin = cell.get_pin(pin_name).expect(&format!("{} pin not found", pin_name));
-        
+        let pin = cell
+            .get_pin(pin_name)
+            .unwrap_or_else(|| panic!("{} pin not found", pin_name));
+
         // Should have new clock timing arc
-        let clock_timing = pin.iter_subgroups_of_type("timing")
-            .find(|t| {
-                t.simple_attribute("related_pin")
-                    .map(|rp| rp.string() == "G")
-                    .unwrap_or(false) &&
-                t.simple_attribute("timing_type")
+        let clock_timing = pin.iter_subgroups_of_type("timing").find(|t| {
+            t.simple_attribute("related_pin")
+                .map(|rp| rp.string() == "G")
+                .unwrap_or(false)
+                && t.simple_attribute("timing_type")
                     .map(|tt| tt.expr() == "rising_edge")
                     .unwrap_or(false)
-            });
-        
-        assert!(clock_timing.is_some(), "{} pin should have clock timing arc", pin_name);
-        
+        });
+
+        assert!(
+            clock_timing.is_some(),
+            "{} pin should have clock timing arc",
+            pin_name
+        );
+
         if let Some(timing) = clock_timing {
-            assert_eq!(timing.simple_attribute("timing_sense").unwrap().expr(), "non_unate");
-            assert_eq!(timing.simple_attribute("timing_type").unwrap().expr(), "rising_edge");
-            
+            assert_eq!(
+                timing.simple_attribute("timing_sense").unwrap().expr(),
+                "non_unate"
+            );
+            assert_eq!(
+                timing.simple_attribute("timing_type").unwrap().expr(),
+                "rising_edge"
+            );
+
             // Should have all four timing sub-groups with pseudo_delay template
-            let timing_groups = ["rise_transition", "fall_transition", "cell_rise", "cell_fall"];
+            let timing_groups = [
+                "rise_transition",
+                "fall_transition",
+                "cell_rise",
+                "cell_fall",
+            ];
             for group_type in timing_groups.iter() {
                 let group = timing.iter_subgroups_of_type(group_type).next();
-                assert!(group.is_some(), "{} should have {} group", pin_name, group_type);
-                
+                assert!(
+                    group.is_some(),
+                    "{} should have {} group",
+                    pin_name,
+                    group_type
+                );
+
                 if let Some(g) = group {
-                    assert!(g.name.contains("pseudo_delay"), 
-                            "{} group should use pseudo_delay template", group_type);
-                    assert!(g.complex_attribute("values").is_some(),
-                            "{} group should have values", group_type);
+                    assert!(
+                        g.name.contains("pseudo_delay"),
+                        "{} group should use pseudo_delay template",
+                        group_type
+                    );
+                    assert!(
+                        g.complex_attribute("values").is_some(),
+                        "{} group should have values",
+                        group_type
+                    );
                 }
             }
         }
@@ -449,183 +524,222 @@ fn test_reset_pin_exclusion() {
     let mut liberty = parse_lib(LBTIEX1_LATCH_CELL).expect("Failed to parse test library");
     let clock_name = "G";
     let reset_name = Regex::new(r"RN").unwrap();
-    
+
     process_library(&mut liberty[0], clock_name, &reset_name, false);
-    
+
     let lib = &liberty[0];
     let cell = lib.get_cell("LBTIEX1").expect("LBTIEX1 cell not found");
-    
+
     // RN pin should not get setup/hold timing (it's a reset pin)
     let rn_pin = cell.get_pin("RN").expect("RN pin not found");
-    
+
     // Should not have nextstate_type attribute
-    assert!(rn_pin.simple_attribute("nextstate_type").is_none(), 
-            "Reset pin should not get nextstate_type");
-    
+    assert!(
+        rn_pin.simple_attribute("nextstate_type").is_none(),
+        "Reset pin should not get nextstate_type"
+    );
+
     // Should not have setup timing
-    let setup_timing = rn_pin.iter_subgroups_of_type("timing")
-        .find(|t| {
-            t.simple_attribute("timing_type")
-                .map(|tt| tt.expr() == "setup_rising")
-                .unwrap_or(false)
-        });
-    assert!(setup_timing.is_none(), "Reset pin should not get setup timing");
-    
+    let setup_timing = rn_pin.iter_subgroups_of_type("timing").find(|t| {
+        t.simple_attribute("timing_type")
+            .map(|tt| tt.expr() == "setup_rising")
+            .unwrap_or(false)
+    });
+    assert!(
+        setup_timing.is_none(),
+        "Reset pin should not get setup timing"
+    );
+
     // Should not have hold timing
-    let hold_timing = rn_pin.iter_subgroups_of_type("timing")
-        .find(|t| {
-            t.simple_attribute("timing_type")
-                .map(|tt| tt.expr() == "hold_rising")
-                .unwrap_or(false)
-        });
-    assert!(hold_timing.is_none(), "Reset pin should not get hold timing");
+    let hold_timing = rn_pin.iter_subgroups_of_type("timing").find(|t| {
+        t.simple_attribute("timing_type")
+            .map(|tt| tt.expr() == "hold_rising")
+            .unwrap_or(false)
+    });
+    assert!(
+        hold_timing.is_none(),
+        "Reset pin should not get hold timing"
+    );
 }
 
 #[test]
 fn test_integration_with_real_files() {
     // This test requires the actual example files to exist
     let input_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
-    
+
     if !Path::new(input_path).exists() {
         eprintln!("Skipping integration test - example files not found");
         return;
     }
-    
+
     // Test FF mode
-    let mut liberty_ff = parse_liberty_file(Path::new(input_path))
-        .expect("Failed to parse input liberty file");
-    
+    let mut liberty_ff =
+        parse_liberty_file(Path::new(input_path)).expect("Failed to parse input liberty file");
+
     let clock_name = "G";
     let reset_name = Regex::new(r"(R|S)N?").unwrap();
-    
+
     // Process in FF mode
     for lib in liberty_ff.iter_mut() {
         process_library(lib, clock_name, &reset_name, false);
     }
-    
+
     // Test latch mode
-    let mut liberty_latch = parse_liberty_file(Path::new(input_path))
-        .expect("Failed to parse input liberty file");
-    
+    let mut liberty_latch =
+        parse_liberty_file(Path::new(input_path)).expect("Failed to parse input liberty file");
+
     // Process in latch mode
     for lib in liberty_latch.iter_mut() {
         process_library(lib, clock_name, &reset_name, true);
     }
-    
+
     // Verify key transformations
     let lib_ff = &liberty_ff[0];
     let lib_latch = &liberty_latch[0];
-    
+
     // Both should have the same number of cells
     assert_eq!(lib_ff.iter_cells().count(), lib_latch.iter_cells().count());
-    
+
     // FF version should have pseudo templates
-    assert!(lib_ff.iter_subgroups_of_type("lu_table_template")
+    assert!(lib_ff
+        .iter_subgroups_of_type("lu_table_template")
         .any(|t| t.name.contains("pseudo_delay")));
-    assert!(lib_ff.iter_subgroups_of_type("lu_table_template")
+    assert!(lib_ff
+        .iter_subgroups_of_type("lu_table_template")
         .any(|t| t.name.contains("pseudo_constraint")));
-    
+
     // Latch version should also have pseudo templates
-    assert!(lib_latch.iter_subgroups_of_type("lu_table_template")
+    assert!(lib_latch
+        .iter_subgroups_of_type("lu_table_template")
         .any(|t| t.name.contains("pseudo_delay")));
-    assert!(lib_latch.iter_subgroups_of_type("lu_table_template")
+    assert!(lib_latch
+        .iter_subgroups_of_type("lu_table_template")
         .any(|t| t.name.contains("pseudo_constraint")));
-    
+
     // Count latch vs ff groups
-    let latch_count_ff: usize = lib_ff.iter_cells()
+    let latch_count_ff: usize = lib_ff
+        .iter_cells()
         .map(|c| c.iter_subgroups_of_type("latch").count())
         .sum();
-    let ff_count_ff: usize = lib_ff.iter_cells()
+    let ff_count_ff: usize = lib_ff
+        .iter_cells()
         .map(|c| c.iter_subgroups_of_type("ff").count())
         .sum();
-    
-    let latch_count_latch: usize = lib_latch.iter_cells()
+
+    let latch_count_latch: usize = lib_latch
+        .iter_cells()
         .map(|c| c.iter_subgroups_of_type("latch").count())
         .sum();
-    let ff_count_latch: usize = lib_latch.iter_cells()
+    let ff_count_latch: usize = lib_latch
+        .iter_cells()
         .map(|c| c.iter_subgroups_of_type("ff").count())
         .sum();
-    
+
     // In FF mode, latches should be converted to ff
     assert_eq!(latch_count_ff, 0, "FF mode should have no latch groups");
     assert!(ff_count_ff > 0, "FF mode should have ff groups");
-    
+
     // In latch mode, latches should remain as latch
     assert!(latch_count_latch > 0, "Latch mode should have latch groups");
     assert_eq!(ff_count_latch, 0, "Latch mode should have no ff groups");
 }
 
 /// Test specific ALHO_DRREGX1 cell transformation using real file
-#[test] 
+#[test]
 fn test_alho_drregx1_real_cell_transformation() {
     let input_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
-    
+
     if !Path::new(input_path).exists() {
         eprintln!("Skipping ALHO_DRREGX1 test - example files not found");
         return;
     }
-    
-    let mut liberty = parse_liberty_file(Path::new(input_path))
-        .expect("Failed to parse input liberty file");
-    
+
+    let mut liberty =
+        parse_liberty_file(Path::new(input_path)).expect("Failed to parse input liberty file");
+
     let clock_name = "G";
     let reset_name = Regex::new(r"(R|S)N?").unwrap();
-    
+
     // Find the ALHO_DRREGX1 cell before processing
     let lib = &liberty[0];
     let original_cell = lib.iter_cells().find(|c| c.name == "ALHO_DRREGX1");
-    assert!(original_cell.is_some(), "ALHO_DRREGX1 cell should exist in the library");
-    
+    assert!(
+        original_cell.is_some(),
+        "ALHO_DRREGX1 cell should exist in the library"
+    );
+
     let original_cell = original_cell.unwrap();
-    
+
     // Verify it has pins we expect
     let pins: Vec<&str> = original_cell.iter_pins().map(|p| p.name.as_str()).collect();
     eprintln!("ALHO_DRREGX1 pins: {:?}", pins);
-    
+
     // Check if it has sequential logic groups
-    let latch_groups: Vec<_> = original_cell.iter_subgroups()
+    let latch_groups: Vec<_> = original_cell
+        .iter_subgroups()
         .filter(|g| g.type_ == "latch" || g.type_ == "latch_bank")
         .collect();
-    let ff_groups: Vec<_> = original_cell.iter_subgroups()
+    let ff_groups: Vec<_> = original_cell
+        .iter_subgroups()
         .filter(|g| g.type_ == "ff")
         .collect();
-    
-    eprintln!("ALHO_DRREGX1 before processing: {} latch groups, {} ff groups", 
-              latch_groups.len(), ff_groups.len());
-    
+
+    eprintln!(
+        "ALHO_DRREGX1 before processing: {} latch groups, {} ff groups",
+        latch_groups.len(),
+        ff_groups.len()
+    );
+
     // Process in FF mode
     for lib in liberty.iter_mut() {
         process_library(lib, clock_name, &reset_name, false);
     }
-    
+
     // Check transformation results
     let lib = &liberty[0];
     let transformed_cell = lib.iter_cells().find(|c| c.name == "ALHO_DRREGX1").unwrap();
-    
+
     // Verify the cell was processed (should have timing info)
     // ALHO_DRREGX1 uses bundles instead of individual pins
-    let output_bundles: Vec<_> = transformed_cell.iter_subgroups()
+    let output_bundles: Vec<_> = transformed_cell
+        .iter_subgroups()
         .filter(|g| g.type_ == "bundle")
         .collect();
-    
-    let output_pins: Vec<_> = transformed_cell.iter_pins()
+
+    let output_pins: Vec<_> = transformed_cell
+        .iter_pins()
         .filter(|p| p.simple_attribute("direction").is_some())
         .collect();
-    
-    eprintln!("Found {} pins, {} bundles", output_pins.len(), output_bundles.len());
-    
+
+    eprintln!(
+        "Found {} pins, {} bundles",
+        output_pins.len(),
+        output_bundles.len()
+    );
+
     // Just check that the cell has some structure we can work with
-    assert!(!output_pins.is_empty() || !output_bundles.is_empty() || 
-            !transformed_cell.iter_subgroups().collect::<Vec<_>>().is_empty(), 
-            "ALHO_DRREGX1 should have pins, bundles, or other structure");
-    
+    assert!(
+        !output_pins.is_empty()
+            || !output_bundles.is_empty()
+            || !transformed_cell
+                .iter_subgroups()
+                .collect::<Vec<_>>()
+                .is_empty(),
+        "ALHO_DRREGX1 should have pins, bundles, or other structure"
+    );
+
     // Verify timing exists somewhere in the cell
     let has_any_timing = transformed_cell.iter_pins().any(|pin| {
-        !pin.iter_subgroups_of_type("timing").collect::<Vec<_>>().is_empty()
+        !pin.iter_subgroups_of_type("timing")
+            .collect::<Vec<_>>()
+            .is_empty()
     }) || transformed_cell.iter_subgroups().any(|group| {
-        !group.iter_subgroups_of_type("timing").collect::<Vec<_>>().is_empty()
+        !group
+            .iter_subgroups_of_type("timing")
+            .collect::<Vec<_>>()
+            .is_empty()
     });
-    
+
     if has_any_timing {
         eprintln!("ALHO_DRREGX1 successfully processed with timing information");
     } else {
@@ -637,64 +751,84 @@ fn test_alho_drregx1_real_cell_transformation() {
 #[test]
 fn test_racelem21x1_real_cell_transformation() {
     let input_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
-    
+
     if !Path::new(input_path).exists() {
         eprintln!("Skipping RACELEM21X1 test - example files not found");
         return;
     }
-    
-    let mut liberty = parse_liberty_file(Path::new(input_path))
-        .expect("Failed to parse input liberty file");
-    
+
+    let mut liberty =
+        parse_liberty_file(Path::new(input_path)).expect("Failed to parse input liberty file");
+
     let clock_name = "G";
     let reset_name = Regex::new(r"(R|S)N?").unwrap();
-    
+
     // Find the RACELEM21X1 cell before processing
     let lib = &liberty[0];
     let original_cell = lib.iter_cells().find(|c| c.name == "RACELEM21X1");
-    assert!(original_cell.is_some(), "RACELEM21X1 cell should exist in the library");
-    
+    assert!(
+        original_cell.is_some(),
+        "RACELEM21X1 cell should exist in the library"
+    );
+
     let original_cell = original_cell.unwrap();
-    
+
     // Verify it qualifies for processing
-    assert!(cell_qualifies(original_cell, clock_name), "RACELEM21X1 should qualify for processing");
-    
+    assert!(
+        cell_qualifies(original_cell, clock_name),
+        "RACELEM21X1 should qualify for processing"
+    );
+
     // Verify original latch structure
-    let original_latch = original_cell.iter_subgroups()
-        .find(|g| g.type_ == "latch");
+    let original_latch = original_cell.iter_subgroups().find(|g| g.type_ == "latch");
     if original_latch.is_none() {
         eprintln!("RACELEM21X1 cell found but has no latch groups - skipping transformation test");
         return;
     }
-    
+
     let original_latch = original_latch.unwrap();
-    assert_eq!(original_latch.simple_attribute("data_in").unwrap().string(), "A*IQ+A*P1*P2+IQ*M1+IQ*M2");
-    assert_eq!(original_latch.simple_attribute("enable").unwrap().string(), "G");
-    assert_eq!(original_latch.simple_attribute("clear").unwrap().string(), "!RN");
-    
+    assert_eq!(
+        original_latch.simple_attribute("data_in").unwrap().string(),
+        "A*IQ+A*P1*P2+IQ*M1+IQ*M2"
+    );
+    assert_eq!(
+        original_latch.simple_attribute("enable").unwrap().string(),
+        "G"
+    );
+    assert_eq!(
+        original_latch.simple_attribute("clear").unwrap().string(),
+        "!RN"
+    );
+
     // Verify all expected pins exist
     let pin_names: Vec<&str> = original_cell.iter_pins().map(|p| p.name.as_str()).collect();
     for expected_pin in &["A", "G", "RN", "Q", "M1", "M2", "P1", "P2"] {
-        assert!(pin_names.contains(expected_pin), "RACELEM21X1 should have pin {}", expected_pin);
+        assert!(
+            pin_names.contains(expected_pin),
+            "RACELEM21X1 should have pin {}",
+            expected_pin
+        );
     }
-    
+
     // Process in FF mode
     for lib in liberty.iter_mut() {
         process_library(lib, clock_name, &reset_name, false);
     }
-    
+
     // Check transformation results
     let lib = &liberty[0];
     let transformed_cell = lib.iter_cells().find(|c| c.name == "RACELEM21X1").unwrap();
-    
+
     // Verify latch was converted to ff
-    let ff_groups: Vec<_> = transformed_cell.iter_subgroups()
+    let ff_groups: Vec<_> = transformed_cell
+        .iter_subgroups()
         .filter(|g| g.type_ == "ff")
         .collect();
-    let latch_groups: Vec<_> = transformed_cell.iter_subgroups()
+    let latch_groups: Vec<_> = transformed_cell
+        .iter_subgroups()
         .filter(|g| g.type_ == "latch")
         .collect();
-    
+
     if ff_groups.is_empty() && !latch_groups.is_empty() {
         eprintln!("RACELEM21X1 still has {} latch groups but no ff groups - transformation may not have occurred", latch_groups.len());
         for latch in &latch_groups {
@@ -702,84 +836,122 @@ fn test_racelem21x1_real_cell_transformation() {
         }
         return;
     }
-    
-    assert!(!ff_groups.is_empty(), "RACELEM21X1 latch should be converted to ff");
-    
+
+    assert!(
+        !ff_groups.is_empty(),
+        "RACELEM21X1 latch should be converted to ff"
+    );
+
     let ff_group = &ff_groups[0];
-    assert_eq!(ff_group.simple_attribute("next_state").unwrap().string(), "A*IQ+A*P1*P2+IQ*M1+IQ*M2");
-    assert_eq!(ff_group.simple_attribute("clocked_on").unwrap().string(), "G");
+    assert_eq!(
+        ff_group.simple_attribute("next_state").unwrap().string(),
+        "A*IQ+A*P1*P2+IQ*M1+IQ*M2"
+    );
+    assert_eq!(
+        ff_group.simple_attribute("clocked_on").unwrap().string(),
+        "G"
+    );
     assert_eq!(ff_group.simple_attribute("clear").unwrap().string(), "!RN");
-    
+
     // Verify no latch groups remain
-    assert_eq!(transformed_cell.iter_subgroups_of_type("latch").count(), 0, 
-               "No latch groups should remain in RACELEM21X1 after FF transformation");
-    
+    assert_eq!(
+        transformed_cell.iter_subgroups_of_type("latch").count(),
+        0,
+        "No latch groups should remain in RACELEM21X1 after FF transformation"
+    );
+
     // Verify all non-reset input pins have setup/hold constraints
     for pin_name in &["A", "M1", "M2", "P1", "P2"] {
-        let pin = transformed_cell.iter_pins().find(|p| &p.name == pin_name)
-            .expect(&format!("Pin {} should exist", pin_name));
-        
+        let pin = transformed_cell
+            .iter_pins()
+            .find(|p| &p.name == pin_name)
+            .unwrap_or_else(|| panic!("Pin {} should exist", pin_name));
+
         // Should have nextstate_type attribute
-        assert_eq!(pin.simple_attribute("nextstate_type").unwrap().expr(), "data",
-                   "Pin {} should have nextstate_type=data", pin_name);
-        
+        assert_eq!(
+            pin.simple_attribute("nextstate_type").unwrap().expr(),
+            "data",
+            "Pin {} should have nextstate_type=data",
+            pin_name
+        );
+
         // Should have setup timing
-        let setup_timing = pin.iter_subgroups_of_type("timing")
-            .find(|t| t.simple_attribute("timing_type")
+        let setup_timing = pin.iter_subgroups_of_type("timing").find(|t| {
+            t.simple_attribute("timing_type")
                 .map(|tt| tt.expr() == "setup_rising")
-                .unwrap_or(false));
-        assert!(setup_timing.is_some(), "Pin {} should have setup timing", pin_name);
-        
-        // Should have hold timing  
-        let hold_timing = pin.iter_subgroups_of_type("timing")
-            .find(|t| t.simple_attribute("timing_type")
+                .unwrap_or(false)
+        });
+        assert!(
+            setup_timing.is_some(),
+            "Pin {} should have setup timing",
+            pin_name
+        );
+
+        // Should have hold timing
+        let hold_timing = pin.iter_subgroups_of_type("timing").find(|t| {
+            t.simple_attribute("timing_type")
                 .map(|tt| tt.expr() == "hold_rising")
-                .unwrap_or(false));
-        assert!(hold_timing.is_some(), "Pin {} should have hold timing", pin_name);
+                .unwrap_or(false)
+        });
+        assert!(
+            hold_timing.is_some(),
+            "Pin {} should have hold timing",
+            pin_name
+        );
     }
-    
+
     // Verify reset pin RN doesn't get timing constraints
-    let rn_pin = transformed_cell.iter_pins().find(|p| p.name == "RN").unwrap();
-    assert!(rn_pin.simple_attribute("nextstate_type").is_none(),
-            "Reset pin RN should not have nextstate_type");
+    let rn_pin = transformed_cell
+        .iter_pins()
+        .find(|p| p.name == "RN")
+        .unwrap();
+    assert!(
+        rn_pin.simple_attribute("nextstate_type").is_none(),
+        "Reset pin RN should not have nextstate_type"
+    );
 }
 
 /// Test that both reference cells are processed correctly in latch mode
 #[test]
 fn test_reference_cells_latch_mode() {
     let input_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
-    
+
     if !Path::new(input_path).exists() {
         eprintln!("Skipping reference cells latch mode test - example files not found");
         return;
     }
-    
-    let mut liberty = parse_liberty_file(Path::new(input_path))
-        .expect("Failed to parse input liberty file");
-    
+
+    let mut liberty =
+        parse_liberty_file(Path::new(input_path)).expect("Failed to parse input liberty file");
+
     let clock_name = "G";
     let reset_name = Regex::new(r"(R|S)N?").unwrap();
-    
+
     // Process in latch mode
     for lib in liberty.iter_mut() {
         process_library(lib, clock_name, &reset_name, true);
     }
-    
+
     // Verify ALHO_DRREGX1 behavior in latch mode
     {
         if let Some(alho_cell) = liberty[0].iter_cells().find(|c| c.name == "ALHO_DRREGX1") {
             eprintln!("ALHO_DRREGX1 processed successfully in latch mode");
-            
+
             // Just verify the cell exists and has structure
             let pins_count = alho_cell.iter_pins().count();
             let groups_count = alho_cell.iter_subgroups().count();
-            eprintln!("ALHO_DRREGX1 has {} pins, {} subgroups", pins_count, groups_count);
-            
-            assert!(pins_count > 0 || groups_count > 0, 
-                    "ALHO_DRREGX1 should have some structure");
+            eprintln!(
+                "ALHO_DRREGX1 has {} pins, {} subgroups",
+                pins_count, groups_count
+            );
+
+            assert!(
+                pins_count > 0 || groups_count > 0,
+                "ALHO_DRREGX1 should have some structure"
+            );
         }
     }
-    
+
     // Latch mode processing completed successfully
     eprintln!("Latch mode processing completed for ALHO_DRREGX1");
 }
@@ -789,41 +961,52 @@ fn test_reference_cells_latch_mode() {
 fn test_reference_cells_against_expected_output() {
     let input_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
     let expected_pseudoflop_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C_pseudoflop.lib";
-    
+
     if !Path::new(input_path).exists() || !Path::new(expected_pseudoflop_path).exists() {
         eprintln!("Skipping expected output comparison - example files not found");
         return;
     }
-    
+
     // Process our version
-    let mut liberty = parse_liberty_file(Path::new(input_path))
-        .expect("Failed to parse input liberty file");
-    
+    let mut liberty =
+        parse_liberty_file(Path::new(input_path)).expect("Failed to parse input liberty file");
+
     let clock_name = "G";
     let reset_name = Regex::new(r"(R|S)N?").unwrap();
-    
+
     for lib in liberty.iter_mut() {
         process_library(lib, clock_name, &reset_name, false);
     }
-    
+
     // Parse expected output
     let expected_liberty = parse_liberty_file(Path::new(expected_pseudoflop_path))
         .expect("Failed to parse expected output");
-    
+
     // Compare structure for reference cells
-    
+
     // Check ALHO_DRREGX1
     let our_alho = liberty[0].iter_cells().find(|c| c.name == "ALHO_DRREGX1");
-    let expected_alho = expected_liberty[0].iter_cells().find(|c| c.name == "ALHO_DRREGX1");
-    
+    let expected_alho = expected_liberty[0]
+        .iter_cells()
+        .find(|c| c.name == "ALHO_DRREGX1");
+
     if let (Some(our_alho), Some(expected_alho)) = (our_alho, expected_alho) {
         // Compare timing information exists
-        let our_has_timing = our_alho.iter_pins().any(|p| 
-            !p.iter_subgroups_of_type("timing").collect::<Vec<_>>().is_empty());
-        let expected_has_timing = expected_alho.iter_pins().any(|p| 
-            !p.iter_subgroups_of_type("timing").collect::<Vec<_>>().is_empty());
-        
-        assert_eq!(our_has_timing, expected_has_timing, "ALHO_DRREGX1 timing presence should match");
+        let our_has_timing = our_alho.iter_pins().any(|p| {
+            !p.iter_subgroups_of_type("timing")
+                .collect::<Vec<_>>()
+                .is_empty()
+        });
+        let expected_has_timing = expected_alho.iter_pins().any(|p| {
+            !p.iter_subgroups_of_type("timing")
+                .collect::<Vec<_>>()
+                .is_empty()
+        });
+
+        assert_eq!(
+            our_has_timing, expected_has_timing,
+            "ALHO_DRREGX1 timing presence should match"
+        );
         eprintln!("ALHO_DRREGX1 output comparison successful");
     } else {
         eprintln!("ALHO_DRREGX1 not found in one or both outputs - skipping detailed comparison");
@@ -831,29 +1014,387 @@ fn test_reference_cells_against_expected_output() {
 }
 
 #[test]
+fn test_ascend_freepdk45_comprehensive_comparison() {
+    let input_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
+    let expected_pseudoflop_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C_pseudoflop.lib";
+
+    if !Path::new(input_path).exists() || !Path::new(expected_pseudoflop_path).exists() {
+        eprintln!("Skipping ASCEND comprehensive comparison - example files not found");
+        return;
+    }
+
+    // Process the input library
+    let mut liberty =
+        parse_liberty_file(Path::new(input_path)).expect("Failed to parse input liberty file");
+
+    let clock_name = "G";
+    let reset_name = Regex::new(r"(R|S)N?").unwrap();
+
+    for lib in liberty.iter_mut() {
+        process_library(lib, clock_name, &reset_name, false);
+    }
+
+    // Parse expected output
+    let expected_liberty = parse_liberty_file(Path::new(expected_pseudoflop_path))
+        .expect("Failed to parse expected output");
+
+    assert_eq!(
+        liberty.len(),
+        expected_liberty.len(),
+        "Number of libraries should match"
+    );
+
+    for (our_lib, expected_lib) in liberty.iter().zip(expected_liberty.iter()) {
+        eprintln!("Comparing library: {}", our_lib.name);
+
+        // Check that we have the same cells
+        let our_cell_names: Vec<_> = our_lib.iter_cells().map(|c| &c.name).collect();
+        let expected_cell_names: Vec<_> = expected_lib.iter_cells().map(|c| &c.name).collect();
+        assert_eq!(
+            our_cell_names, expected_cell_names,
+            "Cell names should match"
+        );
+
+        // Check pseudo LUT templates were added
+        let our_pseudo_templates: Vec<_> = our_lib
+            .iter_subgroups()
+            .filter(|g| g.type_ == "lu_table_template" && g.name.contains("_pseudo_"))
+            .map(|g| &g.name)
+            .collect();
+        let expected_pseudo_templates: Vec<_> = expected_lib
+            .iter_subgroups()
+            .filter(|g| g.type_ == "lu_table_template" && g.name.contains("_pseudo_"))
+            .map(|g| &g.name)
+            .collect();
+
+        assert!(
+            !our_pseudo_templates.is_empty(),
+            "Should have pseudo LUT templates"
+        );
+        assert_eq!(
+            our_pseudo_templates, expected_pseudo_templates,
+            "Pseudo LUT templates should match"
+        );
+
+        // Compare each transformed cell
+        for (our_cell, expected_cell) in
+            our_lib
+                .iter_cells()
+                .zip(expected_lib.iter_cells())
+                .filter(|(c, _)| {
+                    c.iter_subgroups()
+                        .any(|g| g.type_ == "ff" || g.type_.starts_with("latch"))
+                })
+        {
+            eprintln!("  Checking cell: {}", our_cell.name);
+
+            // Check ff groups exist (transformed from latch)
+            let our_ff_count = our_cell
+                .iter_subgroups()
+                .filter(|g| g.type_ == "ff")
+                .count();
+            let expected_ff_count = expected_cell
+                .iter_subgroups()
+                .filter(|g| g.type_ == "ff")
+                .count();
+            assert_eq!(
+                our_ff_count, expected_ff_count,
+                "Cell {} should have same number of ff groups",
+                our_cell.name
+            );
+
+            // Check output pins have pseudo timing
+            for (our_pin, expected_pin) in our_cell
+                .iter_pins()
+                .zip(expected_cell.iter_pins())
+                .filter(|(p, _)| {
+                    p.simple_attribute("direction")
+                        .map(|v| v.string() == "output")
+                        .unwrap_or(false)
+                })
+            {
+                let our_timing_count = our_pin.iter_subgroups_of_type("timing").count();
+                let expected_timing_count = expected_pin.iter_subgroups_of_type("timing").count();
+                assert_eq!(
+                    our_timing_count, expected_timing_count,
+                    "Output pin {} in cell {} should have same number of timing groups",
+                    our_pin.name, our_cell.name
+                );
+
+                // Check timing arc structure
+                for (our_timing, expected_timing) in our_pin
+                    .iter_subgroups_of_type("timing")
+                    .zip(expected_pin.iter_subgroups_of_type("timing"))
+                {
+                    // Check related_pin
+                    let our_related =
+                        our_timing
+                            .simple_attribute("related_pin")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => Some(s),
+                                liberty_parse::ast::Value::Expression(s) => Some(s),
+                                _ => None,
+                            });
+                    let expected_related = expected_timing
+                        .simple_attribute("related_pin")
+                        .and_then(|v| match v {
+                            liberty_parse::ast::Value::String(s) => Some(s),
+                            liberty_parse::ast::Value::Expression(s) => Some(s),
+                            _ => None,
+                        });
+                    assert_eq!(
+                        our_related, expected_related,
+                        "Related pin should match for {} in {}",
+                        our_pin.name, our_cell.name
+                    );
+
+                    // Check timing_type
+                    let our_type =
+                        our_timing
+                            .simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => Some(s),
+                                liberty_parse::ast::Value::Expression(s) => Some(s),
+                                _ => None,
+                            });
+                    let expected_type =
+                        expected_timing
+                            .simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => Some(s),
+                                liberty_parse::ast::Value::Expression(s) => Some(s),
+                                _ => None,
+                            });
+                    assert_eq!(
+                        our_type, expected_type,
+                        "Timing type should match for {} in {}",
+                        our_pin.name, our_cell.name
+                    );
+
+                    // Check timing tables exist
+                    let timing_table_types = [
+                        "cell_rise",
+                        "cell_fall",
+                        "rise_transition",
+                        "fall_transition",
+                    ];
+                    for table_type in &timing_table_types {
+                        let our_has = our_timing
+                            .iter_subgroups_of_type(table_type)
+                            .next()
+                            .is_some();
+                        let expected_has = expected_timing
+                            .iter_subgroups_of_type(table_type)
+                            .next()
+                            .is_some();
+                        assert_eq!(
+                            our_has, expected_has,
+                            "Timing table {} should match for {} in {}",
+                            table_type, our_pin.name, our_cell.name
+                        );
+                    }
+                }
+            }
+
+            // Check input pins have setup/hold constraints (skip clock and reset pins)
+            for (our_pin, expected_pin) in our_cell
+                .iter_pins()
+                .zip(expected_cell.iter_pins())
+                .filter(|(p, _)| {
+                    p.simple_attribute("direction")
+                        .map(|v| v.string() == "input")
+                        .unwrap_or(false)
+                        && !reset_name.is_match(&p.name)
+                        && p.name != clock_name
+                })
+            {
+                // Check nextstate_type attribute
+                let our_nextstate =
+                    our_pin
+                        .simple_attribute("nextstate_type")
+                        .and_then(|v| match v {
+                            liberty_parse::ast::Value::String(s) => Some(s),
+                            liberty_parse::ast::Value::Expression(s) => Some(s),
+                            _ => None,
+                        });
+                let expected_nextstate =
+                    expected_pin
+                        .simple_attribute("nextstate_type")
+                        .and_then(|v| match v {
+                            liberty_parse::ast::Value::String(s) => Some(s),
+                            liberty_parse::ast::Value::Expression(s) => Some(s),
+                            _ => None,
+                        });
+
+                if expected_nextstate.is_some() {
+                    assert_eq!(
+                        our_nextstate, expected_nextstate,
+                        "nextstate_type should match for {} in {}",
+                        our_pin.name, our_cell.name
+                    );
+                }
+
+                // Check for setup and hold timing groups
+                let our_setup_count = our_pin
+                    .iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => Some(s.contains("setup")),
+                                liberty_parse::ast::Value::Expression(s) => {
+                                    Some(s.contains("setup"))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count();
+                let expected_setup_count = expected_pin
+                    .iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => Some(s.contains("setup")),
+                                liberty_parse::ast::Value::Expression(s) => {
+                                    Some(s.contains("setup"))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count();
+
+                let our_hold_count = our_pin
+                    .iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => Some(s.contains("hold")),
+                                liberty_parse::ast::Value::Expression(s) => {
+                                    Some(s.contains("hold"))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count();
+                let expected_hold_count = expected_pin
+                    .iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => Some(s.contains("hold")),
+                                liberty_parse::ast::Value::Expression(s) => {
+                                    Some(s.contains("hold"))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count();
+
+                if expected_setup_count > 0 {
+                    assert_eq!(
+                        our_setup_count, expected_setup_count,
+                        "Setup timing count should match for {} in {}",
+                        our_pin.name, our_cell.name
+                    );
+                }
+
+                if expected_hold_count > 0 {
+                    assert_eq!(
+                        our_hold_count, expected_hold_count,
+                        "Hold timing count should match for {} in {}",
+                        our_pin.name, our_cell.name
+                    );
+                }
+
+                // Check that constraint tables exist and match
+                for (our_timing, expected_timing) in our_pin
+                    .iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => {
+                                    Some(s.contains("setup") || s.contains("hold"))
+                                }
+                                liberty_parse::ast::Value::Expression(s) => {
+                                    Some(s.contains("setup") || s.contains("hold"))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(false)
+                    })
+                    .zip(expected_pin.iter_subgroups_of_type("timing").filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .and_then(|v| match v {
+                                liberty_parse::ast::Value::String(s) => {
+                                    Some(s.contains("setup") || s.contains("hold"))
+                                }
+                                liberty_parse::ast::Value::Expression(s) => {
+                                    Some(s.contains("setup") || s.contains("hold"))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(false)
+                    }))
+                {
+                    let our_has_rise = our_timing
+                        .iter_subgroups_of_type("rise_constraint")
+                        .next()
+                        .is_some();
+                    let our_has_fall = our_timing
+                        .iter_subgroups_of_type("fall_constraint")
+                        .next()
+                        .is_some();
+                    let expected_has_rise = expected_timing
+                        .iter_subgroups_of_type("rise_constraint")
+                        .next()
+                        .is_some();
+                    let expected_has_fall = expected_timing
+                        .iter_subgroups_of_type("fall_constraint")
+                        .next()
+                        .is_some();
+
+                    assert_eq!(
+                        our_has_rise, expected_has_rise,
+                        "Rise constraint presence should match for {} in {}",
+                        our_pin.name, our_cell.name
+                    );
+                    assert_eq!(
+                        our_has_fall, expected_has_fall,
+                        "Fall constraint presence should match for {} in {}",
+                        our_pin.name, our_cell.name
+                    );
+                }
+            }
+        }
+    }
+
+    eprintln!("✓ ASCEND library comprehensive comparison successful");
+}
+
+#[test]
 fn test_file_io_operations() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let input_path = temp_dir.path().join("input.lib");
     let output_path = temp_dir.path().join("output.lib");
-    
+
     // Write test input
     fs::write(&input_path, LBTIEX1_LATCH_CELL).expect("Failed to write input file");
-    
+
     // Test parsing from file
     let liberty = parse_liberty_file(&input_path).expect("Failed to parse from file");
     assert_eq!(liberty.len(), 1);
     assert_eq!(liberty[0].name, "test_lib");
-    
+
     // Test writing to file
-    write_liberty_file(Some(&output_path), &liberty.to_ast())
-        .expect("Failed to write to file");
-    
+    write_liberty_file(Some(&output_path), &liberty.to_ast()).expect("Failed to write to file");
+
     // Verify output file exists and can be parsed
     assert!(output_path.exists(), "Output file should be created");
-    let reparsed = parse_liberty_file(&output_path)
-        .expect("Failed to reparse output file");
-    
+    let reparsed = parse_liberty_file(&output_path).expect("Failed to reparse output file");
+
     assert_eq!(reparsed.len(), 1);
     assert_eq!(reparsed[0].name, "test_lib");
 }
-

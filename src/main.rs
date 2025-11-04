@@ -1,7 +1,7 @@
+use pseudosync::{parse_liberty_file, process_library, write_liberty_file};
 use regex::Regex;
 use std::{error::Error, path::PathBuf};
 use structopt::StructOpt;
-use pseudosync::{parse_liberty_file, write_liberty_file, process_library};
 
 #[derive(Debug, StructOpt)]
 struct ProgramOptions {
@@ -36,4 +36,3 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
-

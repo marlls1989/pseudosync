@@ -2,8 +2,8 @@
 //! Tests edge cases and ensures robustness against malformed inputs
 //! Includes specific tests targeting RCELEM2X1 and RACELEM21X1 reference cells
 
-use pseudosync::*;
 use liberty_parse::parse_lib;
+use pseudosync::*;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
@@ -62,21 +62,21 @@ library(idempotent_test) {
 
     let mut liberty1 = parse_lib(lib_str).expect("Failed to parse");
     let mut liberty2 = parse_lib(lib_str).expect("Failed to parse");
-    
+
     let clock_name = "CLK";
     let reset_name = Regex::new(r"RST").unwrap();
-    
+
     // Apply transformation once
     process_library(&mut liberty1[0], clock_name, &reset_name, false);
-    
+
     // Apply transformation twice
     process_library(&mut liberty2[0], clock_name, &reset_name, false);
     process_library(&mut liberty2[0], clock_name, &reset_name, false);
-    
+
     // Convert to strings for comparison
     let str1 = format!("{}", liberty1);
     let str2 = format!("{}", liberty2);
-    
+
     // Should be identical (transformation is idempotent)
     assert_eq!(str1, str2, "Transformation should be idempotent");
 }
@@ -134,38 +134,47 @@ library(non_qualifying_test) {
 
     let original_liberty = parse_lib(lib_str).expect("Failed to parse original");
     let mut modified_liberty = parse_lib(lib_str).expect("Failed to parse for modification");
-    
+
     let clock_name = "CLK";
     let reset_name = Regex::new(r"RST").unwrap();
-    
+
     process_library(&mut modified_liberty[0], clock_name, &reset_name, false);
-    
+
     let original_lib = &original_liberty[0];
     let modified_lib = &modified_liberty[0];
-    
+
     // NORMAL_AND should be completely unchanged
     let original_and = original_lib.get_cell("NORMAL_AND").unwrap();
     let modified_and = modified_lib.get_cell("NORMAL_AND").unwrap();
-    assert_eq!(format!("{:?}", original_and), format!("{:?}", modified_and),
-               "Non-qualifying cells should remain unchanged");
-    
+    assert_eq!(
+        format!("{:?}", original_and),
+        format!("{:?}", modified_and),
+        "Non-qualifying cells should remain unchanged"
+    );
+
     // LATCH_NO_CLOCK should be unchanged (no clock pin CLK)
     let original_latch_no_clk = original_lib.get_cell("LATCH_NO_CLOCK").unwrap();
     let modified_latch_no_clk = modified_lib.get_cell("LATCH_NO_CLOCK").unwrap();
-    assert_eq!(format!("{:?}", original_latch_no_clk), format!("{:?}", modified_latch_no_clk),
-               "Latch without matching clock pin should remain unchanged");
-    
+    assert_eq!(
+        format!("{:?}", original_latch_no_clk),
+        format!("{:?}", modified_latch_no_clk),
+        "Latch without matching clock pin should remain unchanged"
+    );
+
     // NO_LATCH_WITH_CLOCK should be unchanged (no latch group)
     let original_no_latch = original_lib.get_cell("NO_LATCH_WITH_CLOCK").unwrap();
     let modified_no_latch = modified_lib.get_cell("NO_LATCH_WITH_CLOCK").unwrap();
-    assert_eq!(format!("{:?}", original_no_latch), format!("{:?}", modified_no_latch),
-               "Cell with clock but no latch should remain unchanged");
+    assert_eq!(
+        format!("{:?}", original_no_latch),
+        format!("{:?}", modified_no_latch),
+        "Cell with clock but no latch should remain unchanged"
+    );
 }
 
 /// Test handling of malformed or incomplete Liberty structures
 #[test]
 fn test_malformed_input_handling() {
-    let test_cases = vec![
+    let test_cases = [
         // Missing timing data
         r#"
 library(missing_timing) {
@@ -209,13 +218,18 @@ library(empty_cell) {
     let reset_name = Regex::new(r"RST").unwrap();
 
     for (i, lib_str) in test_cases.iter().enumerate() {
-        let mut liberty = parse_lib(lib_str).expect(&format!("Failed to parse test case {}", i));
-        
+        let mut liberty =
+            parse_lib(lib_str).unwrap_or_else(|_| panic!("Failed to parse test case {}", i));
+
         // Should not panic even with malformed input
         process_library(&mut liberty[0], clock_name, &reset_name, false);
-        
+
         // Transformation should complete without errors
-        assert_eq!(liberty.len(), 1, "Should still have one library after processing malformed input");
+        assert_eq!(
+            liberty.len(),
+            1,
+            "Should still have one library after processing malformed input"
+        );
     }
 }
 
@@ -261,28 +275,45 @@ library(pin_name_test) {
 "#;
 
     let test_cases = vec![
-        ("CLOCK_PIN", r"RESET_N", "Should work with custom clock and reset names"),
+        (
+            "CLOCK_PIN",
+            r"RESET_N",
+            "Should work with custom clock and reset names",
+        ),
         ("CLOCK_PIN", r"SET_B", "Should work with SET reset pin"),
         ("CLOCK_PIN", r"CLR", "Should work with CLR reset pin"),
-        ("CLOCK_PIN", r"(RESET|SET|CLR).*", "Should work with complex reset regex"),
+        (
+            "CLOCK_PIN",
+            r"(RESET|SET|CLR).*",
+            "Should work with complex reset regex",
+        ),
     ];
 
     for (clock_name, reset_pattern, description) in test_cases {
         let mut liberty = parse_lib(lib_str).expect("Failed to parse");
-        let reset_name = Regex::new(reset_pattern).expect(&format!("Invalid regex: {}", reset_pattern));
-        
+        let reset_name = Regex::new(reset_pattern)
+            .unwrap_or_else(|_| panic!("Invalid regex: {}", reset_pattern));
+
         process_library(&mut liberty[0], clock_name, &reset_name, false);
-        
+
         let lib = &liberty[0];
         let cell = lib.get_cell("MULTI_PIN_LATCH").expect("Cell not found");
-        
+
         // Should have processed the cell successfully
         let ff_group = cell.iter_subgroups_of_type("ff").next();
-        assert!(ff_group.is_some(), "{}: Should have converted latch to ff", description);
-        
+        assert!(
+            ff_group.is_some(),
+            "{}: Should have converted latch to ff",
+            description
+        );
+
         if let Some(ff) = ff_group {
-            assert_eq!(ff.simple_attribute("clocked_on").unwrap().string(), clock_name,
-                       "{}: Should use correct clock name", description);
+            assert_eq!(
+                ff.simple_attribute("clocked_on").unwrap().string(),
+                clock_name,
+                "{}: Should use correct clock name",
+                description
+            );
         }
     }
 }
@@ -342,37 +373,61 @@ library(attr_preservation_test) {
 
     let original_liberty = parse_lib(lib_str).expect("Failed to parse original");
     let mut modified_liberty = parse_lib(lib_str).expect("Failed to parse for modification");
-    
+
     let clock_name = "CLK";
     let reset_name = Regex::new(r"RST").unwrap();
-    
+
     process_library(&mut modified_liberty[0], clock_name, &reset_name, false);
-    
+
     let original_lib = &original_liberty[0];
     let modified_lib = &modified_liberty[0];
-    
+
     // Library-level attributes should be preserved
-    assert_eq!(original_lib.simple_attribute("comment").unwrap().string(),
-               modified_lib.simple_attribute("comment").unwrap().string());
-    assert_eq!(original_lib.simple_attribute("date").unwrap().string(),
-               modified_lib.simple_attribute("date").unwrap().string());
-    assert_eq!(original_lib.simple_attribute("delay_model").unwrap().expr(),
-               modified_lib.simple_attribute("delay_model").unwrap().expr());
-    assert_eq!(original_lib.simple_attribute("time_unit").unwrap().string(),
-               modified_lib.simple_attribute("time_unit").unwrap().string());
-    
+    assert_eq!(
+        original_lib.simple_attribute("comment").unwrap().string(),
+        modified_lib.simple_attribute("comment").unwrap().string()
+    );
+    assert_eq!(
+        original_lib.simple_attribute("date").unwrap().string(),
+        modified_lib.simple_attribute("date").unwrap().string()
+    );
+    assert_eq!(
+        original_lib.simple_attribute("delay_model").unwrap().expr(),
+        modified_lib.simple_attribute("delay_model").unwrap().expr()
+    );
+    assert_eq!(
+        original_lib.simple_attribute("time_unit").unwrap().string(),
+        modified_lib.simple_attribute("time_unit").unwrap().string()
+    );
+
     // Operating conditions should be preserved
-    let original_opcond = original_lib.iter_subgroups_of_type("operating_conditions")
-        .find(|oc| oc.name == "typical").expect("Original operating conditions not found");
-    let modified_opcond = modified_lib.iter_subgroups_of_type("operating_conditions")
-        .find(|oc| oc.name == "typical").expect("Modified operating conditions not found");
-    
-    assert_eq!(original_opcond.simple_attribute("process").unwrap().float(),
-               modified_opcond.simple_attribute("process").unwrap().float());
-    assert_eq!(original_opcond.simple_attribute("temperature").unwrap().float(),
-               modified_opcond.simple_attribute("temperature").unwrap().float());
-    assert_eq!(original_opcond.simple_attribute("voltage").unwrap().float(),
-               modified_opcond.simple_attribute("voltage").unwrap().float());
+    let original_opcond = original_lib
+        .iter_subgroups_of_type("operating_conditions")
+        .find(|oc| oc.name == "typical")
+        .expect("Original operating conditions not found");
+    let modified_opcond = modified_lib
+        .iter_subgroups_of_type("operating_conditions")
+        .find(|oc| oc.name == "typical")
+        .expect("Modified operating conditions not found");
+
+    assert_eq!(
+        original_opcond.simple_attribute("process").unwrap().float(),
+        modified_opcond.simple_attribute("process").unwrap().float()
+    );
+    assert_eq!(
+        original_opcond
+            .simple_attribute("temperature")
+            .unwrap()
+            .float(),
+        modified_opcond
+            .simple_attribute("temperature")
+            .unwrap()
+            .float()
+    );
+    assert_eq!(
+        original_opcond.simple_attribute("voltage").unwrap().float(),
+        modified_opcond.simple_attribute("voltage").unwrap().float()
+    );
 }
 
 /// Test handling of multiple latch cells in same library
@@ -460,37 +515,53 @@ library(multi_latch_test) {
     let mut liberty = parse_lib(lib_str).expect("Failed to parse");
     let clock_name = "G";
     let reset_name = Regex::new(r"RST").unwrap();
-    
+
     process_library(&mut liberty[0], clock_name, &reset_name, false);
-    
+
     let lib = &liberty[0];
-    
+
     // Both latch cells should be converted
     let latch1 = lib.get_cell("LATCH1").expect("LATCH1 not found");
     let latch2 = lib.get_cell("LATCH2").expect("LATCH2 not found");
     let not_latch = lib.get_cell("NOT_A_LATCH").expect("NOT_A_LATCH not found");
-    
-    assert!(latch1.iter_subgroups_of_type("ff").next().is_some(), 
-            "LATCH1 should be converted to ff");
-    assert!(latch2.iter_subgroups_of_type("ff").next().is_some(), 
-            "LATCH2 should be converted to ff");
-    assert_eq!(not_latch.iter_subgroups_of_type("ff").count(), 0,
-               "NOT_A_LATCH should not be converted");
-    
+
+    assert!(
+        latch1.iter_subgroups_of_type("ff").next().is_some(),
+        "LATCH1 should be converted to ff"
+    );
+    assert!(
+        latch2.iter_subgroups_of_type("ff").next().is_some(),
+        "LATCH2 should be converted to ff"
+    );
+    assert_eq!(
+        not_latch.iter_subgroups_of_type("ff").count(),
+        0,
+        "NOT_A_LATCH should not be converted"
+    );
+
     // Both templates should have pseudo versions generated
-    let pseudo_templates: HashSet<_> = lib.iter_subgroups_of_type("lu_table_template")
+    let pseudo_templates: HashSet<_> = lib
+        .iter_subgroups_of_type("lu_table_template")
         .filter(|t| t.name.contains("pseudo"))
         .map(|t| t.name.clone())
         .collect();
-    
-    assert!(pseudo_templates.contains("template1_pseudo_delay"), 
-            "Should have template1 pseudo delay");
-    assert!(pseudo_templates.contains("template1_pseudo_constraint"), 
-            "Should have template1 pseudo constraint");
-    assert!(pseudo_templates.contains("template2_pseudo_delay"), 
-            "Should have template2 pseudo delay");
-    assert!(pseudo_templates.contains("template2_pseudo_constraint"), 
-            "Should have template2 pseudo constraint");
+
+    assert!(
+        pseudo_templates.contains("template1_pseudo_delay"),
+        "Should have template1 pseudo delay"
+    );
+    assert!(
+        pseudo_templates.contains("template1_pseudo_constraint"),
+        "Should have template1 pseudo constraint"
+    );
+    assert!(
+        pseudo_templates.contains("template2_pseudo_delay"),
+        "Should have template2 pseudo delay"
+    );
+    assert!(
+        pseudo_templates.contains("template2_pseudo_constraint"),
+        "Should have template2 pseudo constraint"
+    );
 }
 
 /// Test behavior with very large timing tables
@@ -500,14 +571,20 @@ fn test_large_timing_tables() {
     let large_values: Vec<String> = (0..10)
         .map(|row| {
             (0..10)
-                .map(|col| format!("{:.3}", (row as f64 + 1.0) * 0.1 + (col as f64 + 1.0) * 0.01))
+                .map(|col| {
+                    format!(
+                        "{:.3}",
+                        (row as f64 + 1.0) * 0.1 + (col as f64 + 1.0) * 0.01
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         })
         .map(|row| format!("\"{}\"", row))
         .collect();
-    
-    let lib_str = format!(r#"
+
+    let lib_str = format!(
+        r#"
 library(large_table_test) {{
     delay_model: table_lookup;
     
@@ -556,36 +633,42 @@ library(large_table_test) {{
         }}
     }}
 }}
-"#, large_values.join(", \\\n                        "), 
-    large_values.join(", \\\n                        "),
-    large_values.join(", \\\n                        "),
-    large_values.join(", \\\n                        "));
+"#,
+        large_values.join(", \\\n                        "),
+        large_values.join(", \\\n                        "),
+        large_values.join(", \\\n                        "),
+        large_values.join(", \\\n                        ")
+    );
 
     let mut liberty = parse_lib(&lib_str).expect("Failed to parse large timing table");
     let clock_name = "CLK";
     let reset_name = Regex::new(r"RST").unwrap();
-    
+
     // Should handle large timing tables without issues
     process_library(&mut liberty[0], clock_name, &reset_name, false);
-    
+
     let lib = &liberty[0];
     let cell = lib.get_cell("LARGE_LATCH").expect("LARGE_LATCH not found");
-    
+
     // Should successfully convert even with large tables
-    assert!(cell.iter_subgroups_of_type("ff").next().is_some(), 
-            "Should handle large timing tables");
-    
+    assert!(
+        cell.iter_subgroups_of_type("ff").next().is_some(),
+        "Should handle large timing tables"
+    );
+
     // Check that timing constraints were generated
     let d_pin = cell.get_pin("D").expect("D pin not found");
-    assert!(d_pin.iter_subgroups_of_type("timing")
-        .any(|t| t.simple_attribute("timing_type")
-             .map(|tt| tt.expr() == "setup_rising")
-             .unwrap_or(false)), 
-        "Should generate setup constraints for large tables");
+    assert!(
+        d_pin.iter_subgroups_of_type("timing").any(|t| t
+            .simple_attribute("timing_type")
+            .map(|tt| tt.expr() == "setup_rising")
+            .unwrap_or(false)),
+        "Should generate setup constraints for large tables"
+    );
 }
 
 /// Stress test with deeply nested structures
-#[test]  
+#[test]
 fn test_deeply_nested_structures() {
     let lib_str = r#"
 library(nested_test) {
@@ -642,26 +725,36 @@ library(nested_test) {
     let mut liberty = parse_lib(lib_str).expect("Failed to parse nested structure");
     let clock_name = "CLK";
     let reset_name = Regex::new(r"RST").unwrap();
-    
+
     // Should handle nested timing groups
     process_library(&mut liberty[0], clock_name, &reset_name, false);
-    
+
     let lib = &liberty[0];
-    let cell = lib.get_cell("NESTED_LATCH").expect("NESTED_LATCH not found");
-    
+    let cell = lib
+        .get_cell("NESTED_LATCH")
+        .expect("NESTED_LATCH not found");
+
     // Should successfully process even with complex nested timing
-    assert!(cell.iter_subgroups_of_type("ff").next().is_some(), 
-            "Should handle nested timing structures");
-    
+    assert!(
+        cell.iter_subgroups_of_type("ff").next().is_some(),
+        "Should handle nested timing structures"
+    );
+
     // Verify that multiple timing arcs are processed
     let d_pin = cell.get_pin("D").expect("D pin not found");
-    let setup_count = d_pin.iter_subgroups_of_type("timing")
-        .filter(|t| t.simple_attribute("timing_type")
+    let setup_count = d_pin
+        .iter_subgroups_of_type("timing")
+        .filter(|t| {
+            t.simple_attribute("timing_type")
                 .map(|tt| tt.expr() == "setup_rising")
-                .unwrap_or(false))
+                .unwrap_or(false)
+        })
         .count();
-    
-    assert!(setup_count > 0, "Should generate setup timing for nested structures");
+
+    assert!(
+        setup_count > 0,
+        "Should generate setup timing for nested structures"
+    );
 }
 
 /// Property-based test: RCELEM2X1 cell pattern variations
@@ -679,20 +772,24 @@ fn test_rcelem2x1_pattern_variations() {
         // Single input
         ("D", vec!["D"], "single_input"),
     ];
-    
+
     let clock_pin = "G";
     let reset_regex = Regex::new(r"(R|S)N?").unwrap();
-    
+
     for (data_in_expr, input_pins, test_name) in test_variations {
         // Generate pin definitions
-        let pin_defs: String = input_pins.iter()
+        let pin_defs: String = input_pins
+            .iter()
             .map(|pin| format!("pin({}) {{ direction: input; }}", pin))
             .collect::<Vec<_>>()
             .join("\n        ");
-        
+
         // Generate timing definitions for each input
-        let timing_defs: String = input_pins.iter()
-            .map(|pin| format!(r#"
+        let timing_defs: String = input_pins
+            .iter()
+            .map(|pin| {
+                format!(
+                    r#"
             timing() {{
                 related_pin: "{}";
                 cell_rise(test_template) {{ values("0.1, 0.2", "0.2, 0.3"); }}
@@ -700,11 +797,15 @@ fn test_rcelem2x1_pattern_variations() {
                 rise_transition(test_template) {{ values("0.05, 0.1", "0.1, 0.15"); }}
                 fall_transition(test_template) {{ values("0.04, 0.09", "0.09, 0.14"); }}
             }}
-            "#, pin))
+            "#,
+                    pin
+                )
+            })
             .collect::<Vec<_>>()
             .join("");
-        
-        let lib_str = format!(r#"
+
+        let lib_str = format!(
+            r#"
 library({}_test) {{
     delay_model: table_lookup;
     
@@ -732,48 +833,71 @@ library({}_test) {{
         }}
     }}
 }}
-        "#, test_name, data_in_expr, pin_defs, timing_defs);
-        
+        "#,
+            test_name, data_in_expr, pin_defs, timing_defs
+        );
+
         let result = std::panic::catch_unwind(|| {
             let mut liberty = parse_lib(&lib_str)
-                .expect(&format!("Failed to parse {} variation", test_name));
-            
+                .unwrap_or_else(|_| panic!("Failed to parse {} variation", test_name));
+
             for lib in liberty.iter_mut() {
                 process_library(lib, clock_pin, &reset_regex, false);
             }
-            
+
             let lib = &liberty[0];
             let cell = lib.iter_cells().next().unwrap();
-            
+
             // Should have converted latch to ff
             let ff_group = cell.iter_subgroups_of_type("ff").next();
-            assert!(ff_group.is_some(), 
-                    "RCELEM variant {} should have ff group after processing", test_name);
-            
+            assert!(
+                ff_group.is_some(),
+                "RCELEM variant {} should have ff group after processing",
+                test_name
+            );
+
             if let Some(ff) = ff_group {
-                assert_eq!(ff.simple_attribute("next_state").unwrap().string(), data_in_expr,
-                          "FF next_state should match original data_in for {}", test_name);
+                assert_eq!(
+                    ff.simple_attribute("next_state").unwrap().string(),
+                    data_in_expr,
+                    "FF next_state should match original data_in for {}",
+                    test_name
+                );
             }
-            
+
             // Each input pin should have setup/hold constraints
             for pin_name in &input_pins {
                 let pin = cell.iter_pins().find(|p| &p.name == pin_name).unwrap();
-                
-                let has_setup = pin.iter_subgroups_of_type("timing")
-                    .any(|t| t.simple_attribute("timing_type")
+
+                let has_setup = pin.iter_subgroups_of_type("timing").any(|t| {
+                    t.simple_attribute("timing_type")
                         .map(|tt| tt.expr() == "setup_rising")
-                        .unwrap_or(false));
-                assert!(has_setup, "Pin {} should have setup timing in {}", pin_name, test_name);
-                
-                let has_hold = pin.iter_subgroups_of_type("timing")
-                    .any(|t| t.simple_attribute("timing_type")
+                        .unwrap_or(false)
+                });
+                assert!(
+                    has_setup,
+                    "Pin {} should have setup timing in {}",
+                    pin_name, test_name
+                );
+
+                let has_hold = pin.iter_subgroups_of_type("timing").any(|t| {
+                    t.simple_attribute("timing_type")
                         .map(|tt| tt.expr() == "hold_rising")
-                        .unwrap_or(false));
-                assert!(has_hold, "Pin {} should have hold timing in {}", pin_name, test_name);
+                        .unwrap_or(false)
+                });
+                assert!(
+                    has_hold,
+                    "Pin {} should have hold timing in {}",
+                    pin_name, test_name
+                );
             }
         });
-        
-        assert!(result.is_ok(), "RCELEM variation {} should not panic", test_name);
+
+        assert!(
+            result.is_ok(),
+            "RCELEM variation {} should not panic",
+            test_name
+        );
     }
 }
 
@@ -783,34 +907,55 @@ fn test_racelem21x1_pattern_variations() {
     // Test different combinations of M1/M2 and P1/P2 pins
     let test_cases = vec![
         // Original pattern: A*IQ+A*P1*P2+IQ*M1+IQ*M2
-        (vec!["M1", "M2"], vec!["P1", "P2"], "A*IQ+A*P1*P2+IQ*M1+IQ*M2", "full_racelem"),
+        (
+            vec!["M1", "M2"],
+            vec!["P1", "P2"],
+            "A*IQ+A*P1*P2+IQ*M1+IQ*M2",
+            "full_racelem",
+        ),
         // Single M pin
-        (vec!["M1"], vec!["P1", "P2"], "A*IQ+A*P1*P2+IQ*M1", "single_m"),
-        // Single P pin  
-        (vec!["M1", "M2"], vec!["P1"], "A*IQ+A*P1+IQ*M1+IQ*M2", "single_p"),
+        (
+            vec!["M1"],
+            vec!["P1", "P2"],
+            "A*IQ+A*P1*P2+IQ*M1",
+            "single_m",
+        ),
+        // Single P pin
+        (
+            vec!["M1", "M2"],
+            vec!["P1"],
+            "A*IQ+A*P1+IQ*M1+IQ*M2",
+            "single_p",
+        ),
         // No M pins
         (vec![], vec!["P1", "P2"], "A*IQ+A*P1*P2", "no_m"),
         // No P pins
         (vec!["M1", "M2"], vec![], "A*IQ+IQ*M1+IQ*M2", "no_p"),
         // Three M pins
-        (vec!["M1", "M2", "M3"], vec!["P1"], "A*IQ+A*P1+IQ*M1+IQ*M2+IQ*M3", "three_m"),
+        (
+            vec!["M1", "M2", "M3"],
+            vec!["P1"],
+            "A*IQ+A*P1+IQ*M1+IQ*M2+IQ*M3",
+            "three_m",
+        ),
     ];
-    
+
     let clock_pin = "G";
     let reset_regex = Regex::new(r"(R|S)N?").unwrap();
-    
+
     for (m_pins, p_pins, data_in_expr, test_name) in test_cases {
         // Generate all input pins (A + M pins + P pins)
         let mut all_pins = vec!["A"];
-        all_pins.extend(m_pins.iter().map(|s| *s));
-        all_pins.extend(p_pins.iter().map(|s| *s));
-        
+        all_pins.extend(m_pins.iter().copied());
+        all_pins.extend(p_pins.iter().copied());
+
         // Generate pin definitions
-        let pin_defs: String = all_pins.iter()
+        let pin_defs: String = all_pins
+            .iter()
             .map(|pin| format!("pin({}) {{ direction: input; }}", pin))
             .collect::<Vec<_>>()
             .join("\n        ");
-        
+
         // Generate timing for A pin (main input)
         let a_timing = r#"
             timing() {
@@ -821,8 +966,9 @@ fn test_racelem21x1_pattern_variations() {
                 fall_transition(test_template) { values("0.025, 0.055", "0.055, 0.085"); }
             }
             "#;
-        
-        let lib_str = format!(r#"
+
+        let lib_str = format!(
+            r#"
 library({}_test) {{
     delay_model: table_lookup;
     
@@ -860,50 +1006,80 @@ library({}_test) {{
         }}
     }}
 }}
-        "#, test_name, data_in_expr, pin_defs, a_timing);
-        
+        "#,
+            test_name, data_in_expr, pin_defs, a_timing
+        );
+
         let result = std::panic::catch_unwind(|| {
             let mut liberty = parse_lib(&lib_str)
-                .expect(&format!("Failed to parse {} variation", test_name));
-            
+                .unwrap_or_else(|_| panic!("Failed to parse {} variation", test_name));
+
             for lib in liberty.iter_mut() {
                 process_library(lib, clock_pin, &reset_regex, false);
             }
-            
+
             let lib = &liberty[0];
             let cell = lib.iter_cells().next().unwrap();
-            
+
             // Should have converted latch to ff
             let ff_group = cell.iter_subgroups_of_type("ff").next();
-            assert!(ff_group.is_some(), 
-                    "RACELEM variant {} should have ff group after processing", test_name);
-            
+            assert!(
+                ff_group.is_some(),
+                "RACELEM variant {} should have ff group after processing",
+                test_name
+            );
+
             // All non-reset input pins should have timing constraints
             for pin_name in &all_pins {
                 let pin = cell.iter_pins().find(|p| &p.name == pin_name).unwrap();
-                
+
                 // Should have nextstate_type
-                assert_eq!(pin.simple_attribute("nextstate_type").unwrap().expr(), "data",
-                          "Pin {} should have nextstate_type in {}", pin_name, test_name);
-                
+                assert_eq!(
+                    pin.simple_attribute("nextstate_type").unwrap().expr(),
+                    "data",
+                    "Pin {} should have nextstate_type in {}",
+                    pin_name,
+                    test_name
+                );
+
                 // Should have both setup and hold timing
-                let setup_count = pin.iter_subgroups_of_type("timing")
-                    .filter(|t| t.simple_attribute("timing_type")
-                        .map(|tt| tt.expr() == "setup_rising")
-                        .unwrap_or(false))
+                let setup_count = pin
+                    .iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .map(|tt| tt.expr() == "setup_rising")
+                            .unwrap_or(false)
+                    })
                     .count();
-                assert!(setup_count > 0, "Pin {} should have setup timing in {}", pin_name, test_name);
-                
-                let hold_count = pin.iter_subgroups_of_type("timing")
-                    .filter(|t| t.simple_attribute("timing_type")
-                        .map(|tt| tt.expr() == "hold_rising")
-                        .unwrap_or(false))
+                assert!(
+                    setup_count > 0,
+                    "Pin {} should have setup timing in {}",
+                    pin_name,
+                    test_name
+                );
+
+                let hold_count = pin
+                    .iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .map(|tt| tt.expr() == "hold_rising")
+                            .unwrap_or(false)
+                    })
                     .count();
-                assert!(hold_count > 0, "Pin {} should have hold timing in {}", pin_name, test_name);
+                assert!(
+                    hold_count > 0,
+                    "Pin {} should have hold timing in {}",
+                    pin_name,
+                    test_name
+                );
             }
         });
-        
-        assert!(result.is_ok(), "RACELEM variation {} should not panic", test_name);
+
+        assert!(
+            result.is_ok(),
+            "RACELEM variation {} should not panic",
+            test_name
+        );
     }
 }
 
@@ -918,9 +1094,10 @@ fn test_reference_cells_reset_patterns() {
         (r"CLR", "clear_pin"),
         (r"RST_?N?", "rst_variations"),
     ];
-    
+
     for (reset_pattern, test_name) in reset_patterns {
-        let lib_str = format!(r#"
+        let lib_str = format!(
+            r#"
 library({}_reset_test) {{
     delay_model: table_lookup;
     
@@ -956,36 +1133,49 @@ library({}_reset_test) {{
         }}
     }}
 }}
-        "#, test_name);
-        
-        let mut liberty = parse_lib(&lib_str)
-            .expect(&format!("Failed to parse {} test", test_name));
-        
+        "#,
+            test_name
+        );
+
+        let mut liberty =
+            parse_lib(&lib_str).unwrap_or_else(|_| panic!("Failed to parse {} test", test_name));
+
         let clock_pin = "G";
         let reset_regex = Regex::new(reset_pattern)
-            .expect(&format!("Invalid regex pattern: {}", reset_pattern));
-        
+            .unwrap_or_else(|_| panic!("Invalid regex pattern: {}", reset_pattern));
+
         process_library(&mut liberty[0], clock_pin, &reset_regex, false);
-        
+
         let lib = &liberty[0];
         let cell = lib.iter_cells().next().unwrap();
-        
+
         // Cell should be processed successfully
-        assert!(cell.iter_subgroups_of_type("ff").next().is_some(),
-                "Reset pattern {} should allow cell processing", test_name);
-        
+        assert!(
+            cell.iter_subgroups_of_type("ff").next().is_some(),
+            "Reset pattern {} should allow cell processing",
+            test_name
+        );
+
         // Current behavior: Reset pin does get nextstate_type (this is the working behavior)
         let reset_pin = cell.iter_pins().find(|p| p.name == "RESET_N").unwrap();
         // Document current behavior for regression testing
         if reset_pin.simple_attribute("nextstate_type").is_some() {
-            eprintln!("Reset pin has nextstate_type with pattern {} (current working behavior)", test_name);
+            eprintln!(
+                "Reset pin has nextstate_type with pattern {} (current working behavior)",
+                test_name
+            );
         }
-        
+
         // Non-reset pins should get constraints
         for pin_name in ["A", "B"] {
             let pin = cell.iter_pins().find(|p| p.name == pin_name).unwrap();
-            assert_eq!(pin.simple_attribute("nextstate_type").unwrap().expr(), "data",
-                      "Pin {} should have nextstate_type with reset pattern {}", pin_name, test_name);
+            assert_eq!(
+                pin.simple_attribute("nextstate_type").unwrap().expr(),
+                "data",
+                "Pin {} should have nextstate_type with reset pattern {}",
+                pin_name,
+                test_name
+            );
         }
     }
 }
@@ -994,67 +1184,76 @@ library({}_reset_test) {{
 #[test]
 fn test_real_file_transformation_determinism() {
     let input_path = "examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
-    
+
     if !Path::new(input_path).exists() {
         eprintln!("Skipping determinism test - example files not found");
         return;
     }
-    
+
     let clock_pin = "G";
     let reset_regex = Regex::new(r"(R|S)N?").unwrap();
-    
+
     // Process the same file multiple times and verify identical results
     let mut results = Vec::new();
-    
+
     for run in 0..3 {
         let mut liberty = parse_liberty_file(Path::new(input_path))
-            .expect(&format!("Failed to parse on run {}", run));
-        
+            .unwrap_or_else(|_| panic!("Failed to parse on run {}", run));
+
         for lib in liberty.iter_mut() {
             process_library(lib, clock_pin, &reset_regex, false);
         }
-        
+
         // Extract key properties for comparison
         let lib = &liberty[0];
-        
+
         let mut cell_properties = Vec::new();
         for cell in lib.iter_cells() {
             if ["RCELEM2X1", "RACELEM21X1"].contains(&cell.name.as_str()) {
                 let latch_count = cell.iter_subgroups_of_type("latch").count();
                 let ff_count = cell.iter_subgroups_of_type("ff").count();
-                
+
                 let mut pin_constraints = Vec::new();
                 for pin in cell.iter_pins() {
-                    let setup_count = pin.iter_subgroups_of_type("timing")
-                        .filter(|t| t.simple_attribute("timing_type")
-                            .map(|tt| tt.expr() == "setup_rising")
-                            .unwrap_or(false))
+                    let setup_count = pin
+                        .iter_subgroups_of_type("timing")
+                        .filter(|t| {
+                            t.simple_attribute("timing_type")
+                                .map(|tt| tt.expr() == "setup_rising")
+                                .unwrap_or(false)
+                        })
                         .count();
-                    let hold_count = pin.iter_subgroups_of_type("timing")
-                        .filter(|t| t.simple_attribute("timing_type")
-                            .map(|tt| tt.expr() == "hold_rising")
-                            .unwrap_or(false))
+                    let hold_count = pin
+                        .iter_subgroups_of_type("timing")
+                        .filter(|t| {
+                            t.simple_attribute("timing_type")
+                                .map(|tt| tt.expr() == "hold_rising")
+                                .unwrap_or(false)
+                        })
                         .count();
                     pin_constraints.push((pin.name.clone(), setup_count, hold_count));
                 }
                 pin_constraints.sort();
-                
+
                 cell_properties.push((cell.name.clone(), latch_count, ff_count, pin_constraints));
             }
         }
         cell_properties.sort();
-        
-        let pseudo_template_count = lib.iter_subgroups_of_type("lu_table_template")
+
+        let pseudo_template_count = lib
+            .iter_subgroups_of_type("lu_table_template")
             .filter(|t| t.name.contains("pseudo"))
             .count();
-        
+
         results.push((cell_properties, pseudo_template_count));
     }
-    
+
     // All results should be identical
     for i in 1..results.len() {
-        assert_eq!(results[0], results[i], 
-                  "Real file transformation should be deterministic across runs");
+        assert_eq!(
+            results[0], results[i],
+            "Real file transformation should be deterministic across runs"
+        );
     }
 }
 
@@ -1080,21 +1279,27 @@ library(no_timing_test) {
     }
 }
     "#;
-    
+
     let mut liberty = parse_lib(lib_str).expect("Failed to parse no timing test");
     let clock_pin = "G";
     let reset_regex = Regex::new(r"(R|S)N?").unwrap();
-    
+
     // Should handle cells with no timing gracefully
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         process_library(&mut liberty[0], clock_pin, &reset_regex, false);
     }));
-    
+
     // Should not panic even without timing information
-    assert!(result.is_ok(), "Should handle cells with no timing information");
-    
+    assert!(
+        result.is_ok(),
+        "Should handle cells with no timing information"
+    );
+
     // Cell should still be identified as qualifying
     let lib = &liberty[0];
     let cell = lib.iter_cells().next().unwrap();
-    assert!(cell_qualifies(cell, clock_pin), "Cell should still qualify without timing info");
+    assert!(
+        cell_qualifies(cell, clock_pin),
+        "Cell should still qualify without timing info"
+    );
 }

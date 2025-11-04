@@ -2,16 +2,17 @@
 //! Ensures that processing remains performant as codebase evolves
 //! Includes benchmarks for RCELEM2X1 and RACELEM21X1 reference cells
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use pseudosync::*;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use liberty_parse::parse_lib;
+use pseudosync::*;
 use regex::Regex;
-use std::time::Duration;
 use std::path::Path;
+use std::time::Duration;
 
 /// Generate a test library with varying numbers of latch cells
 fn generate_test_library(num_cells: usize) -> String {
-    let mut lib = String::from(r#"
+    let mut lib = String::from(
+        r#"
 library(benchmark_lib) {
     delay_model: table_lookup;
     time_unit: "1ns";
@@ -22,10 +23,12 @@ library(benchmark_lib) {
         index_1("0.01, 0.02, 0.03, 0.04, 0.05");
         index_2("0.001, 0.002, 0.003, 0.004, 0.005");
     }
-"#);
+"#,
+    );
 
     for i in 0..num_cells {
-        let cell = format!(r#"
+        let cell = format!(
+            r#"
     cell(LATCH_CELL_{}) {{
         area: {};
         
@@ -218,10 +221,13 @@ library(benchmark_lib) {
             }}
         }}
     }}
-"#, i, i as f64 * 1.5);
+"#,
+            i,
+            i as f64 * 1.5
+        );
         lib.push_str(&cell);
     }
-    
+
     lib.push_str("}\n");
     lib
 }
@@ -229,21 +235,19 @@ library(benchmark_lib) {
 /// Benchmark parsing Liberty files of different sizes
 fn bench_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("parsing");
-    
+
     for size in [1, 5, 10, 20, 50].iter() {
         let lib_str = generate_test_library(*size);
-        
+
         group.bench_with_input(
             BenchmarkId::new("parse_liberty", size),
             &lib_str,
             |b, lib_str| {
-                b.iter(|| {
-                    black_box(parse_lib(lib_str).expect("Failed to parse"))
-                });
+                b.iter(|| black_box(parse_lib(lib_str).expect("Failed to parse")));
             },
         );
     }
-    
+
     group.finish();
 }
 
@@ -251,68 +255,72 @@ fn bench_parsing(c: &mut Criterion) {
 fn bench_processing(c: &mut Criterion) {
     let mut group = c.benchmark_group("processing");
     group.measurement_time(Duration::from_secs(10));
-    
+
+    let clock_name = "CLK";
+    let reset_name = Regex::new(r"RST").unwrap();
+
     for size in [1, 5, 10, 20, 50].iter() {
         let lib_str = generate_test_library(*size);
         let liberty = parse_lib(&lib_str).expect("Failed to parse for benchmark");
-        
+
         group.bench_with_input(
             BenchmarkId::new("process_ff_mode", size),
             &liberty,
             |b, liberty| {
-                let clock_name = "CLK";
-                let reset_name = Regex::new(r"RST").unwrap();
-                
                 b.iter(|| {
                     let mut lib_copy = black_box(liberty.clone());
-                    black_box(process_library(&mut lib_copy[0], clock_name, &reset_name, false));
+                    process_library(&mut lib_copy[0], clock_name, &reset_name, false);
+                    black_box(());
                 });
             },
         );
-        
+
         group.bench_with_input(
             BenchmarkId::new("process_latch_mode", size),
             &liberty,
             |b, liberty| {
-                let clock_name = "CLK";
-                let reset_name = Regex::new(r"RST").unwrap();
-                
                 b.iter(|| {
                     let mut lib_copy = black_box(liberty.clone());
-                    black_box(process_library(&mut lib_copy[0], clock_name, &reset_name, true));
+                    process_library(&mut lib_copy[0], clock_name, &reset_name, true);
+                    black_box(());
                 });
             },
         );
     }
-    
+
     group.finish();
 }
 
 /// Benchmark timing table processing
 fn bench_timing_calculations(c: &mut Criterion) {
-    use pseudosync::{mean_timingtable, mean_reference_arc, RefArc};
-    use ndarray::Array1;
-    use liberty_parse::liberty::Group;
     use liberty_parse::ast::Value;
     use liberty_parse::liberty::Attribute;
-    
+    use liberty_parse::liberty::Group;
+    use ndarray::Array1;
+    use pseudosync::{mean_reference_arc, mean_timingtable, RefArc};
+
     let mut group = c.benchmark_group("timing_calculations");
-    
+
     // Create test timing groups with various sizes
     for size in [3, 5, 10, 20].iter() {
         // Generate timing values
         let values: Vec<Value> = (0..*size)
-            .map(|i| Value::FloatGroup((0..*size).map(|j| (i as f64 + 1.0) * 0.1 + (j as f64 + 1.0) * 0.01).collect()))
+            .map(|i| {
+                Value::FloatGroup(
+                    (0..*size)
+                        .map(|j| (i as f64 + 1.0) * 0.1 + (j as f64 + 1.0) * 0.01)
+                        .collect(),
+                )
+            })
             .collect();
-        
+
         let mut timing_group = Group::new("cell_rise", "test_template");
-        timing_group.attributes.insert(
-            "values".to_string(),
-            vec![Attribute::Complex(values)]
-        );
-        
+        timing_group
+            .attributes
+            .insert("values".to_string(), vec![Attribute::Complex(values)]);
+
         let timing_groups = vec![&timing_group; 10]; // Multiple identical groups
-        
+
         group.bench_with_input(
             BenchmarkId::new("mean_timing_table", format!("{}x{}", size, size)),
             &timing_groups,
@@ -323,7 +331,7 @@ fn bench_timing_calculations(c: &mut Criterion) {
             },
         );
     }
-    
+
     // Benchmark RefArc calculations
     let ref_arcs: Vec<RefArc> = (0..10)
         .map(|i| RefArc {
@@ -331,19 +339,35 @@ fn bench_timing_calculations(c: &mut Criterion) {
             row: 2,
             related_pin: format!("pin_{}", i),
             lut_template: "test_template".to_string(),
-            rise_trans: Array1::from_vec((0..5).map(|j| (i as f64 + 1.0) * 0.01 + j as f64 * 0.001).collect()),
-            fall_trans: Array1::from_vec((0..5).map(|j| (i as f64 + 1.0) * 0.01 + j as f64 * 0.001).collect()),
-            cell_rise: Array1::from_vec((0..5).map(|j| (i as f64 + 1.0) * 0.1 + j as f64 * 0.01).collect()),
-            cell_fall: Array1::from_vec((0..5).map(|j| (i as f64 + 1.0) * 0.1 + j as f64 * 0.01).collect()),
+            rise_trans: Array1::from_vec(
+                (0..5)
+                    .map(|j| (i as f64 + 1.0) * 0.01 + j as f64 * 0.001)
+                    .collect(),
+            ),
+            fall_trans: Array1::from_vec(
+                (0..5)
+                    .map(|j| (i as f64 + 1.0) * 0.01 + j as f64 * 0.001)
+                    .collect(),
+            ),
+            cell_rise: Array1::from_vec(
+                (0..5)
+                    .map(|j| (i as f64 + 1.0) * 0.1 + j as f64 * 0.01)
+                    .collect(),
+            ),
+            cell_fall: Array1::from_vec(
+                (0..5)
+                    .map(|j| (i as f64 + 1.0) * 0.1 + j as f64 * 0.01)
+                    .collect(),
+            ),
         })
         .collect();
-        
+
     group.bench_function("mean_reference_arc", |b| {
         b.iter(|| {
             black_box(mean_reference_arc(black_box(ref_arcs.clone())));
         });
     });
-    
+
     group.finish();
 }
 
@@ -351,45 +375,46 @@ fn bench_timing_calculations(c: &mut Criterion) {
 fn bench_end_to_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("end_to_end");
     group.measurement_time(Duration::from_secs(15));
-    
+
+    let clock_name = "CLK";
+    let reset_name = Regex::new(r"RST").unwrap();
+
     for size in [1, 5, 10, 25].iter() {
         let lib_str = generate_test_library(*size);
-        
+
         group.bench_with_input(
             BenchmarkId::new("complete_workflow", size),
             &lib_str,
             |b, lib_str| {
-                let clock_name = "CLK";
-                let reset_name = Regex::new(r"RST").unwrap();
-                
                 b.iter(|| {
                     // Complete workflow: parse -> process -> convert back
                     let mut liberty = black_box(parse_lib(lib_str).expect("Parse failed"));
-                    black_box(process_library(&mut liberty[0], clock_name, &reset_name, false));
+                    process_library(&mut liberty[0], clock_name, &reset_name, false);
+                    black_box(());
                     let _ast = black_box(liberty.to_ast());
                 });
             },
         );
     }
-    
+
     group.finish();
 }
 
 /// Benchmark memory usage patterns
 fn bench_memory_patterns(c: &mut Criterion) {
     let mut group = c.benchmark_group("memory");
-    
+
     // Test with a moderately sized library
     let lib_str = generate_test_library(10);
     let liberty = parse_lib(&lib_str).expect("Failed to parse");
-    
+
     // Benchmark cloning (memory allocation)
     group.bench_function("clone_liberty", |b| {
         b.iter(|| {
             black_box(liberty.clone());
         });
     });
-    
+
     // Benchmark AST conversion (memory transformation)
     group.bench_function("liberty_to_ast", |b| {
         b.iter(|| {
@@ -397,7 +422,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
             black_box(lib_copy.to_ast());
         });
     });
-    
+
     // Benchmark string serialization (memory to string)
     group.bench_function("ast_to_string", |b| {
         let ast = liberty.clone().to_ast();
@@ -405,7 +430,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
             black_box(format!("{}", ast));
         });
     });
-    
+
     group.finish();
 }
 
@@ -577,7 +602,8 @@ library(rcelem_bench) {
         }
     }
 }
-    "#.to_string()
+    "#
+    .to_string()
 }
 
 /// Generate RACELEM21X1-like test cell for benchmarking
@@ -690,108 +716,121 @@ library(racelem_bench) {
         }
     }
 }
-    "#.to_string()
+    "#
+    .to_string()
 }
 
 /// Benchmark processing reference cell patterns
 fn bench_reference_cells(c: &mut Criterion) {
     let mut group = c.benchmark_group("reference_cells");
     group.measurement_time(Duration::from_secs(10));
-    
+
     let rcelem_lib = generate_rcelem2x1_cell();
     let racelem_lib = generate_racelem21x1_cell();
-    
+
     // Parse libraries once for benchmarking
     let rcelem_liberty = parse_lib(&rcelem_lib).expect("Failed to parse RCELEM2X1");
     let racelem_liberty = parse_lib(&racelem_lib).expect("Failed to parse RACELEM21X1");
-    
+
     let clock_name = "G";
     let reset_name = Regex::new(r"(R|S)N?").unwrap();
-    
+
     // Benchmark RCELEM2X1 processing
     group.bench_function("rcelem2x1_ff_mode", |b| {
         b.iter(|| {
             let mut lib_copy = black_box(rcelem_liberty.clone());
-            black_box(process_library(&mut lib_copy[0], clock_name, &reset_name, false));
+            process_library(&mut lib_copy[0], clock_name, &reset_name, false);
+            black_box(());
         });
     });
-    
+
     group.bench_function("rcelem2x1_latch_mode", |b| {
         b.iter(|| {
             let mut lib_copy = black_box(rcelem_liberty.clone());
-            black_box(process_library(&mut lib_copy[0], clock_name, &reset_name, true));
+            process_library(&mut lib_copy[0], clock_name, &reset_name, true);
+            black_box(());
         });
     });
-    
-    // Benchmark RACELEM21X1 processing  
+
+    // Benchmark RACELEM21X1 processing
     group.bench_function("racelem21x1_ff_mode", |b| {
         b.iter(|| {
             let mut lib_copy = black_box(racelem_liberty.clone());
-            black_box(process_library(&mut lib_copy[0], clock_name, &reset_name, false));
+            process_library(&mut lib_copy[0], clock_name, &reset_name, false);
+            black_box(());
         });
     });
-    
+
     group.bench_function("racelem21x1_latch_mode", |b| {
         b.iter(|| {
             let mut lib_copy = black_box(racelem_liberty.clone());
-            black_box(process_library(&mut lib_copy[0], clock_name, &reset_name, true));
+            process_library(&mut lib_copy[0], clock_name, &reset_name, true);
+            black_box(());
         });
     });
-    
+
     // Benchmark cell qualification for reference cells
     let rcelem_cell = rcelem_liberty[0].get_cell("RCELEM2X1_BENCH").unwrap();
     let racelem_cell = racelem_liberty[0].get_cell("RACELEM21X1_BENCH").unwrap();
-    
+
     group.bench_function("rcelem2x1_qualification", |b| {
         b.iter(|| {
-            black_box(cell_qualifies(black_box(rcelem_cell), black_box(clock_name)));
+            black_box(cell_qualifies(
+                black_box(rcelem_cell),
+                black_box(clock_name),
+            ));
         });
     });
-    
+
     group.bench_function("racelem21x1_qualification", |b| {
         b.iter(|| {
-            black_box(cell_qualifies(black_box(racelem_cell), black_box(clock_name)));
+            black_box(cell_qualifies(
+                black_box(racelem_cell),
+                black_box(clock_name),
+            ));
         });
     });
-    
+
     group.finish();
 }
 
 /// Benchmark real file processing if available
 fn bench_real_file(c: &mut Criterion) {
-    let input_path = "/Users/msartori/Developer/pseudosync/examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
-    
+    let input_path =
+        "/Users/msartori/Developer/pseudosync/examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib";
+
     if !Path::new(input_path).exists() {
         eprintln!("Skipping real file benchmark - example file not found");
         return;
     }
-    
+
     let mut group = c.benchmark_group("real_file");
     group.sample_size(10); // Reduce sample size for large files
     group.measurement_time(Duration::from_secs(30));
-    
+
     group.bench_function("parse_large_liberty_file", |b| {
         b.iter(|| {
             let liberty = parse_liberty_file(black_box(Path::new(input_path)));
             black_box(liberty)
         })
     });
-    
+
     // Only benchmark processing if parsing succeeds
     if let Ok(liberty) = parse_liberty_file(Path::new(input_path)) {
         group.bench_function("process_large_library_ff_mode", |b| {
             let clock_name = "G";
             let reset_name = Regex::new(r"(R|S)N?").unwrap();
-            
+
             b.iter(|| {
                 let mut lib_copy = black_box(liberty.clone());
                 for lib in lib_copy.iter_mut() {
-                    black_box(process_library(lib, clock_name, &reset_name, false));
+                    process_library(lib, clock_name, &reset_name, false);
+                    black_box(());
                 }
             });
         });
     }
-    
+
     group.finish();
 }
 
