@@ -135,16 +135,27 @@ pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<
             continue;
         }
 
-        // Parse row format: "input_values : current_state : next_state"
+        // Parse row format: "input_values : current_states : next_states"
         let parts: Vec<&str> = row.split(':').map(|s| s.trim()).collect();
         if parts.len() != 3 {
             continue;
         }
 
         let input_values = parts[0];
+        let current_states = parts[1];
         let next_states = parts[2];
 
-        // Build condition for this row
+        // Verify current states match number of outputs
+        let current_state_chars: Vec<char> = current_states
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        if current_state_chars.len() != outputs.len() {
+            continue;
+        }
+
+        // Build base condition from inputs only
         let input_chars: Vec<char> = input_values
             .chars()
             .filter(|c| !c.is_whitespace())
@@ -154,22 +165,15 @@ pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<
             continue;
         }
 
-        let mut conditions = Vec::new();
+        let mut base_conditions = Vec::new();
         for (i, &val) in input_chars.iter().enumerate() {
             match val {
-                'H' | '1' => conditions.push(inputs[i].to_string()),
-                'L' | '0' => conditions.push(format!("!{}", inputs[i])),
+                'H' | '1' => base_conditions.push(inputs[i].to_string()),
+                'L' | '0' => base_conditions.push(format!("!{}", inputs[i])),
                 '-' | 'X' => {} // Don't care, skip
                 _ => {}
             }
         }
-
-        // Build the term for this row
-        let term = if conditions.is_empty() {
-            "1".to_string()
-        } else {
-            conditions.join("*")
-        };
 
         // Parse next states for each output
         let next_state_chars: Vec<char> =
@@ -181,102 +185,88 @@ pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<
 
         // Categorise based on next state for each output
         for (output_idx, &next_state) in next_state_chars.iter().enumerate() {
+            let current_state = current_state_chars[output_idx];
+
+            // Build condition including current state of this output
+            let mut conditions = base_conditions.clone();
+            match current_state {
+                'H' | '1' => conditions.push(outputs[output_idx].to_string()),
+                'L' | '0' => conditions.push(format!("!{}", outputs[output_idx])),
+                '-' | 'N' | 'X' => {} // Don't care, skip
+                _ => {}
+            }
+
+            let term = if conditions.is_empty() {
+                "1".to_string()
+            } else {
+                conditions.join("*")
+            };
+
             match next_state {
                 'H' | '1' => {
                     // Activation: output goes high
-                    activation_terms
-                        .entry(output_idx)
-                        .or_default()
-                        .push(term.clone());
+                    activation_terms.entry(output_idx).or_default().push(term);
                 }
                 'N' | '-' => {
                     // Hold: output stays at current state
-                    hold_terms.entry(output_idx).or_default().push(term.clone());
+                    hold_terms.entry(output_idx).or_default().push(term);
                 }
                 'L' | '0' => {
                     // Deactivation: output goes low
-                    deactivation_terms
-                        .entry(output_idx)
-                        .or_default()
-                        .push(term.clone());
+                    deactivation_terms.entry(output_idx).or_default().push(term);
                 }
                 _ => {}
             }
         }
     }
 
-    // Build the complete characteristic function for each output: activation + output*!(deactivation)
+    // Build the complete characteristic function for each output
     let mut result = BTreeMap::new();
 
     for (output_idx, output_name) in outputs.iter().enumerate() {
-        eprintln!("\n=== Processing output: {} ===", output_name);
-
-        let activation_str = activation_terms
-            .get(&output_idx)
-            .map(|t| t.join("+"))
-            .unwrap_or_else(|| "0".to_string());
-        eprintln!("Activation terms: {}", activation_str);
-
-        let hold_str = hold_terms
-            .get(&output_idx)
-            .map(|t| t.join("+"))
-            .unwrap_or_else(|| "0".to_string());
-        eprintln!("Hold terms: {}", hold_str);
-
-        let deactivation_str = deactivation_terms
-            .get(&output_idx)
-            .map(|t| t.join("+"))
-            .unwrap_or_else(|| "0".to_string());
-        eprintln!("Deactivation terms: {}", deactivation_str);
-
         let activation_expr = if let Some(terms) = activation_terms.get(&output_idx) {
             let expr = parse_boolean_expr_with_interning(&terms.join("+"), &mut intern_pool)?;
             // Simplify activation expression
-            expr.simplify_via_laws().simplify_via_bdd()
+            expr.simplify_via_bdd()
         } else {
             parse_boolean_expr_with_interning("0", &mut intern_pool)?
         };
 
-        // Build the complete expression
-        let complete_expr = if let Some(terms) = hold_terms.get(&output_idx) {
-            eprintln!("Hold expression (from N states): {}", hold_str);
-            let hold_expr = parse_boolean_expr_with_interning(&terms.join("+"), &mut intern_pool)?;
-            let hold_simplified = hold_expr.simplify_via_laws().simplify_via_bdd();
+        // Build hold expression from N states
+        let hold_from_n = if let Some(terms) = hold_terms.get(&output_idx) {
+            let hold_str = terms.join("+");
+            Some(parse_boolean_expr_with_interning(
+                &hold_str,
+                &mut intern_pool,
+            )?)
+        } else {
+            None
+        };
 
-            // Build: activation + output*hold
+        // Build base expression: activation + output*hold
+        let base_expr = if let Some(terms) = hold_terms.get(&output_idx) {
+            let hold_str = terms.join("+");
+            let hold_expr = parse_boolean_expr_with_interning(&hold_str, &mut intern_pool)?;
+            let hold_simplified = hold_expr.simplify_via_bdd();
             let output = Expr::Terminal(intern_string(output_name, &mut intern_pool));
             let output_and_hold = Expr::and(output, hold_simplified);
             Expr::or(activation_expr, output_and_hold)
         } else {
-            eprintln!("Hold expression: none (purely combinational)");
-            // No hold states - purely combinational, just use activation
             activation_expr
         };
 
-        eprintln!(
-            "Complete expression before simplification: {}",
-            format_boolean_expr(&complete_expr)
-        );
+        // Apply deactivation constraint: (activation + output*hold) * !(deactivation)
+        let complete_expr = if let Some(terms) = deactivation_terms.get(&output_idx) {
+            let deact_str = terms.join("+");
+            let deact_expr = parse_boolean_expr_with_interning(&deact_str, &mut intern_pool)?;
+            let not_deact = Expr::not(deact_expr).simplify_via_bdd();
+            Expr::and(base_expr, not_deact)
+        } else {
+            base_expr
+        };
 
-        // Simplify the complete expression using rule-based simplification only
-        let mut simplified = complete_expr.simplify_via_laws();
-        eprintln!(
-            "After simplify_via_laws: {}",
-            format_boolean_expr(&simplified)
-        );
-
-        let mut prev = simplified.clone();
-
-        // Keep applying until no more changes
-        for _ in 0..5 {
-            simplified = simplified.simplify_via_laws();
-            if simplified == prev {
-                break;
-            }
-            prev = simplified.clone();
-        }
-
-        eprintln!("Final simplified: {}", format_boolean_expr(&simplified));
+        // Final simplification
+        let simplified = complete_expr.simplify_via_laws().simplify_via_bdd();
 
         // Store the characteristic expression for this output
         result.insert(output_name.to_string(), simplified);
@@ -305,6 +295,70 @@ mod tests {
         }
     }
 
+    /// Collect all terminal variables from an expression
+    fn collect_variables(expr: &Expr<Arc<str>>, vars: &mut HashSet<Arc<str>>) {
+        match expr {
+            Expr::Terminal(s) => {
+                vars.insert(Arc::clone(s));
+            }
+            Expr::Not(inner) => collect_variables(inner, vars),
+            Expr::And(e1, e2) | Expr::Or(e1, e2) => {
+                collect_variables(e1, vars);
+                collect_variables(e2, vars);
+            }
+            _ => {}
+        }
+    }
+
+    /// Evaluate an expression given variable assignments
+    fn evaluate_expr(
+        expr: &Expr<Arc<str>>,
+        assignment: &std::collections::HashMap<Arc<str>, bool>,
+    ) -> bool {
+        match expr {
+            Expr::Terminal(s) => *assignment.get(s).unwrap_or(&false),
+            Expr::Not(inner) => !evaluate_expr(inner, assignment),
+            Expr::And(e1, e2) => evaluate_expr(e1, assignment) && evaluate_expr(e2, assignment),
+            Expr::Or(e1, e2) => evaluate_expr(e1, assignment) || evaluate_expr(e2, assignment),
+            Expr::Const(b) => *b,
+        }
+    }
+
+    /// Check logical equivalence by evaluating both expressions against truth table
+    fn assert_logically_equivalent(expr: &Expr<Arc<str>>, expected: &str) {
+        let expected_expr = parse_boolean_expr(expected)
+            .unwrap_or_else(|| panic!("Failed to parse expected expression: {}", expected));
+
+        // Collect all variables from both expressions
+        let mut vars = HashSet::new();
+        collect_variables(expr, &mut vars);
+        collect_variables(&expected_expr, &mut vars);
+
+        let vars: Vec<&str> = vars.iter().map(|s| s.as_ref()).collect();
+
+        // Generate all possible truth assignments
+        let num_combinations = 1 << vars.len();
+
+        for i in 0..num_combinations {
+            let mut assignment = std::collections::HashMap::new();
+            for (j, &var) in vars.iter().enumerate() {
+                assignment.insert(Arc::from(var), (i >> j) & 1 == 1);
+            }
+
+            let result1 = evaluate_expr(expr, &assignment);
+            let result2 = evaluate_expr(&expected_expr, &assignment);
+
+            assert_eq!(
+                result1,
+                result2,
+                "Expressions differ at assignment {:?}\nGot: {}\nExpected: {}",
+                assignment,
+                format_boolean_expr(expr),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn test_simple_and_gate() {
         // AND gate: Q = A*B
@@ -321,10 +375,9 @@ mod tests {
         assert_eq!(result.len(), 1);
 
         let q_expr = result.get("Q").expect("Q not found");
-        let q_str = format_boolean_expr(q_expr);
 
-        // Should be A*B (activation only, no state-dependent terms)
-        assert_eq!(q_str, "A*B");
+        // Verify logical equivalence to A*B
+        assert_logically_equivalent(q_expr, "A*B");
     }
 
     #[test]
@@ -341,10 +394,9 @@ mod tests {
 
         let result = parse_statetable(&statetable).expect("Failed to parse");
         let q_expr = result.get("Q").expect("Q not found");
-        let q_str = format_boolean_expr(q_expr);
 
-        // Should be A+B (or B+A, BDD may reorder)
-        assert!(q_str == "A+B" || q_str == "B+A");
+        // Verify logical equivalence to A+B
+        assert_logically_equivalent(q_expr, "A+B");
     }
 
     #[test]
@@ -361,12 +413,9 @@ mod tests {
 
         let result = parse_statetable(&statetable).expect("Failed to parse");
         let q_expr = result.get("Q").expect("Q not found");
-        let q_str = format_boolean_expr(q_expr);
 
-        // XOR should simplify to some form of A*!B + !A*B
-        // The exact form depends on BDD ordering, but should contain both A and B
-        assert!(q_str.contains("A"));
-        assert!(q_str.contains("B"));
+        // Verify logical equivalence to XOR
+        assert_logically_equivalent(q_expr, "A*!B+!A*B");
     }
 
     #[test]
@@ -391,9 +440,16 @@ mod tests {
 
         // Should be Q*A + Q*B + A*B (BDD-simplified form of A*B + Q*(A+B))
         println!("C-element: {}", q_str);
-        assert!(q_str.contains("Q"));
-        assert!(q_str.contains("A"));
-        assert!(q_str.contains("B"));
+
+        // Verify it contains all three product terms (order may vary)
+        let has_ab = q_str.contains("A*B") || q_str.contains("B*A");
+        let has_qa = q_str.contains("Q*A") || q_str.contains("A*Q");
+        let has_qb = q_str.contains("Q*B") || q_str.contains("B*Q");
+        assert!(
+            has_ab && has_qa && has_qb,
+            "Expected A*B + Q*A + Q*B in some order, got: {}",
+            q_str
+        );
     }
 
     #[test]
@@ -403,8 +459,8 @@ mod tests {
         let statetable = create_statetable(
             "A",
             "Q QN",
-            "H : - : H L, \
-             L : - : L H",
+            "H : - - : H L, \
+             L : - - : L H",
         );
 
         let result = parse_statetable(&statetable).expect("Failed to parse");
@@ -429,10 +485,10 @@ mod tests {
         let statetable = create_statetable(
             "A B",
             "Q1 Q2",
-            "H H : - : H H, \
-             H L : - : H N, \
-             L H : - : N H, \
-             L L : - : L L",
+            "H H : - - : H H, \
+             H L : - - : H N, \
+             L H : - - : N H, \
+             L L : - - : L L",
         );
 
         let result = parse_statetable(&statetable).expect("Failed to parse");
@@ -444,13 +500,14 @@ mod tests {
         let q1_str = format_boolean_expr(q1_expr);
         let q2_str = format_boolean_expr(q2_expr);
 
-        println!("Q1: {}", q1_str);
-        println!("Q2: {}", q2_str);
-
-        // Q1 should depend on A and possibly Q1 (state-dependent)
+        // Q1 = A*B + Q1*!B = A + Q1*!B (simplified)
+        // Q2 = A*B + Q2*!A = B + Q2*!A (simplified)
+        // Exact forms depend on BDD ordering
         assert!(q1_str.contains("A"));
-        // Q2 should depend on B and possibly Q2 (state-dependent)
+        assert!(q1_str.contains("B") || q1_str.contains("Q1"));
+
         assert!(q2_str.contains("B"));
+        assert!(q2_str.contains("A") || q2_str.contains("Q2"));
     }
 
     #[test]
@@ -466,23 +523,14 @@ mod tests {
 
         let result = parse_statetable(&statetable).expect("Failed to parse");
         let q_expr = result.get("Q").expect("Q not found");
-        let q_str = format_boolean_expr(q_expr);
 
-        println!("Latch: {}", q_str);
-
-        // The BDD should simplify to E*D + !E*Q (D*Q term should be absorbed)
-        // But BDD may reorder terms
-        assert!(q_str.contains("D"));
-        assert!(q_str.contains("E"));
-        assert!(q_str.contains("Q"));
-
-        // Verify it's logically correct (should not have D*Q without E)
-        // Common forms: E*D+!E*Q or Q*!E+D*E or similar reorderings
+        // Verify logical equivalence to D-latch characteristic function
+        assert_logically_equivalent(q_expr, "D*E+Q*!E");
     }
 
     #[test]
     fn test_sr_latch() {
-        // SR latch (NOR-based): Q = !R*(!S+Q)
+        // SR latch (NOR-based): Q = S*!R + Q*!R*!S
         let statetable = create_statetable(
             "S R",
             "Q",
@@ -493,13 +541,9 @@ mod tests {
 
         let result = parse_statetable(&statetable).expect("Failed to parse");
         let q_expr = result.get("Q").expect("Q not found");
-        let q_str = format_boolean_expr(q_expr);
 
-        println!("SR Latch: {}", q_str);
-
-        // Should be state-dependent with S, R, and Q
-        assert!(q_str.contains("S") || q_str.contains("R"));
-        assert!(q_str.contains("Q"));
+        // Verify logical equivalence to SR-latch characteristic function
+        assert_logically_equivalent(q_expr, "S*!R+Q*!S*!R");
     }
 
     #[test]
@@ -518,5 +562,51 @@ mod tests {
 
         // Should only depend on A (B and C are don't-care)
         assert_eq!(q_str, "A");
+    }
+
+    #[test]
+    fn test_dual_output_d_latch() {
+        // D-latch with complementary outputs Q and QN
+        // When E=H: Q=D, QN=!D (transparent)
+        // When E=L: Q and QN hold (latched)
+        let statetable = create_statetable(
+            "D E",
+            "Q QN",
+            "H H : - - : H L, \
+             L H : - - : L H, \
+             - L : - - : N N",
+        );
+
+        let result = parse_statetable(&statetable).expect("Failed to parse");
+        assert_eq!(result.len(), 2);
+
+        let q_expr = result.get("Q").expect("Q not found");
+        let qn_expr = result.get("QN").expect("QN not found");
+
+        // Verify logical equivalence
+        assert_logically_equivalent(q_expr, "D*E+Q*!E");
+        assert_logically_equivalent(qn_expr, "!D*E+QN*!E");
+    }
+
+    #[test]
+    fn test_explicit_current_state() {
+        // D-latch using explicit current state instead of 'N'
+        // When E=H: Q=D (transparent)
+        // When E=L: Q holds current value (explicit L->L and H->H)
+        let statetable = create_statetable(
+            "D E",
+            "Q",
+            "H H : - : H, \
+             L H : - : L, \
+             - L : L : L, \
+             - L : H : H",
+        );
+
+        let result = parse_statetable(&statetable).expect("Failed to parse");
+        let q_expr = result.get("Q").expect("Q not found");
+
+        // Should extract same hold condition as using 'N'
+        // Both "- L : - : N" and "- L : L : L, - L : H : H" mean hold when E=L
+        assert_logically_equivalent(q_expr, "D*E+Q*!E");
     }
 }
