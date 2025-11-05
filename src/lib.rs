@@ -5,7 +5,7 @@
 
 mod boolean_logic;
 
-pub use boolean_logic::parse_statetable;
+pub use boolean_logic::{format_boolean_expr, parse_statetable};
 
 use indexmap::IndexMap;
 use itertools::Itertools;
