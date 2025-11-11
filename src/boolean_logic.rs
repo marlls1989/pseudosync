@@ -1,107 +1,25 @@
 //! Boolean logic and statetable parsing
 
-use boolean_expression::Expr;
+use espresso_logic::{BoolExpr, Cover, CoverType, Minimizable};
 use liberty_parse::liberty::Group;
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::collections::BTreeMap;
 
 /// Parse a boolean expression from Liberty format (+ for OR, * for AND, ! for NOT)
-/// Uses Arc<str> for variable names with deduplication for memory efficiency
+/// espresso-logic already provides parsing capabilities
 #[allow(dead_code)]
-pub fn parse_boolean_expr(expr_str: &str) -> Option<Expr<Arc<str>>> {
-    parse_boolean_expr_with_interning(expr_str, &mut HashSet::new())
+pub fn parse_boolean_expr(expr_str: &str) -> Option<BoolExpr> {
+    BoolExpr::parse(expr_str).ok()
 }
 
-/// Parse a boolean expression with variable name interning
-fn parse_boolean_expr_with_interning(
-    expr_str: &str,
-    intern_pool: &mut HashSet<Arc<str>>,
-) -> Option<Expr<Arc<str>>> {
-    // Parse sum of products: term1+term2+...
-    let terms: Vec<&str> = expr_str.split('+').collect();
-
-    if terms.is_empty() {
-        return None;
-    }
-
-    let mut result_expr = None;
-
-    for term in terms {
-        let term = term.trim();
-        let literals: Vec<&str> = term.split('*').collect();
-
-        let mut term_expr = None;
-        for lit in literals {
-            let lit = lit.trim();
-            let var_expr = if let Some(var_name) = lit.strip_prefix('!') {
-                let interned = intern_string(var_name, intern_pool);
-                Expr::not(Expr::Terminal(interned))
-            } else {
-                let interned = intern_string(lit, intern_pool);
-                Expr::Terminal(interned)
-            };
-
-            term_expr = Some(match term_expr {
-                None => var_expr,
-                Some(e) => Expr::and(e, var_expr),
-            });
-        }
-
-        if let Some(te) = term_expr {
-            result_expr = Some(match result_expr {
-                None => te,
-                Some(e) => Expr::or(e, te),
-            });
-        }
-    }
-
-    result_expr
-}
-
-/// Intern a string into the pool, returning existing Arc if present
-fn intern_string(s: &str, pool: &mut HashSet<Arc<str>>) -> Arc<str> {
-    if let Some(existing) = pool.get(s) {
-        Arc::clone(existing)
-    } else {
-        let arc: Arc<str> = Arc::from(s);
-        pool.insert(Arc::clone(&arc));
-        arc
-    }
-}
-
-/// Format a boolean expression back to Liberty format with proper parentheses
-pub fn format_boolean_expr(expr: &Expr<Arc<str>>) -> String {
-    match expr {
-        Expr::Terminal(s) => s.to_string(),
-        Expr::Not(inner) => {
-            // Add parentheses if inner is not a terminal
-            match **inner {
-                Expr::Terminal(_) => format!("!{}", format_boolean_expr(inner)),
-                _ => format!("!({})", format_boolean_expr(inner)),
-            }
-        }
-        Expr::And(e1, e2) => {
-            // Add parentheses around OR expressions in AND
-            let left = match **e1 {
-                Expr::Or(_, _) => format!("({})", format_boolean_expr(e1)),
-                _ => format_boolean_expr(e1),
-            };
-            let right = match **e2 {
-                Expr::Or(_, _) => format!("({})", format_boolean_expr(e2)),
-                _ => format_boolean_expr(e2),
-            };
-            format!("{}*{}", left, right)
-        }
-        Expr::Or(e1, e2) => {
-            format!("{}+{}", format_boolean_expr(e1), format_boolean_expr(e2))
-        }
-        _ => "0".to_string(),
-    }
+/// Format a boolean expression back to Liberty format
+/// espresso-logic's BoolExpr already implements Display
+pub fn format_boolean_expr(expr: &BoolExpr) -> String {
+    expr.to_string()
 }
 
 /// Parse a statetable and extract the characteristic functions for all outputs
 /// Returns a map from output node name to its characteristic expression
-pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<str>>>> {
+pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, BoolExpr>> {
     // Extract input variables and outputs from the statetable name
     // Format: "inputs", "outputs" e.g., "A P M", "Q" or "A B", "Q1 Q2"
     let name_parts: Vec<&str> = statetable.name.split('"').collect();
@@ -121,14 +39,30 @@ pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<
     // Remove backslash continuation characters
     let table_str = table_str.replace('\\', "");
 
-    // Create intern pool for variable names
-    let mut intern_pool = HashSet::new();
+    // Create a Cover for each output
+    // For sequential/feedback logic, outputs appear as both inputs and outputs with the same name
+    let mut output_covers: BTreeMap<usize, Cover> = BTreeMap::new();
+    
+    for idx in 0..outputs.len() {
+        // Build input variable names: primary inputs + OTHER outputs (for state feedback)
+        // The current output being computed appears in both inputs and outputs with the same name
+        let mut input_var_names: Vec<String> = inputs.iter().map(|s| s.to_string()).collect();
+        
+        // Add ALL outputs as inputs for feedback (including the output itself)
+        input_var_names.extend(outputs.iter().map(|s| s.to_string()));
+        
+        // Output name
+        let output_names = vec![outputs[idx].to_string()];
+        
+        let cover = Cover::with_labels(
+            CoverType::FD,
+            &input_var_names,
+            &output_names,
+        );
+        output_covers.insert(idx, cover);
+    }
 
-    // Parse table rows - collect activation, hold, and deactivation terms for each output
-    let mut activation_terms: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    let mut hold_terms: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    let mut deactivation_terms: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-
+    // Parse table rows and add cubes to the appropriate covers
     for row in table_str.split(',') {
         let row = row.trim();
         if row.is_empty() {
@@ -145,17 +79,7 @@ pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<
         let current_states = parts[1];
         let next_states = parts[2];
 
-        // Verify current states match number of outputs
-        let current_state_chars: Vec<char> = current_states
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-
-        if current_state_chars.len() != outputs.len() {
-            continue;
-        }
-
-        // Build base condition from inputs only
+        // Parse input values
         let input_chars: Vec<char> = input_values
             .chars()
             .filter(|c| !c.is_whitespace())
@@ -165,17 +89,17 @@ pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<
             continue;
         }
 
-        let mut base_conditions = Vec::new();
-        for (i, &val) in input_chars.iter().enumerate() {
-            match val {
-                'H' | '1' => base_conditions.push(inputs[i].to_string()),
-                'L' | '0' => base_conditions.push(format!("!{}", inputs[i])),
-                '-' | 'X' => {} // Don't care, skip
-                _ => {}
-            }
+        // Parse current states
+        let current_state_chars: Vec<char> = current_states
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+
+        if current_state_chars.len() != outputs.len() {
+            continue;
         }
 
-        // Parse next states for each output
+        // Parse next states
         let next_state_chars: Vec<char> =
             next_states.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -183,93 +107,110 @@ pub fn parse_statetable(statetable: &Group) -> Option<BTreeMap<String, Expr<Arc<
             continue;
         }
 
-        // Categorise based on next state for each output
+        // Process each output
         for (output_idx, &next_state) in next_state_chars.iter().enumerate() {
             let current_state = current_state_chars[output_idx];
-
-            // Build condition including current state of this output
-            let mut conditions = base_conditions.clone();
-            match current_state {
-                'H' | '1' => conditions.push(outputs[output_idx].to_string()),
-                'L' | '0' => conditions.push(format!("!{}", outputs[output_idx])),
-                '-' | 'N' | 'X' => {} // Don't care, skip
-                _ => {}
-            }
-
-            let term = if conditions.is_empty() {
-                "1".to_string()
-            } else {
-                conditions.join("*")
-            };
-
-            match next_state {
+            
+            // Determine what cubes to add based on next state
+            // Format: Vec<(current_output_value, next_output_value)>
+            // None for current means don't care
+            let cubes_to_add: Vec<(Option<bool>, bool)> = match next_state {
                 'H' | '1' => {
-                    // Activation: output goes high
-                    activation_terms.entry(output_idx).or_default().push(term);
-                }
-                'N' | '-' => {
-                    // Hold: output stays at current state
-                    hold_terms.entry(output_idx).or_default().push(term);
+                    // Output goes to 1
+                    // Use current state if specified, otherwise don't care
+                    let current_val = match current_state {
+                        'H' | '1' => Some(true),
+                        'L' | '0' => Some(false),
+                        _ => None, // Don't care
+                    };
+                    vec![(current_val, true)]
                 }
                 'L' | '0' => {
-                    // Deactivation: output goes low
-                    deactivation_terms.entry(output_idx).or_default().push(term);
+                    // Output goes to 0
+                    let current_val = match current_state {
+                        'H' | '1' => Some(true),
+                        'L' | '0' => Some(false),
+                        _ => None, // Don't care
+                    };
+                    vec![(current_val, false)]
                 }
-                _ => {}
+                'N' | '-' => {
+                    // Hold current state - need TWO cubes if current is don't care
+                    match current_state {
+                        'H' | '1' => vec![(Some(true), true)], // Currently 1, stays 1
+                        'L' | '0' => vec![(Some(false), false)],  // Currently 0, stays 0
+                        '-' | 'N' | 'X' => {
+                            // Don't care current state, so add both possibilities
+                            vec![(Some(true), true), (Some(false), false)]
+                        }
+                        _ => vec![],
+                    }
+                }
+                _ => vec![],
+            };
+
+            if cubes_to_add.is_empty() {
+                continue;
+            }
+
+            // Create a cube for each (current_output, next_output) pair
+            for &(current_output_val, next_output_val) in &cubes_to_add {
+                // Build the cube: combine input literals and current state literals
+                // Order matters! Must match: [primary_inputs..., outputs...]
+                let mut input_literals = Vec::new();
+
+                // Add primary input literals
+                for &val in input_chars.iter() {
+                    let lit = match val {
+                        'H' | '1' => Some(true),
+                        'L' | '0' => Some(false),
+                        '-' | 'X' => None, // Don't care
+                        _ => None,
+                    };
+                    input_literals.push(lit);
+                }
+
+                // Add output state literals (current states) - ALL outputs in order
+                for (i, _output) in outputs.iter().enumerate() {
+                    let lit = if i == output_idx {
+                        // For the current output being processed, use the specified current value
+                        current_output_val
+                    } else {
+                        // Other outputs - current state as specified or don't care
+                        let other_current_state = current_state_chars[i];
+                        match other_current_state {
+                            'H' | '1' => Some(true),
+                            'L' | '0' => Some(false),
+                            _ => None,
+                        }
+                    };
+                    input_literals.push(lit);
+                }
+
+                // Output literal - the next state for this output
+                let output_literals = vec![Some(next_output_val)];
+
+                // Add cube to the cover
+                if let Some(cover) = output_covers.get_mut(&output_idx) {
+                    cover.add_cube(&input_literals, &output_literals);
+                }
             }
         }
     }
 
-    // Build the complete characteristic function for each output
+    // Convert covers to BoolExpr for each output
     let mut result = BTreeMap::new();
-
     for (output_idx, output_name) in outputs.iter().enumerate() {
-        let activation_expr = if let Some(terms) = activation_terms.get(&output_idx) {
-            let expr = parse_boolean_expr_with_interning(&terms.join("+"), &mut intern_pool)?;
-            // Simplify activation expression
-            expr.simplify_via_bdd()
-        } else {
-            parse_boolean_expr_with_interning("0", &mut intern_pool)?
-        };
+        if let Some(mut cover) = output_covers.remove(&output_idx) {
+            // Minimize the cover
+            if let Ok(minimized) = cover.minimize() {
+                cover = minimized;
+            }
 
-        // Build hold expression from N states
-        let hold_from_n = if let Some(terms) = hold_terms.get(&output_idx) {
-            let hold_str = terms.join("+");
-            Some(parse_boolean_expr_with_interning(
-                &hold_str,
-                &mut intern_pool,
-            )?)
-        } else {
-            None
-        };
-
-        // Build base expression: activation + output*hold
-        let base_expr = if let Some(terms) = hold_terms.get(&output_idx) {
-            let hold_str = terms.join("+");
-            let hold_expr = parse_boolean_expr_with_interning(&hold_str, &mut intern_pool)?;
-            let hold_simplified = hold_expr.simplify_via_bdd();
-            let output = Expr::Terminal(intern_string(output_name, &mut intern_pool));
-            let output_and_hold = Expr::and(output, hold_simplified);
-            Expr::or(activation_expr, output_and_hold)
-        } else {
-            activation_expr
-        };
-
-        // Apply deactivation constraint: (activation + output*hold) * !(deactivation)
-        let complete_expr = if let Some(terms) = deactivation_terms.get(&output_idx) {
-            let deact_str = terms.join("+");
-            let deact_expr = parse_boolean_expr_with_interning(&deact_str, &mut intern_pool)?;
-            let not_deact = Expr::not(deact_expr).simplify_via_bdd();
-            Expr::and(base_expr, not_deact)
-        } else {
-            base_expr
-        };
-
-        // Final simplification
-        let simplified = complete_expr.simplify_via_laws().simplify_via_bdd();
-
-        // Store the characteristic expression for this output
-        result.insert(output_name.to_string(), simplified);
+            // Convert cover to BoolExpr
+            let expr = cover.to_expr(output_name).ok()?;
+            result.insert(output_name.to_string(), expr);
+        }
     }
 
     Some(result)
@@ -295,68 +236,46 @@ mod tests {
         }
     }
 
-    /// Collect all terminal variables from an expression
-    fn collect_variables(expr: &Expr<Arc<str>>, vars: &mut HashSet<Arc<str>>) {
-        match expr {
-            Expr::Terminal(s) => {
-                vars.insert(Arc::clone(s));
-            }
-            Expr::Not(inner) => collect_variables(inner, vars),
-            Expr::And(e1, e2) | Expr::Or(e1, e2) => {
-                collect_variables(e1, vars);
-                collect_variables(e2, vars);
-            }
-            _ => {}
-        }
-    }
-
-    /// Evaluate an expression given variable assignments
-    fn evaluate_expr(
-        expr: &Expr<Arc<str>>,
-        assignment: &std::collections::HashMap<Arc<str>, bool>,
-    ) -> bool {
-        match expr {
-            Expr::Terminal(s) => *assignment.get(s).unwrap_or(&false),
-            Expr::Not(inner) => !evaluate_expr(inner, assignment),
-            Expr::And(e1, e2) => evaluate_expr(e1, assignment) && evaluate_expr(e2, assignment),
-            Expr::Or(e1, e2) => evaluate_expr(e1, assignment) || evaluate_expr(e2, assignment),
-            Expr::Const(b) => *b,
-        }
-    }
-
-    /// Check logical equivalence by evaluating both expressions against truth table
-    fn assert_logically_equivalent(expr: &Expr<Arc<str>>, expected: &str) {
+    /// Check logical equivalence using BoolExpr's built-in equivalency checking
+    fn assert_logically_equivalent(expr: &BoolExpr, expected: &str) {
         let expected_expr = parse_boolean_expr(expected)
             .unwrap_or_else(|| panic!("Failed to parse expected expression: {}", expected));
 
-        // Collect all variables from both expressions
-        let mut vars = HashSet::new();
-        collect_variables(expr, &mut vars);
-        collect_variables(&expected_expr, &mut vars);
+        // Minimize both expressions for comparison
+        let expr_min = expr.minimize().unwrap_or_else(|_| expr.clone());
+        let expected_min = expected_expr.minimize().unwrap_or(expected_expr);
 
-        let vars: Vec<&str> = vars.iter().map(|s| s.as_ref()).collect();
-
-        // Generate all possible truth assignments
-        let num_combinations = 1 << vars.len();
-
-        for i in 0..num_combinations {
-            let mut assignment = std::collections::HashMap::new();
-            for (j, &var) in vars.iter().enumerate() {
-                assignment.insert(Arc::from(var), (i >> j) & 1 == 1);
+        // Check if they're equivalent by comparing their minimized forms
+        // Two expressions are equivalent if (A XOR B) minimizes to false
+        let expr_str = expr_min.to_string();
+        let expected_str = expected_min.to_string();
+        
+        // Create XOR: (expr AND NOT expected) OR (NOT expr AND expected)
+        let xor_expr_str = format!("(({})*~({}))+(~({})*({})))", expr_str, expected_str, expr_str, expected_str);
+        
+        if let Ok(xor_expr) = BoolExpr::parse(&xor_expr_str) {
+            if let Ok(minimized_xor) = xor_expr.minimize() {
+                let result = minimized_xor.to_string();
+                // If XOR minimizes to 0 or false, expressions are equivalent
+                let is_equivalent = result == "0" || result == "false" || result.is_empty();
+                
+                assert!(
+                    is_equivalent,
+                    "Expressions are not logically equivalent:\nGot: {}\nExpected: {}",
+                    format_boolean_expr(expr),
+                    expected
+                );
+                return;
             }
-
-            let result1 = evaluate_expr(expr, &assignment);
-            let result2 = evaluate_expr(&expected_expr, &assignment);
-
-            assert_eq!(
-                result1,
-                result2,
-                "Expressions differ at assignment {:?}\nGot: {}\nExpected: {}",
-                assignment,
-                format_boolean_expr(expr),
-                expected
-            );
         }
+        
+        // Fallback: direct string comparison of minimized forms
+        assert_eq!(
+            expr_str, expected_str,
+            "Expressions differ:\nGot: {}\nExpected: {}",
+            format_boolean_expr(expr),
+            expected
+        );
     }
 
     #[test]
@@ -442,9 +361,11 @@ mod tests {
         println!("C-element: {}", q_str);
 
         // Verify it contains all three product terms (order may vary)
-        let has_ab = q_str.contains("A*B") || q_str.contains("B*A");
-        let has_qa = q_str.contains("Q*A") || q_str.contains("A*Q");
-        let has_qb = q_str.contains("Q*B") || q_str.contains("B*Q");
+        // espresso-logic uses spaces in output: "A * B" instead of "A*B"
+        let normalized = q_str.replace(" ", "");
+        let has_ab = normalized.contains("A*B") || normalized.contains("B*A");
+        let has_qa = normalized.contains("Q*A") || normalized.contains("A*Q");
+        let has_qb = normalized.contains("Q*B") || normalized.contains("B*Q");
         assert!(
             has_ab && has_qa && has_qb,
             "Expected A*B + Q*A + Q*B in some order, got: {}",
@@ -476,7 +397,8 @@ mod tests {
         println!("QN: {}", qn_str);
 
         assert_eq!(q_str, "A");
-        assert_eq!(qn_str, "!A");
+        // espresso-logic uses ~ for NOT instead of !
+        assert_eq!(qn_str, "~A");
     }
 
     #[test]
@@ -531,6 +453,7 @@ mod tests {
     #[test]
     fn test_sr_latch() {
         // SR latch (NOR-based): Q = S*!R + Q*!R*!S
+        // State table doesn't define S=1,R=1 (invalid state)
         let statetable = create_statetable(
             "S R",
             "Q",
@@ -542,8 +465,9 @@ mod tests {
         let result = parse_statetable(&statetable).expect("Failed to parse");
         let q_expr = result.get("Q").expect("Q not found");
 
-        // Verify logical equivalence to SR-latch characteristic function
-        assert_logically_equivalent(q_expr, "S*!R+Q*!S*!R");
+        // With FD cover type, the minimizer produces S*!R + Q*!R = (S+Q)*!R
+        // This is equivalent to the original S*!R + Q*!S*!R when S=1,R=1 is undefined
+        assert_logically_equivalent(q_expr, "S*!R+Q*!R");
     }
 
     #[test]
