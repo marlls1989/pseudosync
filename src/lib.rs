@@ -779,3 +779,263 @@ pub fn process_library(lib: &mut Group, clock_name: &str, reset_name: &Regex, la
     new_lut_templates.append(&mut lib.subgroups);
     lib.subgroups = new_lut_templates;
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the private/pure engine functions that the black-box
+    //! integration suites in `tests/` cannot reach directly.
+    use super::*;
+
+    fn lut_template(name: &str) -> Group {
+        // A minimal lu_table_template carrying index_1 and index_2, the two
+        // attributes generate_pseudo_lut_templates clones.
+        Group {
+            type_: "lu_table_template".to_owned(),
+            name: name.to_owned(),
+            attributes: IndexMap::from([
+                (
+                    "index_1".to_owned(),
+                    vec![Attribute::Complex(vec![Value::Float(0.1), Value::Float(0.2)])],
+                ),
+                (
+                    "index_2".to_owned(),
+                    vec![Attribute::Complex(vec![Value::Float(1.0), Value::Float(2.0)])],
+                ),
+            ]),
+            subgroups: vec![],
+        }
+    }
+
+    fn simple_expr(value: &str) -> Vec<Attribute> {
+        vec![Attribute::Simple(Value::Expression(value.to_owned()))]
+    }
+
+    // --- restore_arc -------------------------------------------------------
+
+    #[test]
+    fn restore_arc_is_the_outer_sum_of_the_1d_arcs() {
+        // slew (row) = [1, 2], cap (col) = [10, 20]
+        // result[r][c] = slew[r] + cap[c]
+        let slew = Array1::from(vec![1.0, 2.0]);
+        let cap = Array1::from(vec![10.0, 20.0]);
+        let got = restore_arc(&slew, &cap);
+        let expected =
+            Array2::from_shape_vec((2, 2), vec![11.0, 21.0, 12.0, 22.0]).unwrap();
+        assert_eq!(got, expected);
+    }
+
+    // --- select_reference_arc ---------------------------------------------
+
+    fn nine(base: f64) -> Array2<f64> {
+        // 3x3 table whose middle row (index 1) is [base+3, base+4, base+5]
+        Array2::from_shape_vec(
+            (3, 3),
+            (0..9).map(|i| base + i as f64).collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn select_reference_arc_picks_the_middle_row_and_column() {
+        let tt = TimingTables {
+            lut_template: "T".to_owned(),
+            cell_rise: Some(nine(0.0)),
+            cell_fall: Some(nine(100.0)),
+            rise_trans: Some(nine(200.0)),
+            fall_trans: Some(nine(300.0)),
+        };
+        let arc = select_reference_arc("CK", &tt).expect("all four tables present");
+        assert_eq!(arc.row, 1);
+        assert_eq!(arc.col, 1);
+        assert_eq!(arc.related_pin, "CK");
+        assert_eq!(arc.lut_template, "T");
+        // middle row of cell_rise == [3,4,5]
+        assert_eq!(arc.cell_rise, Array1::from(vec![3.0, 4.0, 5.0]));
+        assert_eq!(arc.cell_fall, Array1::from(vec![103.0, 104.0, 105.0]));
+    }
+
+    #[test]
+    fn select_reference_arc_requires_all_four_tables() {
+        let tt = TimingTables {
+            lut_template: "T".to_owned(),
+            cell_rise: Some(nine(0.0)),
+            cell_fall: None, // missing -> no reference arc
+            rise_trans: Some(nine(200.0)),
+            fall_trans: Some(nine(300.0)),
+        };
+        assert!(select_reference_arc("CK", &tt).is_none());
+    }
+
+    // --- calculate_setup / hold constraints --------------------------------
+
+    #[test]
+    fn setup_constraint_is_input_arc_minus_reference_delay() {
+        // One input->output rise arc for source pin "D"; column `col` is what
+        // the reference samples. ref.cell_rise[col] is subtracted off.
+        let col = 1usize;
+        // 3x3 arc whose column 1 is [25, 35, 45]
+        let arc = Array2::from_shape_vec(
+            (3, 3),
+            vec![0.0, 25.0, 0.0, 0.0, 35.0, 0.0, 0.0, 45.0, 0.0],
+        )
+        .unwrap();
+        let mut cell_rise_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
+        cell_rise_arcs.insert(("D".to_owned(), "Q".to_owned()), arc);
+        let cell_fall_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
+
+        let ref_arc = RefArc {
+            col,
+            row: 1,
+            related_pin: "CK".to_owned(),
+            lut_template: "T".to_owned(),
+            rise_trans: Array1::from(vec![0.0, 0.0, 0.0]),
+            fall_trans: Array1::from(vec![0.0, 0.0, 0.0]),
+            cell_rise: Array1::from(vec![10.0, 20.0, 30.0]), // [col]=20
+            cell_fall: Array1::from(vec![0.0, 0.0, 0.0]),
+        };
+
+        let (setup_rise, setup_fall) =
+            calculate_setup_constraints(&cell_rise_arcs, &cell_fall_arcs, &ref_arc);
+
+        // [25,35,45] - 20 = [5,15,25]
+        assert_eq!(setup_rise["D"], Array1::from(vec![5.0, 15.0, 25.0]));
+        assert!(setup_fall.is_empty());
+
+        // hold = -setup
+        let (hold_rise, hold_fall) = calculate_hold_constraints(&setup_rise, &setup_fall);
+        assert_eq!(hold_rise["D"], Array1::from(vec![-5.0, -15.0, -25.0]));
+        assert!(hold_fall.is_empty());
+    }
+
+    // --- generate_pseudo_lut_templates ------------------------------------
+
+    #[test]
+    fn generate_pseudo_lut_templates_emits_constraint_and_delay_pair() {
+        let lib = Group {
+            type_: "library".to_owned(),
+            name: "L".to_owned(),
+            attributes: IndexMap::new(),
+            subgroups: vec![
+                lut_template("delay_template_3x3"),
+                lut_template("unused_template"),
+                // a non-template subgroup must be ignored
+                Group {
+                    type_: "cell".to_owned(),
+                    name: "C".to_owned(),
+                    attributes: IndexMap::new(),
+                    subgroups: vec![],
+                },
+            ],
+        };
+        let used: HashSet<String> = ["delay_template_3x3".to_owned()].into_iter().collect();
+
+        let out = generate_pseudo_lut_templates(&lib, &used);
+
+        // Only the *used* template expands, into exactly two derived templates.
+        let names: Vec<&str> = out.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "delay_template_3x3_pseudo_constraint",
+                "delay_template_3x3_pseudo_delay",
+            ]
+        );
+
+        let constraint = &out[0];
+        assert_eq!(
+            constraint.attributes["variable_1"],
+            simple_expr("constrained_pin_transition")
+        );
+        // constraint takes its index from the source index_1
+        assert_eq!(
+            constraint.attributes["index_1"],
+            lib.subgroups[0].attributes["index_1"]
+        );
+
+        let delay = &out[1];
+        assert_eq!(
+            delay.attributes["variable_1"],
+            simple_expr("total_output_net_capacitance")
+        );
+        // delay takes its index from the source index_2
+        assert_eq!(
+            delay.attributes["index_1"],
+            lib.subgroups[0].attributes["index_2"]
+        );
+    }
+
+    // --- pin predicates over a parsed cell --------------------------------
+
+    fn sample_lib() -> Liberty {
+        liberty_parse::parse_lib(
+            r#"
+library(test) {
+  cell(LCELL) {
+    latch(IQ, IQN) { enable: "G"; data_in: "D"; }
+    pin(D) { direction: input; }
+    pin(G) { direction: input; }
+    pin(Q) { direction: output; function: "IQ"; }
+  }
+  cell(COMB) {
+    pin(A) { direction: input; }
+    pin(Y) { direction: output; function: "A"; }
+  }
+}
+"#,
+        )
+        .expect("parse sample lib")
+    }
+
+    #[test]
+    fn pin_direction_predicates() {
+        let lib = sample_lib();
+        let cell = lib[0].get_cell("LCELL").unwrap();
+        assert!(is_output_pin(cell.get_pin("Q").unwrap()));
+        assert!(!is_output_pin(cell.get_pin("D").unwrap()));
+        assert!(is_input_pin(cell.get_pin("D").unwrap()));
+        assert!(!is_input_pin(cell.get_pin("Q").unwrap()));
+    }
+
+    #[test]
+    fn cell_qualifies_needs_a_latch_group_and_the_clock_pin() {
+        let lib = sample_lib();
+        let lcell = lib[0].get_cell("LCELL").unwrap();
+        let comb = lib[0].get_cell("COMB").unwrap();
+        assert!(cell_qualifies(lcell, "G"));
+        assert!(!cell_qualifies(lcell, "CLK")); // no pin named CLK
+        assert!(!cell_qualifies(comb, "G")); // no latch group
+    }
+
+    #[test]
+    fn convert_latch_to_flipflop_renames_group_and_attributes() {
+        let mut lib = sample_lib();
+        let cell = lib[0].get_cell_mut("LCELL").unwrap();
+        convert_latch_to_flipflop(cell);
+        let g = cell
+            .iter_subgroups()
+            .find(|g| g.type_ == "ff")
+            .expect("latch became ff");
+        assert!(g.attributes.contains_key("clocked_on")); // enable -> clocked_on
+        assert!(g.attributes.contains_key("next_state")); // data_in -> next_state
+        assert!(!g.attributes.contains_key("enable"));
+        assert!(!g.attributes.contains_key("data_in"));
+    }
+
+    /// The documented `pseudosync.txt` debug-writer is dead code (declared but
+    /// never written), so merely exercising the engine must not create it.
+    #[test]
+    fn engine_does_not_leak_pseudosync_txt_in_cwd() {
+        let tmp = std::env::temp_dir().join(format!("pseudosync_leak_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp).unwrap();
+
+        let mut lib = sample_lib();
+        process_library(&mut lib[0], "G", &Regex::new("(R|S)N?").unwrap(), false);
+
+        let leaked = tmp.join("pseudosync.txt").exists();
+        std::env::set_current_dir(&prev).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(!leaked, "pseudosync.txt should not be created in CWD");
+    }
+}
