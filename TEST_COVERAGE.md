@@ -1,6 +1,6 @@
-# Comprehensive Test Coverage for Pseudosync and Liberty-Parse
+# Comprehensive Test Coverage for Pseudosync
 
-This document outlines the extensive test suite created to guarantee the functionality and reliability of both the pseudosync application and the liberty-parse library.
+This document outlines the extensive test suite created to guarantee the functionality and reliability of the pseudosync application. The Liberty parser itself now lives in the external `liberty-parser` crate (crates.io `^0.2`) and carries its own test suite in that crate's repository.
 
 ## Overview
 
@@ -11,66 +11,12 @@ The test suite includes:
 - **Performance Benchmarks**: Ensuring performance doesn't regress
 - **Error Handling Tests**: Testing robustness against malformed inputs
 
-## Liberty-Parse Library Tests
+## Liberty Parser Tests
 
-### Location: `liberty-parse/tests/`
-
-#### `lib_tests.rs` - High-level API Tests
-- ✅ Simple library parsing with all attribute types
-- ✅ Complex timing constraint parsing with LUT templates
-- ✅ Multiple library handling
-- ✅ Complex expression parsing
-- ✅ Comment preservation
-- ✅ AST to Liberty conversion roundtrip
-- ✅ Display formatting
-- ✅ Error handling for malformed input
-- ✅ Boolean, float, string, and expression value types
-- ✅ Float group parsing and validation
-
-#### `ast_tests.rs` - AST Structure Tests
-- ✅ All Value type accessors and conversions
-- ✅ Value type panic conditions for incorrect accessors
-- ✅ Value display formatting for all types
-- ✅ GroupItem accessor methods
-- ✅ AST from string parsing with nested structures
-- ✅ AST display formatting with proper indentation
-- ✅ AST conversion roundtrip testing
-- ✅ Comment preservation in AST
-- ✅ Complex nested structure handling (cells, pins, timing)
-- ✅ Malformed syntax error handling
-- ✅ Empty library handling
-- ✅ Unicode and special character support
-- ✅ Large numeric value handling (scientific notation)
-
-#### `liberty_tests.rs` - Liberty Structure Tests
-- ✅ Group creation and basic operations
-- ✅ Attribute iteration (simple and complex)
-- ✅ Mutable attribute iteration
-- ✅ Subgroup operations and type filtering
-- ✅ Mutable subgroup operations
-- ✅ Pin-specific operations (get_pin, iter_pins)
-- ✅ Cell-specific operations (get_cell, iter_cells)
-- ✅ Group conversion from GroupItem
-- ✅ Group conversion to GroupItem
-- ✅ Multiple attributes with same name handling
-- ✅ Liberty Deref trait operations
-- ✅ Liberty display formatting
-- ✅ Liberty conversion roundtrip with complex structures
-
-#### `parser_tests.rs` - Parser Component Tests
-- ✅ Numeric value parsing (integers, floats, scientific notation)
-- ✅ String value parsing with special characters and unicode
-- ✅ Expression value parsing
-- ✅ Float group parsing
-- ✅ Complex attribute parsing with mixed types
-- ✅ Multiline attribute parsing with backslash continuation
-- ✅ Nested group parsing (5+ levels deep)
-- ✅ Comment parsing (single and multi-line)
-- ✅ Whitespace handling (excessive and minimal)
-- ✅ Empty group handling
-- ✅ Special characters in names (underscores, numbers)
-- ✅ Parser error recovery and graceful failure
-- ✅ Large input handling (100+ cells with timing data)
+The Liberty AST and parser (`ast`, `liberty`, `parser` modules, `parse_lib`) are provided by
+the external **`liberty-parser`** crate and are tested in that crate's own repository
+(`lib_tests.rs`, `ast_tests.rs`, `liberty_tests.rs`, `parser_tests.rs`). They are no longer
+part of this repository. Run them from a checkout of the parser crate, not from here.
 
 ## Pseudosync Application Tests
 
@@ -198,9 +144,6 @@ cargo test --test pseudosync_tests
 cargo test --test integration_tests
 cargo test --test property_tests
 
-# Run liberty-parse tests
-cd liberty-parse && cargo test
-
 # Run benchmarks
 cargo bench
 
@@ -226,4 +169,4 @@ The test suite is designed for CI/CD pipelines:
 - Clear error messages and debugging information
 - Deterministic results across platforms
 
-This comprehensive test suite ensures that both pseudosync and liberty-parse will work reliably in production environments and maintain their functionality as the codebase evolves.
+This comprehensive test suite ensures that pseudosync will work reliably in production environments and maintain its functionality as the codebase evolves.

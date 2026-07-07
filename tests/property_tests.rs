@@ -2,7 +2,7 @@
 //! Tests edge cases and ensures robustness against malformed inputs
 //! Includes specific tests targeting RCELEM2X1 and RACELEM21X1 reference cells
 
-use liberty_parse::parse_lib;
+use liberty_parser::parse_lib;
 use pseudosync::*;
 use regex::Regex;
 use std::collections::HashSet;

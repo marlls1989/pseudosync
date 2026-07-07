@@ -3,7 +3,7 @@
 //! Includes benchmarks for RCELEM2X1 and RACELEM21X1 reference cells
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use liberty_parse::parse_lib;
+use liberty_parser::parse_lib;
 use pseudosync::*;
 use regex::Regex;
 use std::path::Path;
@@ -293,9 +293,9 @@ fn bench_processing(c: &mut Criterion) {
 
 /// Benchmark timing table processing
 fn bench_timing_calculations(c: &mut Criterion) {
-    use liberty_parse::ast::Value;
-    use liberty_parse::liberty::Attribute;
-    use liberty_parse::liberty::Group;
+    use liberty_parser::ast::Value;
+    use liberty_parser::liberty::Attribute;
+    use liberty_parser::liberty::Group;
     use ndarray::Array1;
     use pseudosync::{mean_reference_arc, mean_timingtable, RefArc};
 

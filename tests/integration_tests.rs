@@ -1,7 +1,7 @@
 //! Integration tests using real Liberty file examples
 //! Tests the complete pseudosync workflow with actual Liberty file structures
 
-use liberty_parse::parse_lib;
+use liberty_parser::parse_lib;
 use pseudosync::*;
 use regex::Regex;
 use std::fs;
@@ -1131,15 +1131,15 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                         our_timing
                             .simple_attribute("related_pin")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s),
-                                liberty_parse::ast::Value::Expression(s) => Some(s),
+                                liberty_parser::ast::Value::String(s) => Some(s),
+                                liberty_parser::ast::Value::Expression(s) => Some(s),
                                 _ => None,
                             });
                     let expected_related = expected_timing
                         .simple_attribute("related_pin")
                         .and_then(|v| match v {
-                            liberty_parse::ast::Value::String(s) => Some(s),
-                            liberty_parse::ast::Value::Expression(s) => Some(s),
+                            liberty_parser::ast::Value::String(s) => Some(s),
+                            liberty_parser::ast::Value::Expression(s) => Some(s),
                             _ => None,
                         });
                     assert_eq!(
@@ -1153,16 +1153,16 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                         our_timing
                             .simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s),
-                                liberty_parse::ast::Value::Expression(s) => Some(s),
+                                liberty_parser::ast::Value::String(s) => Some(s),
+                                liberty_parser::ast::Value::Expression(s) => Some(s),
                                 _ => None,
                             });
                     let expected_type =
                         expected_timing
                             .simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s),
-                                liberty_parse::ast::Value::Expression(s) => Some(s),
+                                liberty_parser::ast::Value::String(s) => Some(s),
+                                liberty_parser::ast::Value::Expression(s) => Some(s),
                                 _ => None,
                             });
                     assert_eq!(
@@ -1213,16 +1213,16 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                     our_pin
                         .simple_attribute("nextstate_type")
                         .and_then(|v| match v {
-                            liberty_parse::ast::Value::String(s) => Some(s),
-                            liberty_parse::ast::Value::Expression(s) => Some(s),
+                            liberty_parser::ast::Value::String(s) => Some(s),
+                            liberty_parser::ast::Value::Expression(s) => Some(s),
                             _ => None,
                         });
                 let expected_nextstate =
                     expected_pin
                         .simple_attribute("nextstate_type")
                         .and_then(|v| match v {
-                            liberty_parse::ast::Value::String(s) => Some(s),
-                            liberty_parse::ast::Value::Expression(s) => Some(s),
+                            liberty_parser::ast::Value::String(s) => Some(s),
+                            liberty_parser::ast::Value::Expression(s) => Some(s),
                             _ => None,
                         });
 
@@ -1240,8 +1240,8 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("setup")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("setup")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("setup"))
                                 }
                                 _ => None,
@@ -1254,8 +1254,8 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("setup")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("setup")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("setup"))
                                 }
                                 _ => None,
@@ -1269,8 +1269,8 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("hold")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("hold")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("hold"))
                                 }
                                 _ => None,
@@ -1283,8 +1283,8 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("hold")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("hold")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("hold"))
                                 }
                                 _ => None,
@@ -1315,10 +1315,10 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => {
+                                liberty_parser::ast::Value::String(s) => {
                                     Some(s.contains("setup") || s.contains("hold"))
                                 }
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("setup") || s.contains("hold"))
                                 }
                                 _ => None,
@@ -1328,10 +1328,10 @@ fn test_ascend_freepdk45_comprehensive_comparison() {
                     .zip(expected_pin.iter_subgroups_of_type("timing").filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => {
+                                liberty_parser::ast::Value::String(s) => {
                                     Some(s.contains("setup") || s.contains("hold"))
                                 }
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("setup") || s.contains("hold"))
                                 }
                                 _ => None,
@@ -1493,8 +1493,8 @@ fn test_ascend_freepdk45_pseudolatch_comparison() {
                 let our_has_pseudo = our_pin.iter_subgroups_of_type("timing").any(|t| {
                     t.simple_attribute("related_pin")
                         .and_then(|v| match v {
-                            liberty_parse::ast::Value::String(s) => Some(s == clock_name),
-                            liberty_parse::ast::Value::Expression(s) => Some(s == clock_name),
+                            liberty_parser::ast::Value::String(s) => Some(s == clock_name),
+                            liberty_parser::ast::Value::Expression(s) => Some(s == clock_name),
                             _ => None,
                         })
                         .unwrap_or(false)
@@ -1503,8 +1503,8 @@ fn test_ascend_freepdk45_pseudolatch_comparison() {
                 let expected_has_pseudo = expected_pin.iter_subgroups_of_type("timing").any(|t| {
                     t.simple_attribute("related_pin")
                         .and_then(|v| match v {
-                            liberty_parse::ast::Value::String(s) => Some(s == clock_name),
-                            liberty_parse::ast::Value::Expression(s) => Some(s == clock_name),
+                            liberty_parser::ast::Value::String(s) => Some(s == clock_name),
+                            liberty_parser::ast::Value::Expression(s) => Some(s == clock_name),
                             _ => None,
                         })
                         .unwrap_or(false)
@@ -1535,8 +1535,8 @@ fn test_ascend_freepdk45_pseudolatch_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("setup")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("setup")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("setup"))
                                 }
                                 _ => None,
@@ -1549,8 +1549,8 @@ fn test_ascend_freepdk45_pseudolatch_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("setup")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("setup")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("setup"))
                                 }
                                 _ => None,
@@ -1564,8 +1564,8 @@ fn test_ascend_freepdk45_pseudolatch_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("hold")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("hold")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("hold"))
                                 }
                                 _ => None,
@@ -1578,8 +1578,8 @@ fn test_ascend_freepdk45_pseudolatch_comparison() {
                     .filter(|t| {
                         t.simple_attribute("timing_type")
                             .and_then(|v| match v {
-                                liberty_parse::ast::Value::String(s) => Some(s.contains("hold")),
-                                liberty_parse::ast::Value::Expression(s) => {
+                                liberty_parser::ast::Value::String(s) => Some(s.contains("hold")),
+                                liberty_parser::ast::Value::Expression(s) => {
                                     Some(s.contains("hold"))
                                 }
                                 _ => None,

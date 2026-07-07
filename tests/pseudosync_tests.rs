@@ -1,7 +1,7 @@
 //! Comprehensive tests for the pseudosync application
 //! Tests the main application logic including file I/O, cell processing, timing calculations
 
-use liberty_parse::{
+use liberty_parser::{
     ast::Value,
     liberty::{Attribute, Group, Liberty},
     parse_lib,

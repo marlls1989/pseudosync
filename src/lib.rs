@@ -6,7 +6,7 @@
 use indexmap::IndexMap;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use liberty_parse::{
+use liberty_parser::{
     self,
     ast::{LibertyAst, Value},
     liberty::{Attribute, Group, Liberty},
@@ -64,7 +64,7 @@ pub fn parse_liberty_file(path: &Path) -> Result<Liberty, Box<dyn Error>> {
 
     let mut buf = String::new();
     input_stream.read_to_string(&mut buf)?;
-    let lib = liberty_parse::parse_lib(&buf).map_err(|e| simple_error!("{}", e))?;
+    let lib = liberty_parser::parse_lib(&buf).map_err(|e| simple_error!("{}", e))?;
 
     Ok(lib)
 }
@@ -967,7 +967,7 @@ mod tests {
     // --- pin predicates over a parsed cell --------------------------------
 
     fn sample_lib() -> Liberty {
-        liberty_parse::parse_lib(
+        liberty_parser::parse_lib(
             r#"
 library(test) {
   cell(LCELL) {

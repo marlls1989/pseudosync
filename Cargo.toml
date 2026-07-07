@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 structopt = "0.3"
-liberty-parse = { path = "liberty-parse" }
+liberty-parser = "0.2"
 simple-error = "0.2"
 ndarray = "0.15.4"
 regex = "1"
