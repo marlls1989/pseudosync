@@ -27142,16 +27142,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0610932, 0.06748, 0.0754836, 0.0869866, 0.106433, 0.137035, 0.186532, 0.263535, 0.381894, 0.561858");
+          values ("0.0684612, 0.072898, 0.0788198, 0.0887894, 0.107308, 0.137483, 0.186654, 0.263484, 0.381926, 0.56183");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0519332, 0.059122, 0.0685712, 0.082335, 0.104069, 0.137091, 0.189962, 0.271581, 0.396123, 0.583907");
+          values ("0.0586179, 0.064405, 0.0720878, 0.0839835, 0.104301, 0.136686, 0.189256, 0.270997, 0.395808, 0.583789");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.128825, 0.136724, 0.146442, 0.158817, 0.175493, 0.197196, 0.228093, 0.271977, 0.336186, 0.431983");
+          values ("0.162551, 0.170545, 0.180093, 0.192267, 0.20868, 0.230191, 0.260768, 0.304382, 0.368447, 0.463991");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.116336, 0.123752, 0.133143, 0.145617, 0.162649, 0.18513, 0.217325, 0.263785, 0.332086, 0.434044");
+          values ("0.138563, 0.146304, 0.155782, 0.168135, 0.18487, 0.207071, 0.238917, 0.284994, 0.353092, 0.454919");
         }
       }
     }
@@ -27925,35 +27925,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.034427, 0.03515, 0.036264, 0.03753, 0.03955, 0.043138, 0.049242, 0.059486, 0.07331, 0.093422");
+          values ("-0.0088916, -0.0082028, -0.0071626, -0.0058826, -0.0037984, 0, 0.0067112, 0.0178214, 0.0329158, 0.0550642");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.015739, 0.016524, 0.017969, 0.020071, 0.023345, 0.028692, 0.037504, 0.051144, 0.069844, 0.094671");
+          values ("-0.0133222, -0.0125524, -0.0111302, -0.0090114, -0.005613, 0, 0.0092686, 0.0235754, 0.0429862, 0.069262");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.034427, -0.03515, -0.036264, -0.03753, -0.03955, -0.043138, -0.049242, -0.059486, -0.07331, -0.093422");
+          values ("0.0088916, 0.0082028, 0.0071626, 0.0058826, 0.0037984, -0, -0.0067112, -0.0178214, -0.0329158, -0.0550642");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.015739, -0.016524, -0.017969, -0.020071, -0.023345, -0.028692, -0.037504, -0.051144, -0.069844, -0.094671");
+          values ("0.0133222, 0.0125524, 0.0111302, 0.0090114, 0.005613, -0, -0.0092686, -0.0235754, -0.0429862, -0.069262");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M1) {
       direction : "input";
@@ -28354,14 +28345,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.030796, 0.031584, 0.032773, 0.034184, 0.035603, 0.037471, 0.040266, 0.045042, 0.0517, 0.060782");
+          values ("0.0069936, 0.0077898, 0.0089814, 0.010352, 0.0118082, 0.0136566, 0.0164628, 0.0211732, 0.0278078, 0.036759");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.030796, -0.031584, -0.032773, -0.034184, -0.035603, -0.037471, -0.040266, -0.045042, -0.0517, -0.060782");
+          values ("-0.0069936, -0.0077898, -0.0089814, -0.010352, -0.0118082, -0.0136566, -0.0164628, -0.0211732, -0.0278078, -0.036759");
         }
       }
     }
@@ -28764,14 +28755,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.023607, 0.024392, 0.02569, 0.027241, 0.029525, 0.033185, 0.039205, 0.049196, 0.063318, 0.082547");
+          values ("-0.0002018, 0.0005956, 0.0018526, 0.0034456, 0.0057404, 0.0093406, 0.0154132, 0.0253206, 0.039398, 0.0582262");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.023607, -0.024392, -0.02569, -0.027241, -0.029525, -0.033185, -0.039205, -0.049196, -0.063318, -0.082547");
+          values ("0.0002018, -0.0005956, -0.0018526, -0.0034456, -0.0057404, -0.0093406, -0.0154132, -0.0253206, -0.039398, -0.0582262");
         }
       }
     }
@@ -29174,14 +29165,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.035643, 0.036426, 0.03742, 0.038471, 0.039504, 0.040434, 0.041184, 0.042402, 0.044447, 0.047278");
+          values ("0.0001448, 0.000883, 0.0018938, 0.0029548, 0.0039956, 0.0049034, 0.0056622, 0.0069106, 0.0088612, 0.011541");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.035643, -0.036426, -0.03742, -0.038471, -0.039504, -0.040434, -0.041184, -0.042402, -0.044447, -0.047278");
+          values ("-0.0001448, -0.000883, -0.0018938, -0.0029548, -0.0039956, -0.0049034, -0.0056622, -0.0069106, -0.0088612, -0.011541");
         }
       }
     }
@@ -29584,14 +29575,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.032044, 0.032824, 0.033984, 0.035297, 0.03685, 0.038798, 0.041757, 0.046943, 0.055023, 0.067065");
+          values ("-0.0034916, -0.0027028, -0.0015372, -0.000223, 0.0013206, 0.0032636, 0.0062004, 0.0113996, 0.0193878, 0.0312572");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.032044, -0.032824, -0.033984, -0.035297, -0.03685, -0.038798, -0.041757, -0.046943, -0.055023, -0.067065");
+          values ("0.0034916, 0.0027028, 0.0015372, 0.000223, -0.0013206, -0.0032636, -0.0062004, -0.0113996, -0.0193878, -0.0312572");
         }
       }
     }
@@ -34977,16 +34968,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0535338, 0.058559, 0.0645174, 0.0714066, 0.0799218, 0.091357, 0.109615, 0.13999, 0.1889, 0.266159");
+          values ("0.0643513, 0.0685427, 0.0731813, 0.0782822, 0.0846738, 0.094065, 0.11094, 0.140525, 0.189071, 0.266037");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0466752, 0.050689, 0.0554872, 0.0613406, 0.0699618, 0.0817972, 0.101118, 0.132349, 0.181615, 0.258438");
+          values ("0.0559878, 0.0588246, 0.0620561, 0.0660129, 0.0722717, 0.0825574, 0.101112, 0.131836, 0.18093, 0.257793");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.123887, 0.128571, 0.134716, 0.143013, 0.153792, 0.16687, 0.18394, 0.206508, 0.237812, 0.282329");
+          values ("0.15765, 0.162707, 0.169241, 0.177786, 0.18865, 0.20153, 0.218315, 0.24056, 0.271526, 0.315735");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.117409, 0.121735, 0.127356, 0.134785, 0.14469, 0.15683, 0.17322, 0.19529, 0.226148, 0.27045");
+          values ("0.144247, 0.148869, 0.154696, 0.162214, 0.171866, 0.183716, 0.199704, 0.22141, 0.251874, 0.295731");
         }
       }
     }
@@ -35760,35 +35751,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.036636, 0.037485, 0.03852, 0.039843, 0.041803, 0.045346, 0.051628, 0.062094, 0.077563, 0.100053");
+          values ("-0.0088534, -0.0080964, -0.0071156, -0.0057938, -0.0037588, 0, 0.0067892, 0.0181354, 0.0345806, 0.0586972");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.022447, 0.023411, 0.024749, 0.026846, 0.030109, 0.035362, 0.044465, 0.058631, 0.078711, 0.106557");
+          values ("-0.013249, -0.0123732, -0.0110032, -0.0088868, -0.0054942, 0, 0.0094896, 0.024451, 0.0455812, 0.0747536");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.036636, -0.037485, -0.03852, -0.039843, -0.041803, -0.045346, -0.051628, -0.062094, -0.077563, -0.100053");
+          values ("0.0088534, 0.0080964, 0.0071156, 0.0057938, 0.0037588, -0, -0.0067892, -0.0181354, -0.0345806, -0.0586972");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.022447, -0.023411, -0.024749, -0.026846, -0.030109, -0.035362, -0.044465, -0.058631, -0.078711, -0.106557");
+          values ("0.013249, 0.0123732, 0.0110032, 0.0088868, 0.0054942, -0, -0.0094896, -0.024451, -0.0455812, -0.0747536");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M1) {
       direction : "input";
@@ -36189,14 +36171,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.039001, 0.039783, 0.040929, 0.042183, 0.043553, 0.045397, 0.048226, 0.053169, 0.060682, 0.07123");
+          values ("0.0094736, 0.0102748, 0.011403, 0.012674, 0.0140498, 0.0158536, 0.0186832, 0.0235938, 0.0310444, 0.0413758");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.039001, -0.039783, -0.040929, -0.042183, -0.043553, -0.045397, -0.048226, -0.053169, -0.060682, -0.07123");
+          values ("-0.0094736, -0.0102748, -0.011403, -0.012674, -0.0140498, -0.0158536, -0.0186832, -0.0235938, -0.0310444, -0.0413758");
         }
       }
     }
@@ -36599,14 +36581,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.029937, 0.030809, 0.032065, 0.033673, 0.036108, 0.03951, 0.045684, 0.055935, 0.07147, 0.092674");
+          values ("0.0004174, 0.0012692, 0.0025542, 0.0041396, 0.0064872, 0.0099692, 0.016151, 0.026419, 0.0416634, 0.0628522");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.029937, -0.030809, -0.032065, -0.033673, -0.036108, -0.03951, -0.045684, -0.055935, -0.07147, -0.092674");
+          values ("-0.0004174, -0.0012692, -0.0025542, -0.0041396, -0.0064872, -0.0099692, -0.016151, -0.026419, -0.0416634, -0.0628522");
         }
       }
     }
@@ -37009,14 +36991,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.038879, 0.039634, 0.040679, 0.041727, 0.042712, 0.04354, 0.044384, 0.045945, 0.049055, 0.054026");
+          values ("0.0013448, 0.0021126, 0.0031286, 0.0041876, 0.0051326, 0.0059936, 0.0068432, 0.0084098, 0.0114226, 0.0163298");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.038879, -0.039634, -0.040679, -0.041727, -0.042712, -0.04354, -0.044384, -0.045945, -0.049055, -0.054026");
+          values ("-0.0013448, -0.0021126, -0.0031286, -0.0041876, -0.0051326, -0.0059936, -0.0068432, -0.0084098, -0.0114226, -0.0163298");
         }
       }
     }
@@ -37419,14 +37401,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.035258, 0.036048, 0.037225, 0.038496, 0.039942, 0.041904, 0.044962, 0.050576, 0.059787, 0.073997");
+          values ("-0.0022844, -0.001479, -0.0003236, 0.0009368, 0.002404, 0.004357, 0.007403, 0.0130112, 0.0221932, 0.0362474");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.035258, -0.036048, -0.037225, -0.038496, -0.039942, -0.041904, -0.044962, -0.050576, -0.059787, -0.073997");
+          values ("0.0022844, 0.001479, 0.0003236, -0.0009368, -0.002404, -0.004357, -0.007403, -0.0130112, -0.0221932, -0.0362474");
         }
       }
     }
@@ -42812,16 +42794,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0569242, 0.0596694, 0.062968, 0.0675418, 0.0728124, 0.0789648, 0.0875124, 0.100388, 0.12229, 0.158228");
+          values ("0.0672478, 0.0694666, 0.072136, 0.0753992, 0.0791247, 0.08346, 0.0900367, 0.101559, 0.122701, 0.158097");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.047315, 0.049653, 0.0526188, 0.0566126, 0.0618302, 0.0683878, 0.077362, 0.0908342, 0.112899, 0.148491");
+          values ("0.0578334, 0.059789, 0.0622482, 0.0651789, 0.0688657, 0.0731774, 0.0799025, 0.0916984, 0.112631, 0.147673");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.137475, 0.14012, 0.143742, 0.148721, 0.155669, 0.16432, 0.175462, 0.189542, 0.208134, 0.233473");
+          values ("0.171656, 0.174492, 0.178303, 0.183571, 0.190678, 0.199303, 0.210202, 0.223986, 0.242194, 0.267129");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.122018, 0.124461, 0.127763, 0.132329, 0.138659, 0.146713, 0.157233, 0.170811, 0.188767, 0.213428");
+          values ("0.149564, 0.152263, 0.155851, 0.160724, 0.167337, 0.175443, 0.185763, 0.198988, 0.216444, 0.240626");
         }
       }
     }
@@ -43595,35 +43577,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.037083, 0.037869, 0.038986, 0.040291, 0.04229, 0.045772, 0.051947, 0.062117, 0.078203, 0.101128");
+          values ("-0.0087782, -0.0080816, -0.0070112, -0.0057114, -0.0036638, 0, 0.0066116, 0.01768, 0.0349432, 0.0595302");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.025153, 0.025947, 0.02739, 0.029507, 0.032726, 0.037887, 0.046487, 0.0604, 0.081514, 0.108991");
+          values ("-0.0130498, -0.0123022, -0.0108704, -0.0087312, -0.0054356, 0, 0.0090634, 0.0237148, 0.0456314, 0.0744306");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.037083, -0.037869, -0.038986, -0.040291, -0.04229, -0.045772, -0.051947, -0.062117, -0.078203, -0.101128");
+          values ("0.0087782, 0.0080816, 0.0070112, 0.0057114, 0.0036638, -0, -0.0066116, -0.01768, -0.0349432, -0.0595302");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.025153, -0.025947, -0.02739, -0.029507, -0.032726, -0.037887, -0.046487, -0.0604, -0.081514, -0.108991");
+          values ("0.0130498, 0.0123022, 0.0108704, 0.0087312, 0.0054356, -0, -0.0090634, -0.0237148, -0.0456314, -0.0744306");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M1) {
       direction : "input";
@@ -44024,14 +43997,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.041572, 0.042241, 0.043579, 0.044879, 0.046293, 0.048091, 0.050743, 0.055686, 0.062969, 0.072742");
+          values ("0.0097966, 0.0105598, 0.0117704, 0.0130614, 0.0145284, 0.0162598, 0.018984, 0.0238368, 0.0310906, 0.0407484");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.041572, -0.042241, -0.043579, -0.044879, -0.046293, -0.048091, -0.050743, -0.055686, -0.062969, -0.072742");
+          values ("-0.0097966, -0.0105598, -0.0117704, -0.0130614, -0.0145284, -0.0162598, -0.018984, -0.0238368, -0.0310906, -0.0407484");
         }
       }
     }
@@ -44434,14 +44407,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.032443, 0.033314, 0.034637, 0.036246, 0.038508, 0.042073, 0.048153, 0.058119, 0.07347, 0.094876");
+          values ("0.0006692, 0.0015322, 0.0028722, 0.0044242, 0.006754, 0.0103116, 0.0163824, 0.0263352, 0.0416552, 0.0627368");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.032443, -0.033314, -0.034637, -0.036246, -0.038508, -0.042073, -0.048153, -0.058119, -0.07347, -0.094876");
+          values ("-0.0006692, -0.0015322, -0.0028722, -0.0044242, -0.006754, -0.0103116, -0.0163824, -0.0263352, -0.0416552, -0.0627368");
         }
       }
     }
@@ -44844,14 +44817,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.038697, 0.0395, 0.040497, 0.041572, 0.042602, 0.043486, 0.04436, 0.045806, 0.048742, 0.053767");
+          values ("0.0007656, 0.0015414, 0.0025628, 0.0036208, 0.0046604, 0.0055416, 0.006404, 0.0078202, 0.010755, 0.0156718");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.038697, -0.0395, -0.040497, -0.041572, -0.042602, -0.043486, -0.04436, -0.045806, -0.048742, -0.053767");
+          values ("-0.0007656, -0.0015414, -0.0025628, -0.0036208, -0.0046604, -0.0055416, -0.006404, -0.0078202, -0.010755, -0.0156718");
         }
       }
     }
@@ -45254,14 +45227,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.034931, 0.035751, 0.036952, 0.038254, 0.039803, 0.041739, 0.044743, 0.05022, 0.059454, 0.073953");
+          values ("-0.0030142, -0.0021824, -0.0009962, 0.0003202, 0.001839, 0.0038034, 0.0067884, 0.012226, 0.0215118, 0.0358238");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.034931, -0.035751, -0.036952, -0.038254, -0.039803, -0.041739, -0.044743, -0.05022, -0.059454, -0.073953");
+          values ("0.0030142, 0.0021824, 0.0009962, -0.0003202, -0.001839, -0.0038034, -0.0067884, -0.012226, -0.0215118, -0.0358238");
         }
       }
     }
@@ -69195,15 +69168,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     bundle (M) {
       members (M0, M1);
@@ -70396,15 +70360,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     bundle (M) {
       members (M0, M1);
@@ -71687,15 +71642,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (RN) {
       direction : "input";
@@ -72140,15 +72086,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (RN) {
       direction : "input";
@@ -72593,15 +72530,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (RN) {
       direction : "input";
@@ -94744,16 +94672,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.046475, 0.0537732, 0.0636268, 0.078253, 0.101292, 0.135902, 0.190875, 0.275153, 0.40223, 0.592636");
+          values ("0.0464397, 0.053656, 0.0634293, 0.0779455, 0.100899, 0.135549, 0.190644, 0.275056, 0.402236, 0.592625");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.040769, 0.0453066, 0.0517916, 0.0624642, 0.0800364, 0.107244, 0.150546, 0.216849, 0.317003, 0.466832");
+          values ("0.0406759, 0.0451222, 0.0514762, 0.0620203, 0.0795041, 0.106756, 0.150221, 0.216701, 0.316927, 0.466759");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.116829, 0.122988, 0.131019, 0.142078, 0.157753, 0.178929, 0.210011, 0.255538, 0.323031, 0.4239");
+          values ("0.117452, 0.123604, 0.131613, 0.142625, 0.15821, 0.179333, 0.210343, 0.25584, 0.323366, 0.424245");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.111326, 0.116551, 0.123136, 0.132127, 0.144688, 0.161758, 0.186722, 0.223472, 0.277753, 0.35896");
+          values ("0.111571, 0.116775, 0.123325, 0.132249, 0.14469, 0.161672, 0.186545, 0.223287, 0.277569, 0.35875");
         }
       }
     }
@@ -94964,35 +94892,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.007225, -0.006838, -0.006223, -0.005223, -0.003417, 0, 0.006456, 0.017138, 0.033789, 0.058503");
+          values ("-0.007623, -0.007147, -0.006405, -0.005298, -0.00341233, 0, 0.00621933, 0.016213, 0.0313353, 0.0531203");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.012411, -0.012081, -0.011182, -0.009452, -0.006142, 0, 0.010664, 0.027332, 0.050969, 0.08333");
+          values ("-0.0123957, -0.011993, -0.011008, -0.00923933, -0.00595267, 0, 0.0102157, 0.0261437, 0.0482617, 0.077914");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.007225, 0.006838, 0.006223, 0.005223, 0.003417, -0, -0.006456, -0.017138, -0.033789, -0.058503");
+          values ("0.007623, 0.007147, 0.006405, 0.005298, 0.00341233, -0, -0.00621933, -0.016213, -0.0313353, -0.0531203");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.012411, 0.012081, 0.011182, 0.009452, 0.006142, -0, -0.010664, -0.027332, -0.050969, -0.08333");
+          values ("0.0123957, 0.011993, 0.011008, 0.00923933, 0.00595267, -0, -0.0102157, -0.0261437, -0.0482617, -0.077914");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -95225,14 +95144,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.0117, -0.010978, -0.009732, -0.00819, -0.005969, -0.002549, 0.003065, 0.011865, 0.024044, 0.040033");
+          values ("-0.0119697, -0.011247, -0.00999767, -0.00845333, -0.00623333, -0.00281733, 0.002796, 0.0115877, 0.023743, 0.0396857");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.0117, 0.010978, 0.009732, 0.00819, 0.005969, 0.002549, -0.003065, -0.011865, -0.024044, -0.040033");
+          values ("0.0119697, 0.011247, 0.00999767, 0.00845333, 0.00623333, 0.00281733, -0.002796, -0.0115877, -0.023743, -0.0396857");
         }
       }
     }
@@ -95467,14 +95386,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.009101, -0.00857, -0.007747, -0.006807, -0.005631, -0.004029, -0.001735, 0.00149, 0.006124, 0.011998");
+          values ("-0.009758, -0.009227, -0.00840433, -0.00746367, -0.00628633, -0.004685, -0.002389, 0.000820667, 0.005437, 0.0112663");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.009101, 0.00857, 0.007747, 0.006807, 0.005631, 0.004029, 0.001735, -0.00149, -0.006124, -0.011998");
+          values ("0.009758, 0.009227, 0.00840433, 0.00746367, 0.00628633, 0.004685, 0.002389, -0.000820667, -0.005437, -0.0112663");
         }
       }
     }
@@ -97506,16 +97425,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0386184, 0.0426478, 0.048027, 0.0554784, 0.0665648, 0.0819514, 0.105931, 0.143194, 0.201512, 0.291544");
+          values ("0.0386287, 0.0426255, 0.0479711, 0.0554219, 0.066342, 0.0815767, 0.1055, 0.142809, 0.201228, 0.291412");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0369618, 0.0395968, 0.042998, 0.0476208, 0.0547716, 0.06614, 0.0850296, 0.115171, 0.16233, 0.235145");
+          values ("0.0369377, 0.039541, 0.0428619, 0.0474121, 0.0544223, 0.0656432, 0.0844253, 0.114626, 0.161981, 0.234969");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.112677, 0.116236, 0.120982, 0.127517, 0.136605, 0.148473, 0.165014, 0.188003, 0.220965, 0.269677");
+          values ("0.113247, 0.116818, 0.121561, 0.128092, 0.137146, 0.148947, 0.165409, 0.188296, 0.221226, 0.269894");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.107936, 0.111237, 0.115499, 0.121131, 0.12867, 0.13838, 0.151836, 0.170703, 0.197777, 0.23788");
+          values ("0.108157, 0.111455, 0.115708, 0.121319, 0.128818, 0.138449, 0.151753, 0.170539, 0.197508, 0.237641");
         }
       }
     }
@@ -97726,35 +97645,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.007615, -0.007193, -0.006404, -0.00532, -0.003452, 0, 0.006552, 0.017694, 0.034531, 0.060006");
+          values ("-0.00797367, -0.00747333, -0.00659, -0.00540433, -0.003449, 0, 0.006372, 0.016867, 0.032264, 0.054935");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.012682, -0.012266, -0.01134, -0.009507, -0.006131, 0, 0.010688, 0.027959, 0.052232, 0.085601");
+          values ("-0.0126527, -0.0122027, -0.011184, -0.00930867, -0.00595333, 0, 0.010218, 0.0268043, 0.049635, 0.0804037");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.007615, 0.007193, 0.006404, 0.00532, 0.003452, -0, -0.006552, -0.017694, -0.034531, -0.060006");
+          values ("0.00797367, 0.00747333, 0.00659, 0.00540433, 0.003449, -0, -0.006372, -0.016867, -0.032264, -0.054935");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.012682, 0.012266, 0.01134, 0.009507, 0.006131, -0, -0.010688, -0.027959, -0.052232, -0.085601");
+          values ("0.0126527, 0.0122027, 0.011184, 0.00930867, 0.00595333, -0, -0.010218, -0.0268043, -0.049635, -0.0804037");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -97987,14 +97897,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.010766, -0.010023, -0.008761, -0.007206, -0.004989, -0.001561, 0.004176, 0.013145, 0.025764, 0.042713");
+          values ("-0.0110097, -0.0102663, -0.008995, -0.00743967, -0.00522267, -0.00179333, 0.00393333, 0.0129043, 0.0255083, 0.0424153");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.010766, 0.010023, 0.008761, 0.007206, 0.004989, 0.001561, -0.004176, -0.013145, -0.025764, -0.042713");
+          values ("0.0110097, 0.0102663, 0.008995, 0.00743967, 0.00522267, 0.00179333, -0.00393333, -0.0129043, -0.0255083, -0.0424153");
         }
       }
     }
@@ -98229,14 +98139,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.008218, -0.007674, -0.00684, -0.005896, -0.00472, -0.003134, -0.00073, 0.002783, 0.00771, 0.014274");
+          values ("-0.00881267, -0.00826067, -0.00742667, -0.006484, -0.005308, -0.00372167, -0.001316, 0.00218933, 0.00710967, 0.013661");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.008218, 0.007674, 0.00684, 0.005896, 0.00472, 0.003134, 0.00073, -0.002783, -0.00771, -0.014274");
+          values ("0.00881267, 0.00826067, 0.00742667, 0.006484, 0.005308, 0.00372167, 0.001316, -0.00218933, -0.00710967, -0.013661");
         }
       }
     }
@@ -100268,16 +100178,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0393104, 0.0414766, 0.0444226, 0.0485866, 0.0545758, 0.0626334, 0.074297, 0.0915576, 0.117863, 0.159031");
+          values ("0.0393128, 0.041473, 0.0444127, 0.0485732, 0.054491, 0.0624334, 0.0740009, 0.0911136, 0.117348, 0.158559");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0388242, 0.0403472, 0.0423852, 0.04505, 0.0486164, 0.0534582, 0.0610638, 0.073524, 0.0941926, 0.127409");
+          values ("0.0388014, 0.040315, 0.0423181, 0.0449607, 0.0484553, 0.0532045, 0.0605851, 0.0728733, 0.0934675, 0.126749");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.122387, 0.124434, 0.127221, 0.131147, 0.136698, 0.14397, 0.1539, 0.167271, 0.185558, 0.211079");
+          values ("0.123013, 0.12506, 0.127843, 0.131757, 0.137316, 0.144563, 0.154458, 0.167759, 0.185956, 0.211407");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.116553, 0.118529, 0.121139, 0.124753, 0.129719, 0.135944, 0.144229, 0.155027, 0.169896, 0.190759");
+          values ("0.116861, 0.118835, 0.121446, 0.125052, 0.130001, 0.136214, 0.144404, 0.155115, 0.16984, 0.190559");
         }
       }
     }
@@ -100488,35 +100398,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.007454, -0.007005, -0.006202, -0.005154, -0.003355, 0, 0.006434, 0.017724, 0.035212, 0.061566");
+          values ("-0.007858, -0.00733233, -0.006424, -0.005253, -0.003351, 0, 0.00627467, 0.0169927, 0.0331287, 0.056866");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.012273, -0.011835, -0.010892, -0.009134, -0.005853, 0, 0.010559, 0.027869, 0.053292, 0.087972");
+          values ("-0.0123407, -0.0118477, -0.01082, -0.009018, -0.00576267, 0, 0.0101413, 0.0268083, 0.0508853, 0.0831113");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.007454, 0.007005, 0.006202, 0.005154, 0.003355, -0, -0.006434, -0.017724, -0.035212, -0.061566");
+          values ("0.007858, 0.00733233, 0.006424, 0.005253, 0.003351, -0, -0.00627467, -0.0169927, -0.0331287, -0.056866");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.012273, 0.011835, 0.010892, 0.009134, 0.005853, -0, -0.010559, -0.027869, -0.053292, -0.087972");
+          values ("0.0123407, 0.0118477, 0.01082, 0.009018, 0.00576267, -0, -0.0101413, -0.0268083, -0.0508853, -0.0831113");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -100749,14 +100650,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.011108, -0.010349, -0.009157, -0.007564, -0.005337, -0.001902, 0.003915, 0.013215, 0.026472, 0.044535");
+          values ("-0.0114313, -0.010672, -0.009484, -0.00788733, -0.00566067, -0.00222533, 0.003591, 0.0128767, 0.0261403, 0.044188");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.011108, 0.010349, 0.009157, 0.007564, 0.005337, 0.001902, -0.003915, -0.013215, -0.026472, -0.044535");
+          values ("0.0114313, 0.010672, 0.009484, 0.00788733, 0.00566067, 0.00222533, -0.003591, -0.0128767, -0.0261403, -0.044188");
         }
       }
     }
@@ -100991,14 +100892,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.00985, -0.009258, -0.008375, -0.007339, -0.00605, -0.004432, -0.001965, 0.001927, 0.007519, 0.015235");
+          values ("-0.0104743, -0.00987933, -0.00899367, -0.00796, -0.00667067, -0.00505267, -0.00258633, 0.001306, 0.006906, 0.0146007");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.00985, 0.009258, 0.008375, 0.007339, 0.00605, 0.004432, 0.001965, -0.001927, -0.007519, -0.015235");
+          values ("0.0104743, 0.00987933, 0.00899367, 0.00796, 0.00667067, 0.00505267, 0.00258633, -0.001306, -0.006906, -0.0146007");
         }
       }
     }
@@ -104372,16 +104273,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0683486, 0.0719266, 0.077477, 0.087491, 0.106139, 0.136691, 0.186204, 0.263435, 0.382447, 0.56264");
+          values ("0.0683804, 0.072061, 0.0775821, 0.0875044, 0.106125, 0.136653, 0.186192, 0.26345, 0.382458, 0.562675");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0615628, 0.0660646, 0.0728874, 0.0839496, 0.104069, 0.13633, 0.189242, 0.271239, 0.396289, 0.58445");
+          values ("0.0615311, 0.0661961, 0.0730329, 0.084118, 0.104212, 0.136458, 0.189348, 0.271302, 0.396329, 0.584484");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.164744, 0.172416, 0.181609, 0.193445, 0.2095, 0.230731, 0.261054, 0.30445, 0.368508, 0.464095");
+          values ("0.163152, 0.170858, 0.180098, 0.191977, 0.208047, 0.229307, 0.259651, 0.303083, 0.367163, 0.462766");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.14414, 0.151694, 0.160982, 0.173034, 0.189566, 0.211155, 0.242912, 0.288748, 0.356751, 0.458523");
+          values ("0.14292, 0.150558, 0.159877, 0.171987, 0.188576, 0.21025, 0.242044, 0.287909, 0.355991, 0.457696");
         }
       }
     }
@@ -104880,20 +104781,20 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.008739, -0.008003, -0.006933, -0.005643, -0.003581, 0, 0.00623, 0.016297, 0.030238, 0.0502");
+          values ("-0.00882967, -0.00815333, -0.00714033, -0.005856, -0.00373167, 0, 0.006492, 0.016861, 0.0308043, 0.0508177");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.013013, -0.012212, -0.010741, -0.00863, -0.005254, 0, 0.009082, 0.022383, 0.041044, 0.065457");
+          values ("-0.01308, -0.012258, -0.010787, -0.00867333, -0.005301, 0, 0.008979, 0.0223313, 0.0406117, 0.0647797");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.008739, 0.008003, 0.006933, 0.005643, 0.003581, -0, -0.00623, -0.016297, -0.030238, -0.0502");
+          values ("0.00882967, 0.00815333, 0.00714033, 0.005856, 0.00373167, -0, -0.006492, -0.016861, -0.0308043, -0.0508177");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.013013, 0.012212, 0.010741, 0.00863, 0.005254, -0, -0.009082, -0.022383, -0.041044, -0.065457");
+          values ("0.01308, 0.012258, 0.010787, 0.00867333, 0.005301, -0, -0.008979, -0.0223313, -0.0406117, -0.0647797");
         }
       }
     }
@@ -105392,35 +105293,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.007437, -0.006661, -0.005646, -0.004492, -0.002999, -0.00119, 0.001666, 0.006472, 0.013163, 0.024073");
+          values ("-0.00708467, -0.00633267, -0.00531667, -0.00414967, -0.00270033, -0.000906667, 0.00196633, 0.006681, 0.01299, 0.023798");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.003199, 0.004016, 0.005235, 0.006469, 0.007924, 0.009771, 0.012579, 0.016822, 0.022182, 0.030701");
+          values ("0.003025, 0.00383733, 0.005039, 0.006253, 0.00769767, 0.00953333, 0.012354, 0.016569, 0.0217223, 0.030108");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.007437, 0.006661, 0.005646, 0.004492, 0.002999, 0.00119, -0.001666, -0.006472, -0.013163, -0.024073");
+          values ("0.00708467, 0.00633267, 0.00531667, 0.00414967, 0.00270033, 0.000906667, -0.00196633, -0.006681, -0.01299, -0.023798");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.003199, -0.004016, -0.005235, -0.006469, -0.007924, -0.009771, -0.012579, -0.016822, -0.022182, -0.030701");
+          values ("-0.003025, -0.00383733, -0.005039, -0.006253, -0.00769767, -0.00953333, -0.012354, -0.016569, -0.0217223, -0.030108");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -105941,14 +105833,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.004512, -0.003696, -0.002364, -0.000843, 0.001379, 0.004991, 0.011089, 0.02097, 0.035022, 0.054067");
+          values ("-0.00443767, -0.003622, -0.00228333, -0.000765, 0.001504, 0.005058, 0.0111573, 0.0210747, 0.035018, 0.053955");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.004512, 0.003696, 0.002364, 0.000843, -0.001379, -0.004991, -0.011089, -0.02097, -0.035022, -0.054067");
+          values ("0.00443767, 0.003622, 0.00228333, 0.000765, -0.001504, -0.005058, -0.0111573, -0.0210747, -0.035018, -0.053955");
         }
       }
     }
@@ -106471,14 +106363,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.006986, -0.00619, -0.005231, -0.004222, -0.003261, -0.002311, -0.001487, -3.3e-05, 0.00226, 0.005482");
+          values ("-0.006548, -0.005784, -0.00482, -0.00378867, -0.00282733, -0.00189067, -0.00107433, 0.000351, 0.00263533, 0.00577433");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.006986, 0.00619, 0.005231, 0.004222, 0.003261, 0.002311, 0.001487, 3.3e-05, -0.00226, -0.005482");
+          values ("0.006548, 0.005784, 0.00482, 0.00378867, 0.00282733, 0.00189067, 0.00107433, -0.000351, -0.00263533, -0.00577433");
         }
       }
     }
@@ -110124,16 +110016,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0559352, 0.0595966, 0.0651766, 0.0742752, 0.0890546, 0.11122, 0.146228, 0.200125, 0.283383, 0.4113");
+          values ("0.0564053, 0.0599685, 0.0654749, 0.0744673, 0.0891462, 0.11128, 0.146252, 0.200114, 0.2834, 0.411321");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0552908, 0.059701, 0.0646212, 0.0695216, 0.0744154, 0.078712, 0.0858296, 0.101079, 0.129407, 0.176923");
+          values ("0.0538785, 0.0583297, 0.0634571, 0.0687387, 0.0739653, 0.0785899, 0.0858893, 0.101099, 0.12948, 0.176962");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.192589, 0.197023, 0.20292, 0.211012, 0.222343, 0.237678, 0.259511, 0.290713, 0.336397, 0.404428");
+          values ("0.190965, 0.195459, 0.201384, 0.209446, 0.220843, 0.236169, 0.258056, 0.289295, 0.335021, 0.403047");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.128112, 0.132821, 0.138936, 0.146885, 0.157171, 0.168793, 0.182418, 0.199112, 0.220919, 0.251492");
+          values ("0.127204, 0.131819, 0.137836, 0.145741, 0.156011, 0.167654, 0.181279, 0.198022, 0.219895, 0.250452");
         }
       }
     }
@@ -110632,20 +110524,20 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.008727, -0.007922, -0.006905, -0.005578, -0.003566, 0, 0.006297, 0.017005, 0.032981, 0.055963");
+          values ("-0.00881467, -0.00806567, -0.00704967, -0.00572733, -0.00368, 0, 0.00653233, 0.0175317, 0.0334347, 0.0564297");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.013059, -0.01232, -0.010748, -0.008741, -0.005342, 0, 0.008761, 0.022803, 0.042373, 0.068327");
+          values ("-0.013086, -0.0123203, -0.0107673, -0.008724, -0.00530633, 0, 0.008768, 0.0227723, 0.042168, 0.0677287");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.008727, 0.007922, 0.006905, 0.005578, 0.003566, -0, -0.006297, -0.017005, -0.032981, -0.055963");
+          values ("0.00881467, 0.00806567, 0.00704967, 0.00572733, 0.00368, -0, -0.00653233, -0.0175317, -0.0334347, -0.0564297");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.013059, 0.01232, 0.010748, 0.008741, 0.005342, -0, -0.008761, -0.022803, -0.042373, -0.068327");
+          values ("0.013086, 0.0123203, 0.0107673, 0.008724, 0.00530633, -0, -0.008768, -0.0227723, -0.042168, -0.0677287");
         }
       }
     }
@@ -111144,35 +111036,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.006431, -0.005714, -0.004627, -0.003386, -0.002096, -0.000323, 0.002592, 0.008207, 0.016613, 0.030148");
+          values ("-0.006096, -0.005377, -0.00430433, -0.003085, -0.00178633, -1.8e-05, 0.002868, 0.00846867, 0.0165137, 0.02972");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.003686, 0.004433, 0.005738, 0.007018, 0.008337, 0.010248, 0.013066, 0.017414, 0.022932, 0.031537");
+          values ("0.003517, 0.00428, 0.005525, 0.00682333, 0.00816067, 0.0100253, 0.0129017, 0.0171917, 0.0224387, 0.0308743");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.006431, 0.005714, 0.004627, 0.003386, 0.002096, 0.000323, -0.002592, -0.008207, -0.016613, -0.030148");
+          values ("0.006096, 0.005377, 0.00430433, 0.003085, 0.00178633, 1.8e-05, -0.002868, -0.00846867, -0.0165137, -0.02972");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.003686, -0.004433, -0.005738, -0.007018, -0.008337, -0.010248, -0.013066, -0.017414, -0.022932, -0.031537");
+          values ("-0.003517, -0.00428, -0.005525, -0.00682333, -0.00816067, -0.0100253, -0.0129017, -0.0171917, -0.0224387, -0.0308743");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -111693,14 +111576,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.004028, -0.00311, -0.001925, -0.000335, 0.001856, 0.005285, 0.011499, 0.021341, 0.036036, 0.056119");
+          values ("-0.00389333, -0.00303533, -0.00182433, -0.000248333, 0.00194967, 0.005409, 0.0115723, 0.021458, 0.0360807, 0.055977");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.004028, 0.00311, 0.001925, 0.000335, -0.001856, -0.005285, -0.011499, -0.021341, -0.036036, -0.056119");
+          values ("0.00389333, 0.00303533, 0.00182433, 0.000248333, -0.00194967, -0.005409, -0.0115723, -0.021458, -0.0360807, -0.055977");
         }
       }
     }
@@ -112223,14 +112106,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.005726, -0.004986, -0.004039, -0.002981, -0.002095, -0.001269, -0.00044, 0.00124, 0.004621, 0.010396");
+          values ("-0.005292, -0.00455433, -0.00359233, -0.002541, -0.00165567, -0.000844667, -1.66667e-05, 0.00171033, 0.00505567, 0.0108033");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.005726, 0.004986, 0.004039, 0.002981, 0.002095, 0.001269, 0.00044, -0.00124, -0.004621, -0.010396");
+          values ("0.005292, 0.00455433, 0.00359233, 0.002541, 0.00165567, 0.000844667, 1.66667e-05, -0.00171033, -0.00505567, -0.0108033");
         }
       }
     }
@@ -115876,16 +115759,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0526662, 0.0542928, 0.0565994, 0.0606288, 0.0670442, 0.0772042, 0.0934292, 0.118249, 0.155942, 0.213901");
+          values ("0.0532699, 0.0548375, 0.0570859, 0.0609805, 0.0673635, 0.0773914, 0.0935525, 0.118324, 0.156, 0.213944");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0546866, 0.0573038, 0.0606064, 0.0649354, 0.0700932, 0.07514, 0.0798396, 0.084462, 0.0929846, 0.110777");
+          values ("0.0533112, 0.0559089, 0.0592317, 0.063636, 0.0690389, 0.0743903, 0.0795082, 0.0844418, 0.0930744, 0.11088");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.202521, 0.204979, 0.208166, 0.212629, 0.218833, 0.227207, 0.239037, 0.255508, 0.278735, 0.312401");
+          values ("0.200994, 0.203454, 0.206651, 0.21112, 0.217358, 0.225712, 0.237565, 0.254082, 0.277337, 0.31098");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.131202, 0.13379, 0.137289, 0.142162, 0.148909, 0.157344, 0.167963, 0.180337, 0.194933, 0.213044");
+          values ("0.130394, 0.132936, 0.13636, 0.141154, 0.147819, 0.156199, 0.166835, 0.179238, 0.193823, 0.211989");
         }
       }
     }
@@ -116384,20 +116267,20 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.008613, -0.007884, -0.006751, -0.005486, -0.0035, 0, 0.006216, 0.01657, 0.032835, 0.056459");
+          values ("-0.008685, -0.00799333, -0.00689167, -0.00560433, -0.00358933, 0, 0.006457, 0.0170733, 0.0334943, 0.056963");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.012903, -0.012028, -0.010555, -0.00846, -0.005199, 0, 0.008675, 0.022488, 0.0418, 0.066802");
+          values ("-0.0129087, -0.0120293, -0.010562, -0.00847433, -0.005204, 0, 0.00867467, 0.022459, 0.0414953, 0.06614");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.008613, 0.007884, 0.006751, 0.005486, 0.0035, -0, -0.006216, -0.01657, -0.032835, -0.056459");
+          values ("0.008685, 0.00799333, 0.00689167, 0.00560433, 0.00358933, -0, -0.006457, -0.0170733, -0.0334943, -0.056963");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.012903, 0.012028, 0.010555, 0.00846, 0.005199, -0, -0.008675, -0.022488, -0.0418, -0.066802");
+          values ("0.0129087, 0.0120293, 0.010562, 0.00847433, 0.005204, -0, -0.00867467, -0.022459, -0.0414953, -0.06614");
         }
       }
     }
@@ -116896,35 +116779,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.007327, -0.006597, -0.005459, -0.004235, -0.00285, -0.00096, 0.00176, 0.007319, 0.015777, 0.029338");
+          values ("-0.006977, -0.00624033, -0.005094, -0.00390833, -0.00249867, -0.000684333, 0.00212067, 0.00761333, 0.0157693, 0.02904");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.003397, 0.004224, 0.005456, 0.006809, 0.008258, 0.010096, 0.012824, 0.01715, 0.021678, 0.029297");
+          values ("0.003275, 0.00409, 0.00530267, 0.006622, 0.00807333, 0.009912, 0.012657, 0.0169367, 0.0212533, 0.0287103");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.007327, 0.006597, 0.005459, 0.004235, 0.00285, 0.00096, -0.00176, -0.007319, -0.015777, -0.029338");
+          values ("0.006977, 0.00624033, 0.005094, 0.00390833, 0.00249867, 0.000684333, -0.00212067, -0.00761333, -0.0157693, -0.02904");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.003397, -0.004224, -0.005456, -0.006809, -0.008258, -0.010096, -0.012824, -0.01715, -0.021678, -0.029297");
+          values ("-0.003275, -0.00409, -0.00530267, -0.006622, -0.00807333, -0.009912, -0.012657, -0.0169367, -0.0212533, -0.0287103");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -117445,14 +117319,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.005308, -0.004473, -0.00315, -0.001569, 0.000686, 0.004282, 0.010327, 0.020035, 0.034564, 0.053837");
+          values ("-0.00520267, -0.004368, -0.00304933, -0.00146333, 0.000791, 0.00438, 0.0104217, 0.020132, 0.0346003, 0.0537687");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.005308, 0.004473, 0.00315, 0.001569, -0.000686, -0.004282, -0.010327, -0.020035, -0.034564, -0.053837");
+          values ("0.00520267, 0.004368, 0.00304933, 0.00146333, -0.000791, -0.00438, -0.0104217, -0.020132, -0.0346003, -0.0537687");
         }
       }
     }
@@ -117975,14 +117849,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.006923, -0.006103, -0.005108, -0.003973, -0.003114, -0.002209, -0.00145, 0.000201, 0.003493, 0.009246");
+          values ("-0.00642967, -0.00562867, -0.00463133, -0.00351533, -0.00262133, -0.001738, -0.000951333, 0.000680667, 0.00395567, 0.00970533");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.006923, 0.006103, 0.005108, 0.003973, 0.003114, 0.002209, 0.00145, -0.000201, -0.003493, -0.009246");
+          values ("0.00642967, 0.00562867, 0.00463133, 0.00351533, 0.00262133, 0.001738, 0.000951333, -0.000680667, -0.00395567, -0.00970533");
         }
       }
     }
@@ -124232,16 +124106,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.058934, 0.0652828, 0.0733646, 0.085149, 0.10494, 0.135961, 0.185959, 0.263501, 0.382529, 0.562663");
+          values ("0.0665288, 0.0707976, 0.0768128, 0.0870727, 0.105917, 0.136518, 0.186133, 0.263468, 0.38248, 0.56268");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.053342, 0.0604278, 0.0695842, 0.0829268, 0.104288, 0.137333, 0.190218, 0.27209, 0.396809, 0.584743");
+          values ("0.0599144, 0.0651003, 0.0724224, 0.0839771, 0.104317, 0.136704, 0.189577, 0.271477, 0.396465, 0.58456");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.12136, 0.128964, 0.138362, 0.150518, 0.166918, 0.188448, 0.2191, 0.262884, 0.327307, 0.423132");
+          values ("0.15444, 0.162169, 0.171454, 0.183405, 0.19957, 0.220885, 0.251254, 0.294805, 0.358969, 0.454625");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.115826, 0.12329, 0.132686, 0.145084, 0.161995, 0.184355, 0.216488, 0.262793, 0.331324, 0.433133");
+          values ("0.137108, 0.14474, 0.154109, 0.166306, 0.182991, 0.204828, 0.236695, 0.282663, 0.350823, 0.452578");
         }
       }
     }
@@ -125220,35 +125094,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.03378, 0.034466, 0.035591, 0.036833, 0.03886, 0.042474, 0.048702, 0.0588, 0.072662, 0.092692");
+          values ("-0.0089532, -0.008279, -0.007286, -0.0060006, -0.0038768, 0, 0.0068752, 0.0178676, 0.0329616, 0.0549948");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.01382, 0.014758, 0.016214, 0.018325, 0.021703, 0.026953, 0.036012, 0.04941, 0.06801, 0.092439");
+          values ("-0.0135094, -0.0126752, -0.0112298, -0.0090886, -0.0055708, 0, 0.0094358, 0.0235524, 0.0428174, 0.0686608");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.03378, -0.034466, -0.035591, -0.036833, -0.03886, -0.042474, -0.048702, -0.0588, -0.072662, -0.092692");
+          values ("0.0089532, 0.008279, 0.007286, 0.0060006, 0.0038768, -0, -0.0068752, -0.0178676, -0.0329616, -0.0549948");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.01382, -0.014758, -0.016214, -0.018325, -0.021703, -0.026953, -0.036012, -0.04941, -0.06801, -0.092439");
+          values ("0.0135094, 0.0126752, 0.0112298, 0.0090886, 0.0055708, -0, -0.0094358, -0.0235524, -0.0428174, -0.0686608");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M1) {
       direction : "input";
@@ -126273,14 +126138,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.027921, 0.028803, 0.02999, 0.031297, 0.032847, 0.034777, 0.037641, 0.042443, 0.049217, 0.058597");
+          values ("0.0053334, 0.0062464, 0.0074486, 0.008739, 0.0102982, 0.0122026, 0.015103, 0.0198784, 0.0266122, 0.0357784");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.027921, -0.028803, -0.02999, -0.031297, -0.032847, -0.034777, -0.037641, -0.042443, -0.049217, -0.058597");
+          values ("-0.0053334, -0.0062464, -0.0074486, -0.008739, -0.0102982, -0.0122026, -0.015103, -0.0198784, -0.0266122, -0.0357784");
         }
       }
     }
@@ -127307,14 +127172,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.022507, 0.023236, 0.024586, 0.026152, 0.028426, 0.031946, 0.038043, 0.047956, 0.061985, 0.081036");
+          values ("-6.22e-05, 0.000723, 0.0020674, 0.0035904, 0.0058476, 0.0093862, 0.0154896, 0.0254048, 0.0392558, 0.0580434");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.022507, -0.023236, -0.024586, -0.026152, -0.028426, -0.031946, -0.038043, -0.047956, -0.061985, -0.081036");
+          values ("6.22e-05, -0.000723, -0.0020674, -0.0035904, -0.0058476, -0.0093862, -0.0154896, -0.0254048, -0.0392558, -0.0580434");
         }
       }
     }
@@ -128341,14 +128206,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.035475, 0.036266, 0.037235, 0.038246, 0.039267, 0.040157, 0.040974, 0.04242, 0.044724, 0.047953");
+          values ("0.0004778, 0.0012344, 0.0022048, 0.0032568, 0.0042308, 0.0051302, 0.0059408, 0.0073372, 0.0095982, 0.0126282");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.035475, -0.036266, -0.037235, -0.038246, -0.039267, -0.040157, -0.040974, -0.04242, -0.044724, -0.047953");
+          values ("-0.0004778, -0.0012344, -0.0022048, -0.0032568, -0.0042308, -0.0051302, -0.0059408, -0.0073372, -0.0095982, -0.0126282");
         }
       }
     }
@@ -129375,14 +129240,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.031588, 0.032349, 0.033483, 0.034824, 0.036289, 0.038281, 0.041274, 0.046706, 0.054841, 0.067128");
+          values ("-0.0034454, -0.0026642, -0.001521, -0.0002084, 0.0012934, 0.0032436, 0.0062666, 0.0116632, 0.0197302, 0.031795");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.031588, -0.032349, -0.033483, -0.034824, -0.036289, -0.038281, -0.041274, -0.046706, -0.054841, -0.067128");
+          values ("0.0034454, 0.0026642, 0.001521, 0.0002084, -0.0012934, -0.0032436, -0.0062666, -0.0116632, -0.0197302, -0.031795");
         }
       }
     }
@@ -136088,16 +135953,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0539716, 0.0589616, 0.0645224, 0.0712062, 0.0800948, 0.0921364, 0.112261, 0.145346, 0.198054, 0.280875");
+          values ("0.064371, 0.0682395, 0.0724256, 0.0773135, 0.0839308, 0.0942866, 0.113454, 0.145843, 0.198171, 0.280719");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.047605, 0.0514512, 0.0561914, 0.0619798, 0.0699152, 0.0816246, 0.101048, 0.13233, 0.181665, 0.258703");
+          values ("0.0564724, 0.059069, 0.0620769, 0.0658647, 0.0718338, 0.082153, 0.100797, 0.13167, 0.180905, 0.258065");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.122548, 0.127246, 0.133454, 0.141716, 0.152531, 0.165625, 0.183058, 0.206589, 0.239207, 0.286217");
+          values ("0.156522, 0.161592, 0.168122, 0.176504, 0.187208, 0.200073, 0.21728, 0.240398, 0.272707, 0.319368");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.117477, 0.121833, 0.127481, 0.134932, 0.144793, 0.156832, 0.173135, 0.195115, 0.225925, 0.270262");
+          values ("0.142295, 0.146882, 0.152694, 0.160176, 0.169725, 0.1815, 0.197425, 0.218905, 0.249244, 0.293364");
         }
       }
     }
@@ -137076,35 +136941,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.036448, 0.037179, 0.038191, 0.039535, 0.041605, 0.045059, 0.051484, 0.061929, 0.077478, 0.100091");
+          values ("-0.0088588, -0.008126, -0.0071482, -0.0058204, -0.0037068, 0, 0.0068998, 0.0183174, 0.0347638, 0.0589446");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.01962, 0.020418, 0.021953, 0.02401, 0.027271, 0.032616, 0.04158, 0.055762, 0.076112, 0.103416");
+          values ("-0.013299, -0.0125298, -0.011054, -0.0089676, -0.0055418, 0, 0.009433, 0.0243982, 0.045574, 0.0743628");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.036448, -0.037179, -0.038191, -0.039535, -0.041605, -0.045059, -0.051484, -0.061929, -0.077478, -0.100091");
+          values ("0.0088588, 0.008126, 0.0071482, 0.0058204, 0.0037068, -0, -0.0068998, -0.0183174, -0.0347638, -0.0589446");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.01962, -0.020418, -0.021953, -0.02401, -0.027271, -0.032616, -0.04158, -0.055762, -0.076112, -0.103416");
+          values ("0.013299, 0.0125298, 0.011054, 0.0089676, 0.0055418, -0, -0.009433, -0.0243982, -0.045574, -0.0743628");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M1) {
       direction : "input";
@@ -138129,14 +137985,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.033872, 0.034817, 0.03606, 0.037381, 0.038853, 0.040674, 0.043553, 0.048626, 0.056311, 0.066735");
+          values ("0.0066132, 0.0075776, 0.0087858, 0.0101378, 0.0115688, 0.0134266, 0.0162834, 0.021362, 0.0289626, 0.0393524");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.033872, -0.034817, -0.03606, -0.037381, -0.038853, -0.040674, -0.043553, -0.048626, -0.056311, -0.066735");
+          values ("-0.0066132, -0.0075776, -0.0087858, -0.0101378, -0.0115688, -0.0134266, -0.0162834, -0.021362, -0.0289626, -0.0393524");
         }
       }
     }
@@ -139163,14 +139019,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.028622, 0.029541, 0.030696, 0.032216, 0.03444, 0.037923, 0.044046, 0.054393, 0.069299, 0.090507");
+          values ("0.0013724, 0.0022214, 0.0034036, 0.0049632, 0.0071856, 0.0106844, 0.0167932, 0.0270902, 0.0419396, 0.0628934");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.028622, -0.029541, -0.030696, -0.032216, -0.03444, -0.037923, -0.044046, -0.054393, -0.069299, -0.090507");
+          values ("-0.0013724, -0.0022214, -0.0034036, -0.0049632, -0.0071856, -0.0106844, -0.0167932, -0.0270902, -0.0419396, -0.0628934");
         }
       }
     }
@@ -140197,14 +140053,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.039534, 0.040276, 0.041244, 0.042328, 0.043223, 0.043995, 0.044888, 0.046424, 0.04966, 0.054882");
+          values ("0.0022406, 0.0029836, 0.0039696, 0.004987, 0.0058908, 0.0066876, 0.007557, 0.00914, 0.0122746, 0.0173594");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.039534, -0.040276, -0.041244, -0.042328, -0.043223, -0.043995, -0.044888, -0.046424, -0.04966, -0.054882");
+          values ("-0.0022406, -0.0029836, -0.0039696, -0.004987, -0.0058908, -0.0066876, -0.007557, -0.00914, -0.0122746, -0.0173594");
         }
       }
     }
@@ -141231,14 +141087,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.035172, 0.036004, 0.037173, 0.038428, 0.039954, 0.041832, 0.044925, 0.050662, 0.060002, 0.074426");
+          values ("-0.0021458, -0.0013082, -0.0001656, 0.0010798, 0.0025716, 0.0045046, 0.0075888, 0.0133208, 0.0225764, 0.0368364");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.035172, -0.036004, -0.037173, -0.038428, -0.039954, -0.041832, -0.044925, -0.050662, -0.060002, -0.074426");
+          values ("0.0021458, 0.0013082, 0.0001656, -0.0010798, -0.0025716, -0.0045046, -0.0075888, -0.0133208, -0.0225764, -0.0368364");
         }
       }
     }
@@ -147944,16 +147800,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0553574, 0.058003, 0.0613132, 0.0657496, 0.0709556, 0.077105, 0.0857254, 0.0987926, 0.120973, 0.157189");
+          values ("0.0659941, 0.0681114, 0.070645, 0.0738611, 0.0774862, 0.0816951, 0.0882847, 0.0999939, 0.12136, 0.157148");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0482192, 0.0505456, 0.0534406, 0.0572936, 0.0622864, 0.0683086, 0.0768918, 0.0902512, 0.112319, 0.147898");
+          values ("0.0578191, 0.0595798, 0.0616887, 0.064355, 0.0675678, 0.071633, 0.0784158, 0.0904124, 0.111608, 0.146949");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.132067, 0.134681, 0.138218, 0.143129, 0.149954, 0.158485, 0.169527, 0.183416, 0.201891, 0.227007");
+          values ("0.165936, 0.168736, 0.172497, 0.17769, 0.18472, 0.193189, 0.203899, 0.217549, 0.235618, 0.260446");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.123282, 0.125753, 0.129074, 0.133661, 0.140038, 0.148017, 0.158445, 0.171816, 0.189636, 0.214101");
+          values ("0.147888, 0.150564, 0.154069, 0.158869, 0.165322, 0.173194, 0.183294, 0.196367, 0.213632, 0.237709");
         }
       }
     }
@@ -148932,35 +148788,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.03677, 0.037516, 0.038615, 0.039976, 0.041926, 0.045449, 0.05167, 0.062014, 0.077963, 0.10092");
+          values ("-0.0088006, -0.008104, -0.0070422, -0.0057144, -0.0036958, 0, 0.006704, 0.0179442, 0.035048, 0.0596752");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.020476, 0.021328, 0.022824, 0.02492, 0.028128, 0.033342, 0.042009, 0.056078, 0.076707, 0.104199");
+          values ("-0.0131196, -0.0122928, -0.0108502, -0.0087454, -0.0054174, 0, 0.0091318, 0.0238818, 0.0453574, 0.0741074");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.03677, -0.037516, -0.038615, -0.039976, -0.041926, -0.045449, -0.05167, -0.062014, -0.077963, -0.10092");
+          values ("0.0088006, 0.008104, 0.0070422, 0.0057144, 0.0036958, -0, -0.006704, -0.0179442, -0.035048, -0.0596752");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.020476, -0.021328, -0.022824, -0.02492, -0.028128, -0.033342, -0.042009, -0.056078, -0.076707, -0.104199");
+          values ("0.0131196, 0.0122928, 0.0108502, 0.0087454, 0.0054174, -0, -0.0091318, -0.0238818, -0.0453574, -0.0741074");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M1) {
       direction : "input";
@@ -149985,14 +149832,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.034716, 0.035496, 0.036772, 0.038215, 0.039782, 0.041667, 0.04444, 0.049228, 0.056777, 0.066786");
+          values ("0.0066064, 0.007452, 0.008725, 0.010133, 0.0116574, 0.013551, 0.016356, 0.0211474, 0.028568, 0.038483");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.034716, -0.035496, -0.036772, -0.038215, -0.039782, -0.041667, -0.04444, -0.049228, -0.056777, -0.066786");
+          values ("-0.0066064, -0.007452, -0.008725, -0.010133, -0.0116574, -0.013551, -0.016356, -0.0211474, -0.028568, -0.038483");
         }
       }
     }
@@ -151019,14 +150866,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.028776, 0.029529, 0.030925, 0.032359, 0.034725, 0.038172, 0.044319, 0.054175, 0.069438, 0.090359");
+          values ("0.0006602, 0.0014506, 0.002821, 0.0043244, 0.0066164, 0.010118, 0.0161968, 0.0261142, 0.0413104, 0.0619552");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.028776, -0.029529, -0.030925, -0.032359, -0.034725, -0.038172, -0.044319, -0.054175, -0.069438, -0.090359");
+          values ("-0.0006602, -0.0014506, -0.002821, -0.0043244, -0.0066164, -0.010118, -0.0161968, -0.0261142, -0.0413104, -0.0619552");
         }
       }
     }
@@ -152053,14 +151900,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.038991, 0.039754, 0.040793, 0.041795, 0.042775, 0.043613, 0.044471, 0.046047, 0.049118, 0.054402");
+          values ("0.001324, 0.0020828, 0.003099, 0.0041186, 0.0050876, 0.0059336, 0.0067886, 0.0083682, 0.011483, 0.0165582");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.038991, -0.039754, -0.040793, -0.041795, -0.042775, -0.043613, -0.044471, -0.046047, -0.049118, -0.054402");
+          values ("-0.001324, -0.0020828, -0.003099, -0.0041186, -0.0050876, -0.0059336, -0.0067886, -0.0083682, -0.011483, -0.0165582");
         }
       }
     }
@@ -153087,14 +152934,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.034709, 0.035532, 0.036732, 0.038017, 0.039534, 0.041471, 0.044522, 0.050135, 0.059564, 0.074148");
+          values ("-0.002956, -0.0021414, -0.0009418, 0.0003352, 0.0018512, 0.0037818, 0.0068416, 0.0124324, 0.021826, 0.036282");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.034709, -0.035532, -0.036732, -0.038017, -0.039534, -0.041471, -0.044522, -0.050135, -0.059564, -0.074148");
+          values ("0.002956, 0.0021414, 0.0009418, -0.0003352, -0.0018512, -0.0037818, -0.0068416, -0.0124324, -0.021826, -0.036282");
         }
       }
     }
@@ -155117,15 +154964,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (RN) {
       direction : "input";
@@ -156326,15 +156164,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (RN) {
       direction : "input";
@@ -157535,15 +157364,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (RN) {
       direction : "input";
@@ -159481,16 +159301,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0401682, 0.0469486, 0.0558582, 0.0691566, 0.0908658, 0.124467, 0.177915, 0.259016, 0.38048, 0.561716");
+          values ("0.0417188, 0.0481013, 0.0565193, 0.0694671, 0.0909151, 0.124432, 0.177875, 0.258985, 0.380426, 0.561689");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0546318, 0.0626602, 0.0730044, 0.0881106, 0.112377, 0.149018, 0.207438, 0.297117, 0.433673, 0.639251");
+          values ("0.0619317, 0.0680463, 0.0765543, 0.0902354, 0.113658, 0.149873, 0.207855, 0.297254, 0.433733, 0.639171");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.0780924, 0.0841475, 0.0917941, 0.102026, 0.116514, 0.136238, 0.165569, 0.208825, 0.273049, 0.36905");
+          values ("0.082356, 0.0885278, 0.0961617, 0.106369, 0.12101, 0.140675, 0.169965, 0.213189, 0.277382, 0.373366");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.107129, 0.115075, 0.125105, 0.13842, 0.156787, 0.181137, 0.216336, 0.267023, 0.34184, 0.453345");
+          values ("0.129152, 0.137318, 0.147366, 0.160617, 0.178889, 0.203137, 0.238183, 0.288706, 0.363411, 0.47474");
         }
       }
     }
@@ -159701,35 +159521,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.015562, -0.014712, -0.013076, -0.010515, -0.006407, 0, 0.008686, 0.020447, 0.035481, 0.05529");
+          values ("-0.0154243, -0.014536, -0.012886, -0.0103473, -0.00631867, 0, 0.00844467, 0.0195183, 0.0330623, 0.0498827");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.020573, 0.021153, 0.022349, 0.024309, 0.027563, 0.033, 0.042817, 0.057028, 0.07698, 0.104875");
+          values ("-0.0135077, -0.0129713, -0.0117417, -0.00968133, -0.006101, 0, 0.0106483, 0.0262557, 0.0484433, 0.0793853");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.015562, 0.014712, 0.013076, 0.010515, 0.006407, -0, -0.008686, -0.020447, -0.035481, -0.05529");
+          values ("0.0154243, 0.014536, 0.012886, 0.0103473, 0.00631867, -0, -0.00844467, -0.0195183, -0.0330623, -0.0498827");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.020573, -0.021153, -0.022349, -0.024309, -0.027563, -0.033, -0.042817, -0.057028, -0.07698, -0.104875");
+          values ("0.0135077, 0.0129713, 0.0117417, 0.00968133, 0.006101, -0, -0.0106483, -0.0262557, -0.0484433, -0.0793853");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -159962,14 +159773,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.001963, -0.001185, -5.8e-05, 0.001383, 0.003461, 0.006719, 0.011186, 0.0165, 0.022001, 0.026289");
+          values ("-0.006981, -0.00621067, -0.00508033, -0.003615, -0.001543, 0.00170067, 0.00613, 0.0114127, 0.0168077, 0.0209667");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.001963, 0.001185, 5.8e-05, -0.001383, -0.003461, -0.006719, -0.011186, -0.0165, -0.022001, -0.026289");
+          values ("0.006981, 0.00621067, 0.00508033, 0.003615, 0.001543, -0.00170067, -0.00613, -0.0114127, -0.0168077, -0.0209667");
         }
       }
     }
@@ -160204,14 +160015,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.027347, 0.028086, 0.029197, 0.03058, 0.032697, 0.036377, 0.042886, 0.053715, 0.069974, 0.093388");
+          values ("0.00378667, 0.00451467, 0.00562933, 0.007015, 0.00913933, 0.0128047, 0.019312, 0.0300963, 0.0462673, 0.069537");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.027347, -0.028086, -0.029197, -0.03058, -0.032697, -0.036377, -0.042886, -0.053715, -0.069974, -0.093388");
+          values ("-0.00378667, -0.00451467, -0.00562933, -0.007015, -0.00913933, -0.0128047, -0.019312, -0.0300963, -0.0462673, -0.069537");
         }
       }
     }
@@ -162243,16 +162054,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0332556, 0.0374562, 0.0428266, 0.049992, 0.0602524, 0.0751886, 0.0994322, 0.137952, 0.197973, 0.289302");
+          values ("0.0351253, 0.0390385, 0.0439707, 0.0507521, 0.060612, 0.0752598, 0.0993849, 0.13785, 0.197891, 0.289244");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0406172, 0.044974, 0.050488, 0.0576784, 0.0668318, 0.0787058, 0.0966918, 0.124932, 0.16977, 0.239286");
+          values ("0.0503017, 0.05451, 0.0594937, 0.0652589, 0.0725211, 0.0822875, 0.0987118, 0.126196, 0.170439, 0.239601");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.0782841, 0.0818215, 0.0865907, 0.0928271, 0.10155, 0.112605, 0.128798, 0.151073, 0.183766, 0.232352");
+          values ("0.0827023, 0.0863289, 0.0912628, 0.0975904, 0.106286, 0.117344, 0.133318, 0.155537, 0.188165, 0.236724");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.0944108, 0.0984588, 0.103686, 0.110863, 0.120544, 0.132516, 0.148309, 0.169251, 0.198266, 0.239349");
+          values ("0.113281, 0.117765, 0.123603, 0.131364, 0.141471, 0.153597, 0.169402, 0.190314, 0.219242, 0.26028");
         }
       }
     }
@@ -162463,35 +162274,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.0151281, -0.0143375, -0.012724, -0.010318, -0.006248, 0, 0.009915, 0.022449, 0.03917, 0.061399");
+          values ("-0.0151187, -0.0142877, -0.012651, -0.010228, -0.00623033, 0, 0.00956767, 0.021503, 0.036779, 0.0561013");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.019332, 0.019942, 0.021138, 0.023028, 0.02625, 0.031622, 0.040982, 0.055429, 0.07507, 0.102172");
+          values ("-0.0132367, -0.0126667, -0.0114833, -0.00949267, -0.00599367, 0, 0.0103507, 0.0260673, 0.047839, 0.0781457");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.0151281, 0.0143375, 0.012724, 0.010318, 0.006248, -0, -0.009915, -0.022449, -0.03917, -0.061399");
+          values ("0.0151187, 0.0142877, 0.012651, 0.010228, 0.00623033, -0, -0.00956767, -0.021503, -0.036779, -0.0561013");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.019332, -0.019942, -0.021138, -0.023028, -0.02625, -0.031622, -0.040982, -0.055429, -0.07507, -0.102172");
+          values ("0.0132367, 0.0126667, 0.0114833, 0.00949267, 0.00599367, -0, -0.0103507, -0.0260673, -0.047839, -0.0781457");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -162724,14 +162526,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.001647, -0.000848, 0.000282, 0.001763, 0.003864, 0.007231, 0.012045, 0.018052, 0.024763, 0.030863");
+          values ("-0.00704333, -0.00624033, -0.00512533, -0.00363, -0.00152967, 0.001821, 0.00662467, 0.012576, 0.019194, 0.0251357");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.001647, 0.000848, -0.000282, -0.001763, -0.003864, -0.007231, -0.012045, -0.018052, -0.024763, -0.030863");
+          values ("0.00704333, 0.00624033, 0.00512533, 0.00363, 0.00152967, -0.001821, -0.00662467, -0.012576, -0.019194, -0.0251357");
         }
       }
     }
@@ -162966,14 +162768,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.025127, 0.025881, 0.027024, 0.028512, 0.030722, 0.034386, 0.040867, 0.051557, 0.067424, 0.09014");
+          values ("0.00239333, 0.003145, 0.004296, 0.00578533, 0.007996, 0.0116633, 0.0181363, 0.028797, 0.044559, 0.0671183");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.025127, -0.025881, -0.027024, -0.028512, -0.030722, -0.034386, -0.040867, -0.051557, -0.067424, -0.09014");
+          values ("-0.00239333, -0.003145, -0.004296, -0.00578533, -0.007996, -0.0116633, -0.0181363, -0.028797, -0.044559, -0.0671183");
         }
       }
     }
@@ -165005,16 +164807,16 @@ library (ASCEND_FREEPDK45_ALHO) {
         timing_sense : non_unate;
         timing_type : rising_edge;
         rise_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.0318542, 0.0341936, 0.0373702, 0.0416432, 0.0474502, 0.0548164, 0.0653624, 0.0814148, 0.107385, 0.148892");
+          values ("0.0341147, 0.0363081, 0.0392637, 0.0432381, 0.0486042, 0.0555542, 0.0656937, 0.0814557, 0.107255, 0.148736");
         }
         fall_transition (delay_template_10x10_pseudo_delay) {
-          values ("0.043855, 0.0462618, 0.0495418, 0.0540016, 0.0598894, 0.0668538, 0.0758898, 0.088136, 0.107481, 0.138862");
+          values ("0.0535251, 0.0559725, 0.0591887, 0.0632668, 0.0682074, 0.0737091, 0.0806437, 0.0909396, 0.108999, 0.139711");
         }
         cell_rise (delay_template_10x10_pseudo_delay) {
-          values ("0.0812753, 0.0833144, 0.0860511, 0.0897631, 0.095371, 0.102157, 0.111739, 0.12406, 0.141025, 0.165158");
+          values ("0.0859531, 0.0880578, 0.0908674, 0.0947084, 0.100309, 0.107172, 0.116625, 0.128874, 0.145746, 0.169807");
         }
         cell_fall (delay_template_10x10_pseudo_delay) {
-          values ("0.105252, 0.107549, 0.110664, 0.115045, 0.121234, 0.129201, 0.139701, 0.152988, 0.170169, 0.193318");
+          values ("0.125768, 0.128312, 0.131761, 0.136576, 0.143259, 0.151699, 0.162369, 0.175617, 0.192724, 0.215739");
         }
       }
     }
@@ -165225,35 +165027,26 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.0152708, -0.0144219, -0.0128426, -0.0104081, -0.0064118, 0, 0.010394, 0.023993, 0.041639, 0.064867");
+          values ("-0.0152005, -0.0143309, -0.0127187, -0.0102731, -0.0063312, 0, 0.0100493, 0.0230937, 0.03944, 0.060021");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.021656, 0.022303, 0.023525, 0.025357, 0.028473, 0.033747, 0.043092, 0.057877, 0.079088, 0.10788");
+          values ("-0.012877, -0.0122777, -0.0110913, -0.00919367, -0.00583767, 0, 0.0102963, 0.02657, 0.0499353, 0.0820673");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.0152708, 0.0144219, 0.0128426, 0.0104081, 0.0064118, -0, -0.010394, -0.023993, -0.041639, -0.064867");
+          values ("0.0152005, 0.0143309, 0.0127187, 0.0102731, 0.0063312, -0, -0.0100493, -0.0230937, -0.03944, -0.060021");
         }
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.021656, -0.022303, -0.023525, -0.025357, -0.028473, -0.033747, -0.043092, -0.057877, -0.079088, -0.10788");
+          values ("0.012877, 0.0122777, 0.0110913, 0.00919367, 0.00583767, -0, -0.0102963, -0.02657, -0.0499353, -0.0820673");
         }
       }
     }
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (M) {
       direction : "input";
@@ -165486,14 +165279,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.000617, 0.000166, 0.001267, 0.002824, 0.004942, 0.008319, 0.013385, 0.020002, 0.027607, 0.035059");
+          values ("-0.00645157, -0.00566717, -0.004552, -0.00300667, -0.000892, 0.00248767, 0.007567, 0.014119, 0.0216207, 0.0289467");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         rise_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.000617, -0.000166, -0.001267, -0.002824, -0.004942, -0.008319, -0.013385, -0.020002, -0.027607, -0.035059");
+          values ("0.00645157, 0.00566717, 0.004552, 0.00300667, 0.000892, -0.00248767, -0.007567, -0.014119, -0.0216207, -0.0289467");
         }
       }
     }
@@ -165728,14 +165521,14 @@ library (ASCEND_FREEPDK45_ALHO) {
         related_pin : "G";
         timing_type : setup_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("0.026974, 0.027773, 0.028961, 0.030483, 0.032646, 0.036287, 0.042757, 0.053524, 0.070418, 0.09466");
+          values ("0.002606, 0.00340167, 0.00459, 0.00611, 0.00828433, 0.011926, 0.0183773, 0.0291403, 0.045943, 0.0700367");
         }
       }
       timing () {
         related_pin : "G";
         timing_type : hold_rising;
         fall_constraint (delay_template_10x10_pseudo_constraint) {
-          values ("-0.026974, -0.027773, -0.028961, -0.030483, -0.032646, -0.036287, -0.042757, -0.053524, -0.070418, -0.09466");
+          values ("-0.002606, -0.00340167, -0.00459, -0.00611, -0.00828433, -0.011926, -0.0183773, -0.0291403, -0.045943, -0.0700367");
         }
       }
     }
@@ -167030,15 +166823,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (S) {
       direction : "input";
@@ -168239,15 +168023,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (S) {
       direction : "input";
@@ -169448,15 +169223,6 @@ library (ASCEND_FREEPDK45_ALHO) {
     pin (G) {
       clock : true;
       direction : "input";
-      nextstate_type : data;
-      timing () {
-        related_pin : "G";
-        timing_type : setup_rising;
-      }
-      timing () {
-        related_pin : "G";
-        timing_type : hold_rising;
-      }
     }
     pin (S) {
       direction : "input";
