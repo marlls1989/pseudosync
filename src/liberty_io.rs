@@ -38,7 +38,18 @@ pub(crate) fn write_liberty_file(
         BufWriter::new(output)
     };
 
-    writeln!(output_stream, "{}", liberty)?;
+    write_liberty(&mut output_stream, liberty)
+}
+
+/// Write a Liberty AST to an already-open sink.
+///
+/// The flush is not optional. A buffered sink writes nothing to its backing store
+/// until the buffer fills, and the flush it performs when it drops throws its error
+/// away -- so without this, a library small enough to fit the buffer would be
+/// reported as written when the disk had refused every byte of it.
+fn write_liberty(sink: &mut dyn Write, liberty: &LibertyAst) -> Result<(), Box<dyn Error>> {
+    writeln!(sink, "{}", liberty)?;
+    sink.flush()?;
 
     Ok(())
 }
@@ -46,14 +57,17 @@ pub(crate) fn write_liberty_file(
 #[cfg(test)]
 mod tests {
     //! Behaviour of the Liberty file readers and writers: reading a library from a
-    //! path, and what a write-then-reparse round trip has to preserve.
+    //! path, what a write-then-reparse round trip has to preserve, and that a
+    //! library which could not be stored is reported as a failure.
 
     use super::*;
     use liberty_parser::liberty::Group;
+    use std::io;
     use tempfile::TempDir;
 
     // --- parse_liberty_file ------------------------------------------------
 
+    /// Killed by: `parse_liberty_file` inverted its stdin test to `path.as_os_str() != "-"`, reading stdin for a real path.
     #[test]
     fn parse_liberty_file_reads_the_library_at_the_given_path() {
         let dir = TempDir::new().expect("create temp dir");
@@ -182,6 +196,7 @@ library(io_test) {
         .collect()
     }
 
+    /// Killed by: `write_liberty` prefixed the emitted library with `@@@ `, so what it wrote no longer reparsed.
     #[test]
     fn write_then_reparse_preserves_the_library_structure() {
         let dir = TempDir::new().expect("create temp dir");
@@ -207,6 +222,72 @@ library(io_test) {
             structure(&reparsed[0]),
             expected_structure(),
             "round trip lost structure"
+        );
+    }
+
+    // --- write_liberty: a library that was not stored is not a success ------
+
+    /// A sink that accepts every byte and then fails to flush, standing in for a
+    /// buffered writer whose backing store is full: the bytes reach the buffer
+    /// happily, and only the flush ever discovers they cannot be stored.
+    #[derive(Default)]
+    struct FullDisk {
+        accepted: usize,
+    }
+
+    impl Write for FullDisk {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.accepted += buf.len();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "no space left on device",
+            ))
+        }
+    }
+
+    /// Killed by: `write_liberty` swallowed the flush error -- `let _ = sink.flush();`.
+    #[test]
+    fn a_sink_that_cannot_be_flushed_makes_the_write_fail() {
+        let liberty = liberty_parser::parse_lib(ROUND_TRIP_LIB).expect("parse fixture");
+        let mut sink = FullDisk::default();
+
+        let err = write_liberty(&mut sink, &liberty.to_ast())
+            .expect_err("a library that could not be stored must not be reported as written");
+
+        // The error has to be the sink's own, raised as it was, rather than some
+        // unrelated failure that happens to also be an Err.
+        assert_eq!(
+            err.downcast_ref::<io::Error>().expect("io error").kind(),
+            io::ErrorKind::StorageFull
+        );
+        // Every byte was accepted, so the write itself succeeded: the failure this
+        // pins is the flush, which is the only place the loss could have surfaced.
+        assert!(sink.accepted > 0, "the fixture should produce output");
+    }
+
+    // --- write_liberty: trailing newline ------------------------------------
+
+    /// Killed by: `write_liberty` used `write!` instead of `writeln!`.
+    #[test]
+    fn write_liberty_ends_the_output_with_a_newline() {
+        // Liberty is a line-oriented text format, and POSIX defines a text file's
+        // lines as each ending in a newline -- a file that stops mid-line reads as
+        // truncated to a line-oriented parser or to `diff`/`cat`, whether or not the
+        // bytes before that point are complete. The last byte the writer emits must
+        // therefore be b'\n', independent of what precedes it.
+        let liberty = liberty_parser::parse_lib(ROUND_TRIP_LIB).expect("parse fixture");
+        let mut buf: Vec<u8> = Vec::new();
+
+        write_liberty(&mut buf, &liberty.to_ast()).expect("write to buffer");
+
+        assert_eq!(
+            buf.last().copied(),
+            Some(b'\n'),
+            "emitted library must end with a trailing newline"
         );
     }
 }

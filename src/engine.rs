@@ -3,7 +3,7 @@
 
 use crate::arcs::{
     extract_timing_tables_from_arc, mean_reference_arc, select_reference_arc, ArcAccumulator,
-    RefArc, WhenMerge,
+    RefArc, ReferenceMode, References, WhenMerge,
 };
 use crate::emit::{
     convert_latch_to_flipflop, create_hold_timing_group, create_pseudo_output_timing_arc,
@@ -21,60 +21,6 @@ use liberty_parser::{
 use ndarray::prelude::*;
 use regex::Regex;
 use std::collections::{BTreeMap, HashSet};
-
-/// How the clock-to-output reference delay is chosen when a cell drives several
-/// outputs.
-///
-/// The pseudo-flop model splits each original input-to-output arc into a setup
-/// constraint plus a clock-to-output delay, so the same reference must be used on
-/// both sides for `setup(D) + clk→Q` to reconstruct `delay(D→Q)`. The two modes
-/// differ in how wide that reference is drawn, which matters for cells whose
-/// outputs are independent rails rather than views of one node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReferenceMode {
-    /// One reference shared by the whole cell: the mean across every output.
-    /// Both the emitted delays and the constraints use it, so every output is
-    /// given the same clock-to-output delay. This was the original behaviour.
-    Pooled,
-    /// The default. Each output keeps its own reference for its emitted delay, and each input
-    /// is constrained against the mean reference of only the outputs it actually
-    /// drives. For a dual-rail bundle this reduces to running the algorithm
-    /// independently per rail, while a control input shared by both rails is
-    /// still referenced against both.
-    PerOutput,
-}
-
-impl std::str::FromStr for ReferenceMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "pooled" => Ok(ReferenceMode::Pooled),
-            "per-output" => Ok(ReferenceMode::PerOutput),
-            other => Err(format!(
-                "unknown reference mode {:?}, expected \"pooled\" or \"per-output\"",
-                other
-            )),
-        }
-    }
-}
-
-/// The references a cell's constraints and delays were drawn against.
-pub(crate) struct References<'a> {
-    per_output: &'a BTreeMap<String, RefArc>,
-    mean: &'a RefArc,
-    mode: ReferenceMode,
-}
-
-impl References<'_> {
-    /// The clock-to-output delay this mode actually emits for `output`.
-    pub(crate) fn delay_for(&self, output: &str) -> Option<&RefArc> {
-        match self.mode {
-            ReferenceMode::Pooled => Some(self.mean),
-            ReferenceMode::PerOutput => self.per_output.get(output),
-        }
-    }
-}
 
 /// Reduce the input-to-output arcs of one source pin to a single constraint.
 ///
@@ -235,13 +181,17 @@ struct CellOptions<'a> {
     when_merge: WhenMerge,
 }
 
-/// Process a single cell to add pseudo-synchronous timing
+/// Process a single cell to add pseudo-synchronous timing.
+///
+/// On success the `lut_template` name the cell's pseudo delays were built on, so
+/// the library can generate the template. On failure the reason the cell could
+/// not be converted, for the caller to report against the cell it belongs to.
 fn process_cell(
     cell: &mut Group,
     opts: &CellOptions,
     lib_name: &str,
     reports: &mut Vec<CellReport>,
-) -> Option<String> {
+) -> Result<String, String> {
     let CellOptions {
         clock_name,
         reset_name,
@@ -342,7 +292,43 @@ fn process_cell(
     }
 
     // Phase 2: Calculate mean reference arc for delays and constraints
-    let mean_ref_arc = mean_reference_arc(ref_arcs.values().cloned())?;
+    let mean_ref_arc = mean_reference_arc(ref_arcs.values().cloned())
+        .ok_or_else(|| "no reference arc found".to_owned())?;
+
+    // Every output the library characterised must yield a reference arc, or the
+    // cell is left exactly as the library wrote it.
+    //
+    // `ff` is a cell-wide declaration and so is the promise that every output is
+    // driven by it: the outputs share one state element, so there is no
+    // converting one and leaving another in its combinational form. An output
+    // that was characterised but yields no reference would be given no
+    // clock-to-output delay, keep the combinational arc a converted cell no
+    // longer declares, and -- because [`constraints_from_arcs`] falls back to the
+    // cell-wide mean for an output with no reference of its own -- have every
+    // input driving it constrained against a delay drawn from a different
+    // output. Emitting that is worse than emitting nothing, so this takes the
+    // same branch as a cell no output of which yields a reference.
+    //
+    // The requirement is on the outputs phase 1 admitted into the model, which is
+    // exactly what `source_order` holds: those with at least one non-reset arc
+    // carrying at least one characterisation table. An output with none -- a
+    // tie-off, or one only the reset drives -- states no delay for the conversion
+    // to re-describe, so it is not uncharacterisable, it is simply not what this
+    // conversion is about, and leaving it without a clock arc loses nothing.
+    //
+    // This is the last read-only step: phase 3 onwards mutates the cell, so a
+    // cell that will not be converted is never touched.
+    let uncharacterisable: Vec<&str> = source_order
+        .keys()
+        .filter(|outpin_name| !ref_arcs.contains_key(*outpin_name))
+        .map(String::as_str)
+        .collect();
+    if !uncharacterisable.is_empty() {
+        return Err(format!(
+            "characterised outputs with no usable reference arc: {}",
+            uncharacterisable.join(", ")
+        ));
+    }
 
     // Phase 3: Add pseudo timing to each output pin
     for outpin in timing_leaves_mut(cell, is_output_pin) {
@@ -365,8 +351,10 @@ fn process_cell(
                 latch,
             );
         } else {
+            // The bail above leaves only the outputs the library characterised
+            // with nothing at all, which have no delay to re-describe.
             eprintln!(
-                "Failed to process outpin {} in cell {} of library {}: no usable reference arc could be found",
+                "Output {} of cell {} in library {} has no characterised arc, so it takes no clock-to-output delay",
                 outpin_name, cell_name, lib_name
             );
         }
@@ -422,10 +410,15 @@ fn process_cell(
     // delegates to its members when the arcs name the members.
     // The clock is never constrained against itself, and a pin the library never
     // characterised against an output has nothing to be constrained by.
+    //
+    // Reset pins need no test of their own: phase 1 skips every arc whose
+    // `related_pin` matches `reset_name`, so a reset name never becomes a key of
+    // `accumulated`, hence never of `cell_{rise,fall}_arcs`, hence never of the
+    // setup maps those are grouped into. Membership below therefore already
+    // implies the name is not a reset. The clock has no such skip -- a latch
+    // characterises its output against the enable -- so that test is live.
     let has_constraints = |name: &str| {
-        name != clock_name
-            && !reset_name.is_match(name)
-            && (setup_rise.contains_key(name) || setup_fall.contains_key(name))
+        name != clock_name && (setup_rise.contains_key(name) || setup_fall.contains_key(name))
     };
 
     for inpin in constraint_targets_mut(cell, &has_constraints) {
@@ -446,7 +439,7 @@ fn process_cell(
     }
 
     // Return the lut_template name for library-level template generation
-    Some(ref_arc.lut_template)
+    Ok(ref_arc.lut_template)
 }
 
 /// Process a library to convert latches to flip-flops or add pseudo-synchronous
@@ -482,13 +475,16 @@ pub(crate) fn process_library(
         .iter_cells_mut()
         .filter(|x| cell_qualifies(x, clock_name))
     {
-        if let Some(template_name) = process_cell(cell, &opts, &lib_name, &mut reports) {
-            lut_templates.insert(template_name);
-        } else {
-            eprintln!(
-                "Failed to process cell {} of library {}: no reference arc found",
-                cell.name, lib_name
-            );
+        match process_cell(cell, &opts, &lib_name, &mut reports) {
+            Ok(template_name) => {
+                lut_templates.insert(template_name);
+            }
+            // A cell that could not be converted is left verbatim, so the reason
+            // it names is the only trace of it in the emitted library.
+            Err(reason) => eprintln!(
+                "Failed to process cell {} of library {}: {}",
+                cell.name, lib_name, reason
+            ),
         }
     }
 
@@ -505,7 +501,7 @@ mod tests {
     //! Behaviour of the `engine` module: constraint calculation and bundle traversal.
 
     use super::*;
-    use crate::arcs::{mean_reference_arc, RefArc, WhenMerge};
+    use crate::arcs::{mean_reference_arc, RefArc, ReferenceMode, WhenMerge};
     use crate::liberty_io::parse_liberty_file;
     use crate::pins::{cell_qualifies, is_output_pin};
     use liberty_parser::{
@@ -514,28 +510,11 @@ mod tests {
     };
     use regex::Regex;
     use std::collections::BTreeMap;
-    use std::path::Path;
-
-    // --- ReferenceMode::from_str --------------------------------------------
-
-    #[test]
-    fn reference_mode_from_str_maps_each_spelling() {
-        assert_eq!("pooled".parse::<ReferenceMode>(), Ok(ReferenceMode::Pooled));
-        assert_eq!(
-            "per-output".parse::<ReferenceMode>(),
-            Ok(ReferenceMode::PerOutput)
-        );
-
-        let err = "bogus".parse::<ReferenceMode>().unwrap_err();
-        assert!(
-            err.contains("unknown reference mode"),
-            "error message was {:?}",
-            err
-        );
-    }
+    use std::path::{Path, PathBuf};
 
     // --- calculate_setup / hold constraints --------------------------------
 
+    /// Killed by: `constraints_from_arcs` added the reference delay to the sampled column instead of subtracting it.
     #[test]
     fn setup_constraint_is_input_arc_minus_reference_delay() {
         // One input->output rise arc for source pin "D"; column `col` is what
@@ -596,6 +575,8 @@ mod tests {
 
     /// A source driving one rail of a dual-rail cell must be referenced against
     /// that rail alone under `PerOutput`, and against both rails under `Pooled`.
+    ///
+    /// Killed by: `constraints_from_arcs` gave `PerOutput` the pooled `select(mean_ref)[col]` instead of `ref_sum / n`.
     #[test]
     fn per_output_references_a_source_against_only_the_outputs_it_drives() {
         let col = 0usize;
@@ -766,6 +747,29 @@ library(bundle_test) {{
             .collect()
     }
 
+    /// What flip-flop mode must leave on an output pin, as a function of what that
+    /// pin started with.
+    ///
+    /// Both halves follow from the model rather than from any run.
+    /// [`add_pseudo_timing_to_output_pin`] retains a `timing` group if and only if
+    /// its `related_pin` matches the reset pattern, so every reset arc survives
+    /// with exactly the count the library declared -- that count is a property of
+    /// the FIXTURE, not of the tool -- and every other arc goes. In their place a
+    /// pseudo-flop declares one `rising_edge` arc against the clock per output it
+    /// could characterise. So the expected census is the original one filtered to
+    /// the reset, plus that single arc.
+    fn ff_census(original: &ArcCensus, clock: &str, reset_name: &Regex) -> ArcCensus {
+        let mut expected: ArcCensus = original
+            .iter()
+            .filter(|((related, _), _)| reset_name.is_match(related))
+            .map(|(key, n)| (key.clone(), *n))
+            .collect();
+        *expected
+            .entry((clock.to_owned(), "rising_edge".to_owned()))
+            .or_default() += 1;
+        expected
+    }
+
     /// The one pseudo-synchronous arc an output pin carries against the clock.
     fn pseudo_output_arc<'a>(pin: &'a Group, clock: &str) -> &'a Group {
         let arcs: Vec<&Group> = arcs_of_type(pin, "rising_edge")
@@ -821,6 +825,8 @@ library(bundle_test) {{
     /// A bundle that only contains member pins delegates to them: the arcs live
     /// in the members, name the members as `related_pin`, and each member is
     /// processed as its own output.
+    ///
+    /// Killed by: `constraint_targets_mut`'s `else if has_constraints(&g.name)` widened to `else if !has_constraints(&g.name) || true`, so the bundle container took constraints too.
     #[test]
     fn bundle_members_take_their_own_constraints() {
         let body = format!(
@@ -904,6 +910,8 @@ library(bundle_test) {{
     /// reference from, so it must come through with nothing at all. An empty setup
     /// pair on it would be timing no tool can use, and the marker alone would claim
     /// a data input the library never characterised.
+    ///
+    /// Killed by: `constraint_targets_mut` dropped `&& has_constraints(&s.name)` from its member filter.
     #[test]
     fn only_characterised_members_of_a_delegating_bundle_take_constraints() {
         let body = format!(
@@ -974,6 +982,8 @@ library(bundle_test) {{
     /// A bundle that owns its timing arcs is the leaf itself, and the arcs name
     /// the bundle rather than its members. This is the form the ASCEND libraries
     /// use, and it must keep being handled at bundle level.
+    ///
+    /// Killed by: `timing_leaves_mut` dropped `&& !owns_timing_arcs(g)`, so a bundle owning its arcs delegated to its members anyway.
     #[test]
     fn bundle_owning_its_arcs_is_processed_as_a_single_pin() {
         let body = format!(
@@ -1066,6 +1076,38 @@ library(test) {
         .expect("parse sample lib")
     }
 
+    /// Moves the process into a fresh temporary directory and puts it back when
+    /// dropped, taking the directory with it.
+    ///
+    /// The working directory is process-global while the test binary runs its
+    /// tests on parallel threads, so restoring it on the happy path only is not
+    /// enough: a panic in the code under test would unwind past the restore and
+    /// strand every other thread in a directory that has been removed. `Drop`
+    /// runs on the unwind too, so the window is closed.
+    struct CwdGuard {
+        prev: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn enter(dir: PathBuf) -> Self {
+            std::fs::create_dir_all(&dir).expect("create temporary working directory");
+            let prev = std::env::current_dir().expect("read working directory");
+            std::env::set_current_dir(&dir).expect("enter temporary working directory");
+            Self { prev, dir }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            // Leave before removing, and swallow both failures: panicking while
+            // already unwinding aborts the process, which would replace the real
+            // failure with a less informative one.
+            let _ = std::env::set_current_dir(&self.prev);
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     /// The engine performs no I/O of its own: the reconstruction report is
     /// returned as data and written by the caller to a path it chooses.
     ///
@@ -1074,12 +1116,13 @@ library(test) {
     /// in a refactor. The assertion is kept because writing to the process CWD
     /// from library code is the behaviour that made that loss invisible, but it
     /// now guards a deliberate design rather than ratifying an accident.
+    ///
+    /// Killed by: `process_library` wrote a `pseudosync.txt` into the process working directory.
     #[test]
     fn engine_does_not_leak_pseudosync_txt_in_cwd() {
-        let tmp = std::env::temp_dir().join(format!("pseudosync_leak_{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&tmp).unwrap();
+        let guard = CwdGuard::enter(
+            std::env::temp_dir().join(format!("pseudosync_leak_{}", std::process::id())),
+        );
 
         let mut lib = sample_lib();
         process_library(
@@ -1091,10 +1134,10 @@ library(test) {
             WhenMerge::Mean,
         );
 
-        let leaked = tmp.join("pseudosync.txt").exists();
-        std::env::set_current_dir(&prev).unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
-        assert!(!leaked, "pseudosync.txt should not be created in CWD");
+        assert!(
+            !guard.dir.join("pseudosync.txt").exists(),
+            "pseudosync.txt should not be created in CWD"
+        );
     }
 
     // --- whole-cell conversion, on a synthetic latch ------------------------
@@ -1178,12 +1221,17 @@ library(latch_cell_test) {{
 
     /// Latch mode is additive: every characterised arc survives and the pseudo
     /// clock-to-output arc is appended alongside them.
+    ///
+    /// Killed by: `add_pseudo_timing_to_output_pin` guarded its retain with `if latch` instead of `if !latch`, stripping the original arcs in latch mode.
     #[test]
     fn latch_mode_appends_the_pseudo_arc_to_the_original_ones() {
         let lib = converted_latch_cell(true);
         let cell = lib[0].get_cell("LATCH_CELL").expect("LATCH_CELL");
         let q = cell.get_pin("Q").expect("Q");
 
+        // [`latch_cell_lib`] writes Q exactly two arcs -- A/combinational and
+        // RN/clear -- and latch mode retains every one of them, so the census is
+        // those two plus the single clock arc a pseudo-flop declares per output.
         assert_eq!(
             arc_census(q),
             census(&[
@@ -1203,14 +1251,18 @@ library(latch_cell_test) {{
 
     /// Flip-flop mode replaces the combinational model rather than extending it:
     /// every arc the reset does not own is stripped off the output.
+    ///
+    /// Killed by: `add_pseudo_timing_to_output_pin`'s retain negated its reset test -- `|| !reset_name.is_match(..)` -- keeping exactly the arcs it should drop.
     #[test]
     fn ff_mode_strips_every_output_arc_the_reset_does_not_own() {
         let lib = converted_latch_cell(false);
         let cell = lib[0].get_cell("LATCH_CELL").expect("LATCH_CELL");
         let q = cell.get_pin("Q").expect("Q");
 
-        // The data arc A -> Q is gone; the reset arc stays, because a flip-flop
-        // still needs its asynchronous clear characterised.
+        // Of the two arcs [`latch_cell_lib`] writes Q, only RN's `related_pin`
+        // matches the reset pattern, so the retain step keeps that one and drops
+        // A -> Q -- a flip-flop still needs its asynchronous clear characterised.
+        // One clock arc replaces what was dropped.
         assert_eq!(
             arc_census(q),
             census(&[("RN", "clear", 1), ("G", "rising_edge", 1)])
@@ -1219,6 +1271,8 @@ library(latch_cell_test) {{
 
     /// Flip-flop mode renames the latch's control attributes to their flip-flop
     /// spellings, keeping the expressions themselves.
+    ///
+    /// Killed by: `convert_latch_to_flipflop` removed the key `"enable_not_a_key"`, leaving `enable` unrenamed.
     #[test]
     fn ff_mode_renames_the_latch_control_attributes() {
         let lib = converted_latch_cell(false);
@@ -1236,6 +1290,8 @@ library(latch_cell_test) {{
     }
 
     /// Latch mode leaves the state element exactly as the library declared it.
+    ///
+    /// Killed by: `process_cell`'s phase 6 guarded `convert_latch_to_flipflop` with `if latch` instead of `if !latch`.
     #[test]
     fn latch_mode_leaves_the_latch_group_intact() {
         let lib = converted_latch_cell(true);
@@ -1266,6 +1322,8 @@ library(latch_cell_test) {{
     /// An empty `setup_rising` group -- one with no rise/fall constraint table in
     /// it -- is not usable timing, so a pin with nothing to be constrained by must
     /// be left alone rather than given one.
+    ///
+    /// Killed by: `constraint_targets_mut`'s `else if has_constraints(&g.name)` widened to `else if !has_constraints(&g.name) || true`, so an uncharacterised input took an empty pair.
     #[test]
     fn constraints_reach_characterised_data_inputs_only() {
         let lib = converted_latch_cell(false);
@@ -1318,6 +1376,8 @@ library(latch_cell_test) {{
     /// cell whose output arcs are all related to the clock to observe that: in a
     /// cell characterised data-to-output the clock is never a source in the first
     /// place, and the exclusion is unobservable.
+    ///
+    /// Killed by: `process_cell`'s `has_constraints` tested `name != ""` instead of `name != clock_name`.
     #[test]
     fn the_clock_is_never_constrained_against_itself() {
         let mut lib = liberty_parser::parse_lib(&format!(
@@ -1375,11 +1435,147 @@ library(clock_sourced_test) {{
         }
     }
 
+    // --- a cell only half of whose outputs can be characterised --------------
+
+    /// A two-output latch the library only half characterised.
+    ///
+    /// `Q` carries all four tables, so `select_reference_arc` yields a reference
+    /// for it. `QN`'s arc is missing `fall_transition`, one of the four that
+    /// function requires, so it yields none for `QN` -- while the arc still holds
+    /// enough tables for `extract_timing_tables_from_arc` to accept it, which
+    /// puts `QN` among the outputs the conversion undertakes to re-describe. A
+    /// characterised output with no reference is precisely the case the cell is
+    /// skipped for.
+    fn half_characterised_lib() -> Liberty {
+        liberty_parser::parse_lib(&format!(
+            r#"
+library(half_characterised_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }}
+  cell(HALF) {{
+    latch(IQ, IQN) {{ enable: "G"; data_in: "A"; }}
+    pin(G) {{ direction: input; clock: true; }}
+    pin(A) {{ direction: input; }}
+    pin(Q) {{
+      direction: output;
+      function: "IQ";
+      {}
+    }}
+    pin(QN) {{
+      direction: output;
+      function: "IQN";
+      timing() {{
+        related_pin: "A";
+        timing_type: combinational;
+        cell_rise(T) {{ values("2.0, 3.0", "4.0, 5.0"); }}
+        cell_fall(T) {{ values("2.5, 3.5", "4.5, 5.5"); }}
+        rise_transition(T) {{ values("0.1, 0.2", "0.3, 0.4"); }}
+      }}
+    }}
+  }}
+}}"#,
+            arc("A", "combinational", 1.0)
+        ))
+        .expect("parse half-characterised fixture")
+    }
+
+    /// A cell one of whose characterised outputs yields no reference arc is left
+    /// exactly as the library wrote it.
+    ///
+    /// What a Liberty consumer must be given here follows from the model, not
+    /// from what the tool emits. `ff` versus `latch` is a cell-wide declaration,
+    /// and so is the promise that every output of the cell is driven by it --
+    /// there is no converting one output and leaving another in its original
+    /// form, because the two share one state element. Converting `HALF` half way
+    /// would not produce a partially useful model but an inconsistent one:
+    ///
+    /// * `QN` would carry no `rising_edge` arc, so timing analysis would have no
+    ///   clock-to-output delay for it and every path it feeds would be left
+    ///   unconstrained rather than pessimistic;
+    /// * in flip-flop mode the arc stripping runs on the branch that emits a
+    ///   clock arc, so `QN` would keep the latch's combinational arc from a pin
+    ///   the same cell declares `next_state` and constrains with setup/hold --
+    ///   one pin declared both a synchronous data input and a combinational
+    ///   driver of the same cell's output;
+    /// * and the damage would not be confined to `QN`. [`constraints_from_arcs`]
+    ///   falls back to the cell-wide mean for an output with no reference of its
+    ///   own, so `A`'s emitted constraint -- averaged over `A -> Q` and
+    ///   `A -> QN` -- would charge the `QN` path a delay measured on `Q`. The
+    ///   constraints would be wrong, not merely incomplete.
+    ///
+    /// None of those is better than emitting nothing, which is what the cell
+    /// already gets when *no* output yields a reference: `mean_reference_arc`
+    /// returns `None` and `process_cell` bails before it has mutated anything.
+    /// So the assertions are those of an untouched cell. Whole-cell equality
+    /// carries the claim, because the claim is about everything the engine did
+    /// not do -- including that it did not mutate the cell before abandoning it.
+    ///
+    /// Killed by: `process_cell`'s required-output bail moved below phase 3, so `Q` was converted before the cell was abandoned.
+    #[test]
+    fn a_cell_with_an_uncharacterisable_output_is_left_verbatim() {
+        let original = half_characterised_lib();
+        let mut lib = half_characterised_lib();
+        process_library(
+            &mut lib[0],
+            "G",
+            &Regex::new("(R|S)N?").unwrap(),
+            false,
+            ReferenceMode::PerOutput,
+            WhenMerge::Mean,
+        );
+        let cell = lib[0].get_cell("HALF").expect("HALF");
+
+        assert_eq!(
+            format!("{:?}", original[0].get_cell("HALF").expect("HALF")),
+            format!("{:?}", cell),
+            "a cell that cannot be converted comes through verbatim"
+        );
+
+        // What that means where a consumer would read it. The state element is
+        // still the latch the library declared, ...
+        assert_eq!(cell.iter_subgroups_of_type("ff").count(), 0);
+        let latches: Vec<&Group> = cell.iter_subgroups_of_type("latch").collect();
+        assert_eq!(latches.len(), 1, "the latch group survives");
+        assert_eq!(latches[0].simple_attribute("enable").unwrap().string(), "G");
+
+        // ... each output carries the one arc [`half_characterised_lib`] writes it
+        // and nothing else, so neither gained a clock-to-output delay, ...
+        for outpin in ["Q", "QN"] {
+            let pin = cell.get_pin(outpin).expect(outpin);
+            assert_eq!(
+                arc_census(pin),
+                census(&[("A", "combinational", 1)]),
+                "{} keeps the arc the library wrote it and gains no clock arc",
+                outpin
+            );
+        }
+
+        // ... and `A` is not constrained against a clock this cell does not have.
+        let a = cell.get_pin("A").expect("A");
+        assert!(
+            a.simple_attribute("nextstate_type").is_none(),
+            "A must not be declared a synchronous data input"
+        );
+        for timing_type in ["setup_rising", "hold_rising"] {
+            assert!(
+                arcs_of_type(a, timing_type).is_empty(),
+                "A must not be given a {}",
+                timing_type
+            );
+        }
+    }
+
     // --- constraint arithmetic at full characterisation size ----------------
 
     /// The emitted setup constraint on a full-size 10x10 characterisation is the
     /// arc sampled at the reference column, minus the clock-to-output delay the
     /// pseudo-flop model charges for that path; hold is its negation.
+    ///
+    /// Killed by: `constraints_from_arcs` added the reference delay to the sampled column instead of subtracting it.
     #[test]
     fn setup_constraints_are_the_arc_minus_the_reference_at_10x10() {
         // Deliberately NOT separable in (slew, load): for a table of the form
@@ -1479,6 +1675,8 @@ library(large_table_test) {{
 
     /// Every input the library characterised against the output is given one setup
     /// and one hold group, whatever shape the latch's data expression takes.
+    ///
+    /// Killed by: `create_setup_timing_group` declared `timing_type: setup_falling`.
     #[test]
     fn every_characterised_input_is_constrained_across_data_in_shapes() {
         let reset_name = Regex::new("(R|S)N?").unwrap();
@@ -1608,6 +1806,11 @@ library({}_test) {{
     /// Pin Q of RACELEM21X1 as the ASCEND libraries characterise it: 28 arcs from
     /// the five data inputs and 34 owned by the reset. Identical in the nom and ff
     /// corners.
+    ///
+    /// This and [`lbtiex1_original_q`] describe the INPUT libraries, not the tool.
+    /// Each entry is a `timing` group written out in the `.lib` text, so the census
+    /// is read off the fixture and is a claim about it -- asserted before the run
+    /// so a failure there is a changed fixture rather than a changed conversion.
     fn racelem21x1_original_q() -> ArcCensus {
         census(&[
             ("A", "combinational", 2),
@@ -1664,6 +1867,8 @@ library({}_test) {{
     /// where both halves of the reset treatment are observable: `process_cell`
     /// keeps reset arcs out of the model it builds, and
     /// `add_pseudo_timing_to_output_pin` keeps them in the library it emits.
+    ///
+    /// Killed by: `process_cell`'s phase 1 reset skip disabled -- `if reset_name.is_match(&related_pin) && false`.
     #[test]
     fn racelem21x1_excludes_reset_arcs_from_the_model_and_keeps_them_in_the_library() {
         let mut liberty =
@@ -1681,9 +1886,16 @@ library({}_test) {{
         assert_eq!(data_in, "A*IQ+A*P1*P2+IQ*M1+IQ*M2");
         assert_eq!(latch.simple_attribute("enable").unwrap().string(), "G");
         assert_eq!(latch.simple_attribute("clear").unwrap().string(), "!RN");
-        assert_eq!(
-            arc_census(cell.get_pin("Q").expect("Q")),
-            racelem21x1_original_q()
+        let original_q = arc_census(cell.get_pin("Q").expect("Q"));
+        assert_eq!(original_q, racelem21x1_original_q());
+
+        // The reset pin's own arcs, captured rather than written out: the claim
+        // below is that they are unchanged, and a recorded number would state it as
+        // a coincidence instead. It only bites because this reset owns arcs at all.
+        let original_rn = arc_census(cell.get_pin("RN").expect("RN"));
+        assert!(
+            !original_rn.is_empty(),
+            "RACELEM21X1's reset pin owns the arcs this test checks are left alone"
         );
 
         let reports = process_library(
@@ -1727,15 +1939,12 @@ library({}_test) {{
         );
 
         // The emitted library keeps every reset arc, and gains exactly one pseudo
-        // arc in place of the 28 data arcs it dropped.
+        // arc in place of the 28 data arcs it dropped -- see [`ff_census`], which
+        // derives that from the arcs the pin started with.
         let cell = liberty[0].get_cell("RACELEM21X1").expect("RACELEM21X1");
         assert_eq!(
             arc_census(cell.get_pin("Q").expect("Q")),
-            census(&[
-                ("G", "rising_edge", 1),
-                ("RN", "clear", 29),
-                ("RN", "preset", 5),
-            ])
+            ff_census(&original_q, ASCEND_CLOCK, &reset_name)
         );
 
         // The latch became a flip-flop carrying the same control expressions.
@@ -1777,9 +1986,12 @@ library({}_test) {{
             rn.simple_attribute("nextstate_type").is_none(),
             "the reset pin must not be marked as data"
         );
+        // The reset is excluded from the constraint targets and no phase writes to
+        // an input the conversion did not select, so its own arcs come through as
+        // the fixture declared them, whatever that was.
         assert_eq!(
             arc_census(rn),
-            census(&[("RN", "min_pulse_width", 24)]),
+            original_rn,
             "the reset pin's own arcs must be left alone"
         );
     }
@@ -1787,9 +1999,11 @@ library({}_test) {{
     /// The whole pseudo-flop conversion of the real ASCEND library.
     ///
     /// Replaces `test_ascend_freepdk45_comprehensive_comparison`, which diffed the
-    /// output against a committed 121k-line golden file. The counts below were
-    /// derived from the fixture itself (see the census helpers above) and pin the
-    /// present behaviour.
+    /// output against a committed 121k-line golden file. Nothing below is a
+    /// recorded output: the arcs the fixture declares are asserted before the run
+    /// and the arcs expected after it are derived from those by [`ff_census`].
+    ///
+    /// Killed by: `add_pseudo_timing_to_output_pin`'s retain negated its reset test -- `|| !reset_name.is_match(..)`.
     #[test]
     fn ascend_ff_mode_emits_the_pseudo_flop_model_for_every_qualifying_cell() {
         let mut liberty =
@@ -1797,6 +2011,11 @@ library({}_test) {{
         assert_eq!(liberty.len(), 1, "the fixture holds one library");
         let reset_name = Regex::new(ASCEND_RESET).unwrap();
 
+        // A property of the library text: of the 73 cells the fixture declares, 26
+        // carry a `latch`-prefixed group, and every one of those also declares a pin
+        // named `G`. `cell_qualifies` asks for exactly those two things, so 26 is
+        // what the fixture offers the conversion -- and the loops below iterate it,
+        // so a wrong number here would leave them silently covering less.
         let qualifying = qualifying_cells(&liberty[0]);
         assert_eq!(
             qualifying.len(),
@@ -1807,14 +2026,30 @@ library({}_test) {{
 
         // Q's arc population before the run, so what is retained afterwards can be
         // counted against what there was to keep.
-        assert_eq!(
-            arc_census(output_pin(&liberty[0], "RACELEM21X1", "Q")),
-            racelem21x1_original_q()
-        );
-        assert_eq!(
-            arc_census(output_pin(&liberty[0], "LBTIEX1", "Q")),
-            lbtiex1_original_q()
-        );
+        let originals: Vec<(&str, ArcCensus)> = ["RACELEM21X1", "LBTIEX1"]
+            .iter()
+            .map(|name| (*name, arc_census(output_pin(&liberty[0], name, "Q"))))
+            .collect();
+        assert_eq!(originals[0].1, racelem21x1_original_q());
+        assert_eq!(originals[1].1, lbtiex1_original_q());
+
+        // The reset pins' own arcs, likewise captured rather than written out: the
+        // claim afterwards is that the conversion left them alone.
+        let reset_pins_before: Vec<(&str, usize)> = ["RACELEM21X1", "LBTIEX1"]
+            .iter()
+            .map(|name| {
+                (
+                    *name,
+                    liberty[0]
+                        .get_cell(name)
+                        .expect("cell")
+                        .get_pin("RN")
+                        .expect("RN")
+                        .iter_subgroups_of_type("timing")
+                        .count(),
+                )
+            })
+            .collect();
 
         process_library(
             &mut liberty[0],
@@ -1853,22 +2088,14 @@ library({}_test) {{
 
         // (ii) and (iii): one pseudo arc against the clock, and every other arc
         // left on the output belongs to the reset -- with its original count.
-        assert_eq!(
-            arc_census(output_pin(lib, "RACELEM21X1", "Q")),
-            census(&[
-                ("G", "rising_edge", 1),
-                ("RN", "clear", 29),
-                ("RN", "preset", 5),
-            ])
-        );
-        assert_eq!(
-            arc_census(output_pin(lib, "LBTIEX1", "Q")),
-            census(&[
-                ("G", "rising_edge", 1),
-                ("RN", "clear", 1),
-                ("RN", "preset", 1)
-            ])
-        );
+        for (cell_name, original) in &originals {
+            assert_eq!(
+                arc_census(output_pin(lib, cell_name, "Q")),
+                ff_census(original, ASCEND_CLOCK, &reset_name),
+                "{}.Q",
+                cell_name
+            );
+        }
 
         for cell_name in ["RACELEM21X1", "LBTIEX1"] {
             let pin = output_pin(lib, cell_name, "Q");
@@ -1958,8 +2185,10 @@ library({}_test) {{
         }
 
         // (v) The clock is never constrained against itself and the reset gains
-        // nothing; the reset keeps only the arcs it already had.
-        for (cell_name, reset_pin_arcs) in [("RACELEM21X1", 24usize), ("LBTIEX1", 0usize)] {
+        // nothing; the reset keeps only the arcs it already had, whatever the
+        // fixture gave it -- neither pin is a constraint target, so the conversion
+        // has no phase that writes to either.
+        for &(cell_name, reset_pin_arcs) in &reset_pins_before {
             let cell = lib.get_cell(cell_name).expect(cell_name);
             for name in [ASCEND_CLOCK, "RN"] {
                 let pin = cell
@@ -2007,6 +2236,8 @@ library({}_test) {{
     /// Replaces `test_ascend_freepdk45_pseudolatch_comparison`. Latch mode is
     /// purely additive, so the assertion is stated as the original arc census plus
     /// the one pseudo arc rather than as a fresh set of numbers.
+    ///
+    /// Killed by: `add_pseudo_timing_to_output_pin` guarded its retain with `if latch` instead of `if !latch`, stripping the original arcs in latch mode.
     #[test]
     fn ascend_latch_mode_keeps_every_original_arc_and_appends_the_pseudo_arc() {
         let mut liberty =
@@ -2066,8 +2297,9 @@ library({}_test) {{
             assert_pseudo_delay_tables(pseudo_output_arc(pin, ASCEND_CLOCK));
         }
 
-        // The same totals, spelled out: 62 characterised arcs plus one, and 3 plus
-        // one.
+        // The same totals, spelled out: the census above sums to
+        // 2+3+3+5+5+5+5+29+5 = 62 characterised arcs, plus the one appended; and
+        // 1+1+1 = 3, plus one.
         assert_eq!(
             output_pin(lib, "RACELEM21X1", "Q")
                 .iter_subgroups_of_type("timing")

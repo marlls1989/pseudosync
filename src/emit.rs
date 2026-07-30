@@ -249,8 +249,8 @@ mod tests {
 
     use super::*;
     use crate::arcs::RefArc;
-    use crate::arcs::WhenMerge;
-    use crate::engine::{process_library, ReferenceMode};
+    use crate::arcs::{ReferenceMode, WhenMerge};
+    use crate::engine::process_library; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use indexmap::IndexMap;
     use liberty_parser::{
         ast::Value,
@@ -288,6 +288,7 @@ mod tests {
 
     // --- generate_pseudo_lut_templates ------------------------------------
 
+    /// Killed by: `generate_pseudo_lut_templates` indexed the derived delay template from `index_1` instead of `index_2`.
     #[test]
     fn generate_pseudo_lut_templates_emits_constraint_and_delay_pair() {
         let lib = Group {
@@ -380,6 +381,7 @@ library(test) {
         .expect("parse sample lib")
     }
 
+    /// Killed by: `convert_latch_to_flipflop` removed the key `"enable_not_a_key"`, leaving `enable` unrenamed.
     #[test]
     fn convert_latch_to_flipflop_renames_group_and_attributes() {
         let mut lib = sample_lib();
@@ -442,6 +444,8 @@ library(test) {
     /// the delays for a cell-wide pooled mean under a commit titled "Refactor" and
     /// no test noticed, hence the deliberately disjoint value ranges here -- 1.x
     /// against 9.x -- which no swap of the two sources can survive.
+    ///
+    /// Killed by: `create_pseudo_output_timing_arc` emitted `mean_delays.rise_trans` as the rise_transition table instead of `output_transitions.rise_trans`.
     #[test]
     fn pseudo_output_arc_takes_transitions_from_the_output_and_delays_from_the_reference() {
         let transitions = ref_arc("tplA", [[1.1, 1.2], [1.3, 1.4], [1.5, 1.6], [1.7, 1.8]]);
@@ -540,6 +544,8 @@ library(pseudo_arc_test) {
     /// regression of c5d4559 is invisible to the constructor and visible here. The
     /// two outputs are characterised an order of magnitude apart, which no cell-wide
     /// mean can land on.
+    ///
+    /// Killed by: `process_cell`'s phase 3 handed `PerOutput` the cell-wide `&mean_ref_arc` as its delays -- the c5d4559 pooling regression itself.
     #[test]
     fn each_output_pin_gains_a_clock_arc_built_from_its_own_reference() {
         let mut lib = dual_output_latch_lib();
@@ -616,6 +622,7 @@ library(pseudo_arc_test) {
         }
     }
 
+    /// Killed by: `create_constraint_table_group` named the table `{}_pseudo_cnstrnt`.
     #[test]
     fn create_constraint_table_group_names_the_table_pseudo_constraint() {
         let values = Array1::from(vec![2.5, 3.5, 4.5]);
@@ -628,6 +635,7 @@ library(pseudo_arc_test) {
         assert!(group.subgroups.is_empty());
     }
 
+    /// Killed by: `create_timing_table_group` named the table `{}_pseudo_dly`.
     #[test]
     fn create_timing_table_group_names_the_table_pseudo_delay_and_keeps_value_order() {
         let values = Array1::from(vec![7.25, 8.5, 9.75]);
@@ -641,6 +649,7 @@ library(pseudo_arc_test) {
         assert!(group.subgroups.is_empty());
     }
 
+    /// Killed by: `create_setup_timing_group` declared `timing_type: setup_falling`.
     #[test]
     fn create_setup_timing_group_targets_the_clock_with_setup_rising() {
         let arc = ref_arc("tplE", [[0.0, 0.0]; 4]);
@@ -652,6 +661,7 @@ library(pseudo_arc_test) {
         assert_eq!(group.attributes["timing_type"], simple_expr("setup_rising"));
     }
 
+    /// Killed by: `create_setup_timing_group` emitted the rise setup as a `fall_constraint`.
     #[test]
     fn create_setup_timing_group_emits_a_constraint_table_only_for_each_side_given() {
         let arc = ref_arc("tplE", [[0.0, 0.0]; 4]);
@@ -678,6 +688,7 @@ library(pseudo_arc_test) {
         assert!(neither.subgroups.is_empty());
     }
 
+    /// Killed by: `create_hold_timing_group` declared `timing_type: hold_falling`.
     #[test]
     fn create_hold_timing_group_targets_the_clock_with_hold_rising() {
         let arc = ref_arc("tplE", [[0.0, 0.0]; 4]);
@@ -689,6 +700,7 @@ library(pseudo_arc_test) {
         assert_eq!(group.attributes["timing_type"], simple_expr("hold_rising"));
     }
 
+    /// Killed by: `create_hold_timing_group` emitted the rise hold as a `fall_constraint`.
     #[test]
     fn create_hold_timing_group_emits_a_constraint_table_only_for_each_side_given() {
         let arc = ref_arc("tplE", [[0.0, 0.0]; 4]);

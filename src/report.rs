@@ -1,8 +1,7 @@
 //! What the conversion cost: the arcs as characterised, the arcs rebuilt from
 //! the model, and the residual between them.
 
-use crate::arcs::{restore_arc, RefArc, WhenMerge};
-use crate::engine::References;
+use crate::arcs::{restore_arc, RefArc, References, WhenMerge};
 use ndarray::prelude::*;
 use std::collections::BTreeMap;
 
@@ -175,8 +174,8 @@ mod tests {
     //! Behaviour of the `report` module: reconstruction reports and residual measurement.
 
     use super::*;
-    use crate::arcs::{restore_arc, WhenMerge};
-    use crate::engine::{process_library, ReferenceMode};
+    use crate::arcs::{restore_arc, ReferenceMode, WhenMerge};
+    use crate::engine::process_library; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use liberty_parser::liberty::Liberty;
     use regex::Regex;
 
@@ -253,6 +252,33 @@ library(bundle_test) {{
         ))
     }
 
+    /// A dual-rail cell whose two outputs are characterised against deliberately
+    /// different arcs, both driven by the same source.
+    ///
+    /// This is the only cell topology in which the two reference modes can be
+    /// told apart: the pooled delay is the mean over the outputs' reference
+    /// arcs, so with one output -- or with several outputs whose references
+    /// coincide -- the mean IS each output's own arc and the modes are identical
+    /// by construction, whatever the code does.
+    fn dual_rail_lib() -> Liberty {
+        bundle_lib(format!(
+            r#"
+    pin(D) {{ direction: input; }}
+    pin(Q1) {{
+      direction: output;
+      function: "IQ";
+      {}
+    }}
+    pin(Q2) {{
+      direction: output;
+      function: "IQN";
+      {}
+    }}"#,
+            arc("D", 1.0),
+            arc("D", 21.0)
+        ))
+    }
+
     // --- ArcError statistics -------------------------------------------------
 
     fn arc_error(original: Array2<f64>, error: Array2<f64>) -> ArcError {
@@ -270,6 +296,7 @@ library(bundle_test) {{
         }
     }
 
+    /// Killed by: `ArcError::rms` dropped its `.sqrt()`.
     #[test]
     fn arc_error_statistics_are_the_hand_computed_values() {
         // original = [[1,2],[3,4]], error = [[2,2],[2,-2]].
@@ -297,6 +324,7 @@ library(bundle_test) {{
         assert_eq!(err.rms_percent(), 80.0);
     }
 
+    /// Killed by: `ArcError::rms_percent` divided by `scale` unconditionally, dropping the zero-scale guard.
     #[test]
     fn rms_percent_is_zero_when_the_arc_has_no_magnitude() {
         let original = Array2::from_shape_vec((2, 2), vec![0.0; 4]).unwrap();
@@ -305,6 +333,7 @@ library(bundle_test) {{
         assert_eq!(err.rms_percent(), 0.0);
     }
 
+    /// Killed by: `process_cell` pushed its `CellReport` with `arcs: Vec::new()`.
     #[test]
     fn every_processed_cell_yields_a_reconstruction_report() {
         let reset = Regex::new("(R|S)N?").unwrap();
@@ -333,8 +362,100 @@ library(bundle_test) {{
         }
     }
 
+    /// The residual is measured against the delay the chosen mode actually
+    /// emits, so pooling a cell's outputs shows up as the error it is.
+    ///
+    /// The mode only reaches the report through the clock-to-output delay, so a
+    /// cell whose rails disagree is what makes the two readings separable at
+    /// all -- see [`dual_rail_lib`].
+    ///
+    /// Killed by: `References::delay_for` returned `Some(self.mean)` for `PerOutput`, collapsing the two modes onto one delay.
+    #[test]
+    fn pooled_and_per_output_residuals_differ_on_a_dual_rail_cell() {
+        // Derivation, entirely from the model. The template is 2 slews x 2
+        // loads, and `arc(pin, base)` characterises cell_rise as
+        // [[base, base+1], [base+2, base+3]], so the fixture's rise arcs are
+        //
+        //     D->Q1 = [[ 1,  2], [ 3,  4]]      D->Q2 = [[21, 22], [23, 24]]
+        //
+        // A reference arc is the middle row and middle column of a table, which
+        // for a 2x2 is row 1 and column 1. So each output's own reference delay
+        // row is
+        //
+        //     ref(Q1) = [ 3,  4]                ref(Q2) = [23, 24]
+        //
+        // and the cell-wide mean, which is what `pooled` hands to both outputs,
+        // is their elementwise mean
+        //
+        //     mean = ([3,4] + [23,24]) / 2 = [13, 14]
+        //
+        // The setup constraint is the mean of the arcs the source drives,
+        // sampled at the reference column, minus the reference delay there. D
+        // drives both rails, so its driven mean is the cell-wide mean under
+        // either mode -- 14 -- and the constraint is the same in both:
+        //
+        //     mean arc = ([[1,2],[3,4]] + [[21,22],[23,24]]) / 2
+        //              = [[11,12],[13,14]]
+        //     column 1 = [12, 14]
+        //     setup(D) = [12, 14] - 14 = [-2, 0]
+        //
+        // Everything below therefore isolates the delay alone. The
+        // reconstruction is recon[r][c] = setup[r] + delay[c] and the residual
+        // is recon - original.
+        let rise_error = |mode: ReferenceMode, output: &str| {
+            let mut lib = dual_rail_lib();
+            let reports = process_library(
+                &mut lib[0],
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                mode,
+                WhenMerge::Mean,
+            );
+            let report = reports.iter().find(|r| r.cell == "DUT").unwrap();
+            report
+                .arcs
+                .iter()
+                .find(|a| a.edge == "rise" && a.source == "D" && a.output == output)
+                .unwrap_or_else(|| panic!("no rise arc D -> {} in {:?}", output, mode))
+                .error
+                .clone()
+        };
+
+        // Per-output gives each rail its own reference row. These arcs are
+        // separable by construction -- arc[r][c] = base + 2r + c -- so setup
+        // plus the rail's own delay reproduces it exactly:
+        //   Q1: [-2,0] + [3,4]   = [[ 1, 2], [ 3, 4]] - [[ 1, 2], [ 3, 4]] = 0
+        //   Q2: [-2,0] + [23,24] = [[21,22], [23,24]] - [[21,22], [23,24]] = 0
+        let zero = Array2::zeros((2, 2));
+        assert_eq!(
+            rise_error(ReferenceMode::PerOutput, "Q1"),
+            zero,
+            "an arc reconstructed against its own reference must close exactly"
+        );
+        assert_eq!(rise_error(ReferenceMode::PerOutput, "Q2"), zero);
+
+        // Pooled charges both rails the cell-wide mean instead, so the residual
+        // is that mean's distance from the rail's own delay at every point:
+        //   Q1: [-2,0] + [13,14] = [[11,12],[13,14]] - [[ 1, 2],[ 3, 4]] = +10
+        //   Q2: [-2,0] + [13,14] = [[11,12],[13,14]] - [[21,22],[23,24]] = -10
+        // i.e. mean - own = 13-3 = 14-4 = +10 and 13-23 = 14-24 = -10.
+        assert_eq!(
+            rise_error(ReferenceMode::Pooled, "Q1"),
+            Array2::from_elem((2, 2), 10.0),
+            "pooling must overcharge the fast rail by mean - own"
+        );
+        assert_eq!(
+            rise_error(ReferenceMode::Pooled, "Q2"),
+            Array2::from_elem((2, 2), -10.0),
+            "and undercharge the slow rail by the same amount"
+        );
+    }
+
     /// The reported reconstruction really is setup + clock-to-output delay added
     /// back together, and the residual really is its distance from the original.
+    ///
+    /// Killed by: `collect_arc_errors` recorded `reconstructed + original` as the residual instead of `reconstructed - original`.
     #[test]
     fn reported_reconstruction_is_the_outer_sum_of_setup_and_delay() {
         let mut lib = reportable_lib();
@@ -388,6 +509,8 @@ library(bundle_test) {{
     /// visible: the model holds one setup per pin, so it cannot sit exactly on
     /// two conditions that disagree. Measuring against the mean would hide
     /// precisely the error the mean introduced.
+    ///
+    /// Killed by: `process_cell` recorded every `ConditionedArc` with `when: None`.
     #[test]
     fn when_averaging_error_shows_up_against_the_raw_conditions() {
         // Two conditions for the same pin pair, deliberately far apart.

@@ -1,7 +1,7 @@
 //! Rendering of the reconstruction report: the tables, the per-arc statistics
 //! and the sections they are laid out in.
 
-use crate::engine::ReferenceMode;
+use crate::arcs::ReferenceMode;
 use crate::report::{ArcError, CellReport, ConditionedArc};
 use gpoint::GPoint;
 use itertools::Itertools;
@@ -378,7 +378,7 @@ mod tests {
     //! Behaviour of the report renderers: formatting, statistics and section layout.
 
     use super::*;
-    use crate::arcs::{RefArc, WhenMerge};
+    use crate::arcs::{RefArc, ReferenceMode, WhenMerge};
     use std::collections::BTreeMap;
     use std::io::Write;
 
@@ -496,12 +496,15 @@ mod tests {
 
     /// %g, not Rust's own float Display: six significant digits and no trailing
     /// zeros, which is what keeps the tables readable.
+    ///
+    /// Killed by: `g` formatted the f64 with Rust's `{}` instead of `GPoint`.
     #[test]
     fn g_renders_floats_in_printf_g_form() {
         assert_eq!(g(4.0), "4");
         assert_eq!(g(1.0 / 3.0), "0.333333");
     }
 
+    /// Killed by: `dump` iterated `a.lanes(Axis(0))` instead of `a.rows()`, transposing every 2-D table.
     #[test]
     fn dump_writes_the_label_then_one_table_row_per_array_row() {
         let a = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
@@ -512,6 +515,8 @@ mod tests {
     }
 
     /// A 1-D arc -- a reference or a setup constraint -- is one row, not a column.
+    ///
+    /// Killed by: `dump` emitted only the first value of each row -- `row.iter().take(1)`.
     #[test]
     fn dump_renders_a_one_dimensional_array_as_a_single_row() {
         let a = Array1::from(vec![1.0, 2.0, 3.0]);
@@ -525,6 +530,8 @@ mod tests {
 
     /// err [3, -3, 3, -3] against a reference of magnitude 2: bias 0, sd 3,
     /// rms sqrt(36/4) = 3, min -3, max 3, rms/scale 3/2.
+    ///
+    /// Killed by: `stats_of` dropped the `.sqrt()` from `sd`.
     #[test]
     fn stats_of_reports_the_residuals_own_statistics() {
         let err = Array2::from_shape_vec((1, 4), vec![3.0, -3.0, 3.0, -3.0]).unwrap();
@@ -538,6 +545,8 @@ mod tests {
 
     /// A residual against an all-zero reference has no scale to be a percentage
     /// of, and must read as 0% rather than as a division by zero.
+    ///
+    /// Killed by: `stats_of` divided by `scale` unconditionally, dropping the zero-scale guard.
     #[test]
     fn stats_of_reports_zero_percent_when_the_reference_has_no_scale() {
         let err = Array2::from_shape_vec((1, 2), vec![1.0, -1.0]).unwrap();
@@ -551,6 +560,8 @@ mod tests {
 
     /// The per-arc line reports the arc's own scale, bias, rms, |max| and relative
     /// rms -- the quantities [`ArcError`] exposes.
+    ///
+    /// Killed by: `stat_line` printed `a.rms()` in the `|max|` column.
     #[test]
     fn stat_line_reports_the_arcs_statistics() {
         assert_eq!(stat_line(&arc_error("DUT")), ARC_ERROR_STATS);
@@ -561,6 +572,8 @@ mod tests {
     /// One Liberty file can hold several libraries and the reports accumulate
     /// across all of them, so the arcs of one cell need not be adjacent. Dropping
     /// only adjacent repeats would roll that cell up twice.
+    ///
+    /// Killed by: `write_summary` used itertools' `.dedup()` instead of `.unique()` on the cell list.
     #[test]
     fn write_summary_rolls_up_each_cell_once_even_when_its_arcs_are_not_adjacent() {
         let first = arc_error("cellA");
@@ -584,6 +597,8 @@ mod tests {
 
     /// The rollup order is first appearance, not alphabetical: sorting would
     /// reorder the report and read as a regression when two runs are compared.
+    ///
+    /// Killed by: `write_summary` sorted the cell list before `.unique()`.
     #[test]
     fn write_summary_keeps_the_cell_rollups_in_first_appearance_order() {
         let last_alphabetically = arc_error("zcell");
@@ -599,6 +614,18 @@ mod tests {
 
     /// Every table the cell was reduced to gets a labelled section, and each
     /// measured arc gets its original, reconstruction, residual and statistics.
+    ///
+    /// The list below is what [`cell_report`] holds, section by section, not a
+    /// transcript of a run: the cell heading; one mean arc label per entry of
+    /// `cell_rise_arcs` (one, D -> Q) and of `cell_fall_arcs` (none, the map is
+    /// empty); a rise and a fall label per entry of `ref_arcs` (one output, Q,
+    /// referenced from G at row 0); the mean reference pair; one label per entry of
+    /// `setup_rise` (one source, D) and of `setup_fall` (none); then, per measured
+    /// arc, its heading and the three tables it is compared through, closed by the
+    /// statistics line. A section that appeared for a map the report holds nothing
+    /// in, or went missing for one it does, is what this catches.
+    ///
+    /// Killed by: `dump_cell` iterated `r.ref_arcs.iter().take(0)`, dropping the per-output reference sections.
     #[test]
     fn dump_cell_writes_a_labelled_section_for_every_table_it_holds() {
         let out = rendered(|s| dump_cell(s, &cell_report(&[[9.0, 3.0], [11.0, 17.0]])));
@@ -625,6 +652,8 @@ mod tests {
     /// The reduction is measured against each condition it replaced, condition by
     /// condition. Conditions [9, 3] and [11, 17] have mean [10, 10], magnitudes 6
     /// and 14, and residuals [1, 7] and [-1, -7]: bias +-4, sd 3, rms 5, worst 7.
+    ///
+    /// Killed by: `dump_reduction` accumulated `worst` with `.min` instead of `.max`.
     #[test]
     fn dump_reduction_measures_the_mean_against_every_condition_it_replaced() {
         let out = rendered(|s| dump_reduction(s, &cell_report(&[[9.0, 3.0], [11.0, 17.0]])));
@@ -673,6 +702,8 @@ mod tests {
     /// The marker fires on the ratio between the widest and narrowest condition,
     /// and only past 2x: at exactly 2x the conditions are still close enough that
     /// the mean stands for something.
+    ///
+    /// Killed by: `dump_reduction`'s spread marker fired at `>= 2.0` instead of `> 2.0`.
     #[test]
     fn dump_reduction_flags_a_wide_spread_only_past_two_times() {
         let at_the_threshold =
@@ -695,6 +726,8 @@ mod tests {
 
     /// The summary is what the report always carries; the per-arc and per-cell
     /// tables are what `--report-summary-only` leaves out.
+    ///
+    /// Killed by: `write_report` guarded the per-cell sections with `if true` instead of `if !summary_only`.
     #[test]
     fn write_report_with_summary_only_omits_the_per_arc_sections() {
         let reports = vec![cell_report(&[[1.0, 1.0], [4.0, 4.0]])];
@@ -720,6 +753,7 @@ mod tests {
         );
     }
 
+    /// Killed by: `write_report` guarded the per-cell sections with `if false` instead of `if !summary_only`.
     #[test]
     fn write_report_in_full_adds_the_reduction_and_per_cell_sections() {
         let reports = vec![cell_report(&[[1.0, 1.0], [4.0, 4.0]])];

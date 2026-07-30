@@ -33,7 +33,7 @@ pub(crate) fn is_output_pin(pin: &Group) -> bool {
 /// Check if a pin is an input pin
 fn is_input_pin(pin: &Group) -> bool {
     (pin.type_ == "pin" || pin.type_ == "bundle")
-        & pin
+        && pin
             .simple_attribute("direction")
             .map(|x| match x {
                 Value::String(v) => v == "input",
@@ -133,8 +133,8 @@ mod tests {
     //! and which pins constraints are written to.
 
     use super::*;
-    use crate::arcs::WhenMerge;
-    use crate::engine::{process_library, ReferenceMode};
+    use crate::arcs::{ReferenceMode, WhenMerge};
+    use crate::engine::process_library; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use liberty_parser::liberty::{Group, Liberty};
     use regex::Regex;
 
@@ -158,6 +158,7 @@ library(test) {
         .expect("parse sample lib")
     }
 
+    /// Killed by: `is_input_pin` matched the direction `"output"`.
     #[test]
     fn pin_direction_predicates() {
         let lib = sample_lib();
@@ -168,6 +169,7 @@ library(test) {
         assert!(!is_input_pin(cell.get_pin("Q").unwrap()));
     }
 
+    /// Killed by: `cell_qualifies` joined its latch-group and clock-pin tests with `||` instead of `&&`.
     #[test]
     fn cell_qualifies_needs_a_latch_group_and_the_clock_pin() {
         let lib = sample_lib();
@@ -254,6 +256,8 @@ library(non_qualifying_test) {
     /// A cell the filter rejects is not touched at all -- not its pins, not its
     /// arcs, not its latch group. Whole-cell equality is the assertion because the
     /// claim is about everything the engine did not do.
+    ///
+    /// Killed by: `process_library`'s cell filter widened to `cell_qualifies(x, clock_name) || true`.
     #[test]
     fn cells_the_filter_rejects_come_through_untouched() {
         let original = non_qualifying_lib();
@@ -325,6 +329,8 @@ library(non_qualifying_test) {
     /// to `Q`, so the constrained set must stay exactly `{A}`: the clock has nothing
     /// to be constrained against, the reset is excluded, and a control pin picking
     /// up an empty setup group would be timing no tool can use.
+    ///
+    /// Killed by: `constraint_targets_mut`'s `else if has_constraints(&g.name)` widened to `else if !has_constraints(&g.name) || true`.
     #[test]
     fn constraints_reach_only_the_inputs_characterised_against_an_output() {
         let variations: [(&[&str], &[&str], &str, &str); 6] = [

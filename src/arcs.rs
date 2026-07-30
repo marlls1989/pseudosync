@@ -3,6 +3,7 @@
 
 use liberty_parser::{ast::Value, liberty::Group};
 use ndarray::prelude::*;
+use std::collections::BTreeMap;
 
 /// How the several `when`-conditioned arcs of one pin pair are merged into the
 /// single arc the pseudo-flop model can carry.
@@ -39,6 +40,43 @@ impl std::str::FromStr for WhenMerge {
     }
 }
 
+/// How the clock-to-output reference delay is chosen when a cell drives several
+/// outputs.
+///
+/// The pseudo-flop model splits each original input-to-output arc into a setup
+/// constraint plus a clock-to-output delay, so the same reference must be used on
+/// both sides for `setup(D) + clk→Q` to reconstruct `delay(D→Q)`. The two modes
+/// differ in how wide that reference is drawn, which matters for cells whose
+/// outputs are independent rails rather than views of one node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReferenceMode {
+    /// One reference shared by the whole cell: the mean across every output.
+    /// Both the emitted delays and the constraints use it, so every output is
+    /// given the same clock-to-output delay. This was the original behaviour.
+    Pooled,
+    /// The default. Each output keeps its own reference for its emitted delay, and each input
+    /// is constrained against the mean reference of only the outputs it actually
+    /// drives. For a dual-rail bundle this reduces to running the algorithm
+    /// independently per rail, while a control input shared by both rails is
+    /// still referenced against both.
+    PerOutput,
+}
+
+impl std::str::FromStr for ReferenceMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pooled" => Ok(ReferenceMode::Pooled),
+            "per-output" => Ok(ReferenceMode::PerOutput),
+            other => Err(format!(
+                "unknown reference mode {:?}, expected \"pooled\" or \"per-output\"",
+                other
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RefArc {
     pub(crate) col: usize,
@@ -49,6 +87,23 @@ pub(crate) struct RefArc {
     pub(crate) fall_trans: Array1<f64>,
     pub(crate) cell_rise: Array1<f64>,
     pub(crate) cell_fall: Array1<f64>,
+}
+
+/// The references a cell's constraints and delays were drawn against.
+pub(crate) struct References<'a> {
+    pub(crate) per_output: &'a BTreeMap<String, RefArc>,
+    pub(crate) mean: &'a RefArc,
+    pub(crate) mode: ReferenceMode,
+}
+
+impl References<'_> {
+    /// The clock-to-output delay this mode actually emits for `output`.
+    pub(crate) fn delay_for(&self, output: &str) -> Option<&RefArc> {
+        match self.mode {
+            ReferenceMode::Pooled => Some(self.mean),
+            ReferenceMode::PerOutput => self.per_output.get(output),
+        }
+    }
 }
 
 /// Timing tables extracted from a timing group
@@ -343,6 +398,7 @@ mod tests {
 
     // --- mean_timingtable --------------------------------------------------
 
+    /// Killed by: `mean_timingtable` divided the summed tables by `n + 1.0` instead of `n`.
     #[test]
     fn mean_timingtable_averages_the_groups_elementwise() {
         // Two 2x2 tables whose elementwise mean is [[3, 4], [5, 6]]: every element
@@ -375,6 +431,7 @@ mod tests {
 
     // --- mean_reference_arc ------------------------------------------------
 
+    /// Killed by: `mean_reference_arc` left one family unnormalised -- `x.rise_trans /= 1.0` in place of `/= n`.
     #[test]
     fn mean_reference_arc_averages_all_four_table_families() {
         // The second arc is twice the first everywhere, so each family's mean is
@@ -420,6 +477,7 @@ mod tests {
 
     // --- restore_arc -------------------------------------------------------
 
+    /// Killed by: `restore_arc` built its `cap` term from `Array::zeros` rather than `Array::ones`, dropping the load-dependent half of the outer sum.
     #[test]
     fn restore_arc_is_the_outer_sum_of_the_1d_arcs() {
         // slew (row) = [1, 2], cap (col) = [10, 20]
@@ -438,6 +496,7 @@ mod tests {
         Array2::from_shape_vec((3, 3), (0..9).map(|i| base + i as f64).collect::<Vec<_>>()).unwrap()
     }
 
+    /// Killed by: `select_reference_arc` took `col` as `cell_rise.len_of(Axis(1)) * 0` instead of `/ 2`.
     #[test]
     fn select_reference_arc_picks_the_middle_row_and_column() {
         let tt = TimingTables {
@@ -457,6 +516,7 @@ mod tests {
         assert_eq!(arc.cell_fall, Array1::from(vec![103.0, 104.0, 105.0]));
     }
 
+    /// Killed by: `select_reference_arc` read `cell_fall` as `.unwrap_or(cell_rise)` instead of `?`, so a missing table no longer refused the arc.
     #[test]
     fn select_reference_arc_requires_all_four_tables() {
         let tt = TimingTables {
@@ -494,6 +554,7 @@ mod tests {
         }
     }
 
+    /// Killed by: `extract_timing_tables_from_arc`'s cell_rise arm matched `(Some(group), Some(_))`, so cell_rise never claimed the template.
     #[test]
     fn lut_template_prefers_cell_rise_over_the_others() {
         let g = timing_group(vec![
@@ -506,6 +567,7 @@ mod tests {
         assert_eq!(tt.lut_template, "CR_TPL");
     }
 
+    /// Killed by: `extract_timing_tables_from_arc` joined its `cell_rise.is_none() && ...` guard with `||`, so any missing family refused the arc.
     #[test]
     fn lut_template_falls_back_to_cell_fall_when_cell_rise_is_absent() {
         let g = timing_group(vec![
@@ -517,6 +579,7 @@ mod tests {
         assert_eq!(tt.lut_template, "CF_TPL");
     }
 
+    /// Killed by: `extract_timing_tables_from_arc` joined its `cell_rise.is_none() && ...` guard with `||`, so any missing family refused the arc.
     #[test]
     fn lut_template_falls_back_to_rise_transition_when_only_transitions_present() {
         let g = timing_group(vec![
@@ -529,6 +592,7 @@ mod tests {
         assert!(tt.cell_fall.is_none());
     }
 
+    /// Killed by: `extract_timing_tables_from_arc` joined its `cell_rise.is_none() && ...` guard with `||`, so any missing family refused the arc.
     #[test]
     fn lut_template_falls_back_to_fall_transition_when_only_that_is_present() {
         let g = timing_group(vec![table_group("fall_transition", "FT_TPL")]);
@@ -536,6 +600,7 @@ mod tests {
         assert_eq!(tt.lut_template, "FT_TPL");
     }
 
+    /// Killed by: `extract_timing_tables_from_arc`'s fall_transition filter widened to `g.type_ != "nothing_at_all"`, making the last family take whatever remained.
     #[test]
     fn extract_timing_tables_is_none_with_no_table_subgroups() {
         assert!(extract_timing_tables_from_arc(&timing_group(vec![])).is_none());
@@ -550,6 +615,7 @@ mod tests {
         assert!(extract_timing_tables_from_arc(&constraint_arc).is_none());
     }
 
+    /// Killed by: `extract_timing_tables_from_arc`'s cell_rise arm matched `(Some(group), Some(_))`, so cell_rise never claimed the template.
     #[test]
     fn extract_timing_tables_with_only_cell_rise_leaves_the_others_none() {
         let g = timing_group(vec![table_group("cell_rise", "CR_TPL")]);
@@ -563,6 +629,7 @@ mod tests {
 
     // --- WhenMerge::from_str ------------------------------------------------
 
+    /// Killed by: `WhenMerge::from_str` mapped `"mean"` to `WhenMerge::Min`.
     #[test]
     fn when_merge_from_str_maps_each_spelling() {
         assert_eq!("mean".parse::<WhenMerge>(), Ok(WhenMerge::Mean));
@@ -572,6 +639,25 @@ mod tests {
         let err = "bogus".parse::<WhenMerge>().unwrap_err();
         assert!(
             err.contains("unknown when-merge"),
+            "error message was {:?}",
+            err
+        );
+    }
+
+    // --- ReferenceMode::from_str --------------------------------------------
+
+    /// Killed by: `ReferenceMode::from_str` mapped `"pooled"` to `ReferenceMode::PerOutput`.
+    #[test]
+    fn reference_mode_from_str_maps_each_spelling() {
+        assert_eq!("pooled".parse::<ReferenceMode>(), Ok(ReferenceMode::Pooled));
+        assert_eq!(
+            "per-output".parse::<ReferenceMode>(),
+            Ok(ReferenceMode::PerOutput)
+        );
+
+        let err = "bogus".parse::<ReferenceMode>().unwrap_err();
+        assert!(
+            err.contains("unknown reference mode"),
             "error message was {:?}",
             err
         );
@@ -590,6 +676,7 @@ mod tests {
         }
     }
 
+    /// Killed by: `TableAccumulator::result` returned `sum / 1.0` for `WhenMerge::Mean`, leaving the sum undivided.
     #[test]
     fn when_conditions_are_averaged_per_family_not_last_wins() {
         let mut acc = ArcAccumulator::new(WhenMerge::Mean);
@@ -610,6 +697,7 @@ mod tests {
         assert!(mean.fall_trans.is_none());
     }
 
+    /// Killed by: `TableAccumulator::add`'s mismatch guard changed to `sum.raw_dim() != sum.raw_dim()`, so a differently shaped condition reached the addition.
     #[test]
     fn a_condition_on_a_different_table_shape_is_ignored_rather_than_panicking() {
         let mut acc = ArcAccumulator::new(WhenMerge::Mean);
@@ -630,6 +718,8 @@ mod tests {
 
     /// The merge strategy is what the library-side spread has to be handled
     /// with, so each mode must do exactly what it claims, elementwise.
+    ///
+    /// Killed by: `TableAccumulator::add` folded `WhenMerge::Min` with `a.max(*b)`.
     #[test]
     fn when_merge_selects_mean_min_or_max_elementwise() {
         // Two conditions crossing over: the first is larger in cell_rise, the
