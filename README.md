@@ -75,10 +75,10 @@ for `<input>`, standard output for `--output`, standard error for `--report`. Th
 output artefacts may not share a destination, and a run that would have them do so is
 refused before either is written.
 
-Neither reference mode is presented here as the better one. `per-output` is the default
-and the correct behaviour; `pooled` is kept so that its cost can be measured, the metric
-being the error in the reconstructed arc — how closely `setup(D) + clk→Q` recovers the
-original `delay(D→Q)`. On a single-output cell the two coincide by construction.
+`per-output` is the default and the behaviour to use. `pooled` hands every output the
+cell-wide mean instead, which on a cell whose outputs are independent rails averages
+measurements that describe different elements. On a single-output cell the two coincide by
+construction.
 
 ## What it changes in the library
 
@@ -145,16 +145,12 @@ the residual is read rather than assumed.
 ## Examples
 
 `examples/` holds three ASCEND FREEPDK45 corner libraries and, for each, the output of a
-default run (`_pseudoflop`) and of a `--latch` run (`_pseudolatch`). They document what the
-tool emits.
+default run (`_pseudoflop`) and of a `--latch` run (`_pseudolatch`), produced by:
 
-They are not read by any test: a committed golden file makes the recorded output the
-definition of correct, so the coverage they once provided is stated as semantic assertions
-instead. The consequence is that **nothing enforces that they stay current.** Regenerating
-them is a manual step — run the tool over each of the three inputs, once plain and once
-with `--latch`, and commit the six results — and a change that alters emitted output
-without doing so leaves these files wrong, with no check to say so. Comparing them before
-and after is a useful instrument while working; it is not a guarantee anything maintains.
+```
+pseudosync examples/<corner>.lib         -o examples/<corner>_pseudoflop.lib
+pseudosync examples/<corner>.lib --latch -o examples/<corner>_pseudolatch.lib
+```
 
 Every qualifying cell in these three libraries converts, so a run over them reports no
 skips.
