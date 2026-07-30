@@ -75,6 +75,31 @@ impl ArcError {
     }
 }
 
+/// A candidate cell, or one output of one, that the conversion refused, and why.
+///
+/// `output` is `None` for a cell-scope refusal, where the whole cell was emitted
+/// verbatim. A cell that is not a candidate at all produces no `Refusal`: nothing was
+/// asked of the tool, so it has nothing to report about it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Refusal {
+    pub(crate) library: String,
+    pub(crate) cell: String,
+    pub(crate) output: Option<String>,
+    pub(crate) reason: String,
+}
+
+/// What one library's conversion produced: the cells it converted, and what it
+/// refused.
+///
+/// A run with skips still exits 0, so the report and the standard-error warnings are
+/// the only signal a caller has. A refusal reaching neither would be invisible to any
+/// script reading the artefacts.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LibraryReport {
+    pub(crate) cells: Vec<CellReport>,
+    pub(crate) refusals: Vec<Refusal>,
+}
+
 /// Everything the reconstruction report shows for one processed cell.
 ///
 /// The engine returns this rather than writing it out itself, so the library
@@ -343,6 +368,7 @@ library(bundle_test) {{
             let reports = process_library(&mut lib[0], "G", &reset, false, mode, WhenMerge::Mean);
 
             let report = reports
+                .cells
                 .iter()
                 .find(|r| r.cell == "DUT")
                 .unwrap_or_else(|| panic!("no report for the processed cell in {:?}", mode));
@@ -412,7 +438,7 @@ library(bundle_test) {{
                 mode,
                 WhenMerge::Mean,
             );
-            let report = reports.iter().find(|r| r.cell == "DUT").unwrap();
+            let report = reports.cells.iter().find(|r| r.cell == "DUT").unwrap();
             report
                 .arcs
                 .iter()
@@ -467,7 +493,7 @@ library(bundle_test) {{
             ReferenceMode::PerOutput,
             WhenMerge::Mean,
         );
-        let report = reports.iter().find(|r| r.cell == "DUT").unwrap();
+        let report = reports.cells.iter().find(|r| r.cell == "DUT").unwrap();
         assert!(!report.arcs.is_empty(), "fixture must produce arcs");
 
         for arc in &report.arcs {
@@ -536,7 +562,7 @@ library(bundle_test) {{
             ReferenceMode::PerOutput,
             WhenMerge::Mean,
         );
-        let report = reports.iter().find(|r| r.cell == "DUT").unwrap();
+        let report = reports.cells.iter().find(|r| r.cell == "DUT").unwrap();
 
         // Both conditions are measured, and each is labelled by its own `when`.
         let rise: Vec<&ArcError> = report

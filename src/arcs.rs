@@ -97,8 +97,20 @@ pub(crate) struct References<'a> {
 }
 
 impl References<'_> {
-    /// The clock-to-output delay this mode actually emits for `output`.
+    /// The clock-to-output delay this mode actually emits for `output`, or `None` if
+    /// that output was skipped.
+    ///
+    /// Skipped-ness is mode-independent, and `per_output` holds exactly the converted
+    /// outputs, so presence there is the one place convertedness is decided. Pooled
+    /// then yields the cell-wide mean for a *converted* output -- which is the mode's
+    /// whole point -- and nothing for a skipped one. Handing the mean to a skipped
+    /// output would charge it a delay drawn from outputs it has nothing to do with,
+    /// describing a path nothing characterised.
     pub(crate) fn delay_for(&self, output: &str) -> Option<&RefArc> {
+        if !self.per_output.contains_key(output) {
+            return None;
+        }
+
         match self.mode {
             ReferenceMode::Pooled => Some(self.mean),
             ReferenceMode::PerOutput => self.per_output.get(output),
@@ -271,9 +283,15 @@ where
             n += 1.0;
         })
         .reduce(|a, b| {
-            assert_eq!(a.col, b.col);
-            assert_eq!(a.row, b.row);
-            assert_eq!(&a.lut_template, &b.lut_template);
+            // Guaranteed by the caller: a cell whose outputs draw references from
+            // different lookup templates is refused at cell scope before the mean is
+            // taken. These therefore fail as a defect in pseudosync -- a guarantee
+            // relaxed somewhere upstream -- and never as a complaint about the input.
+            const CHECKED: &str = "internal: every arc this cell transforms was checked \
+                                   for a common domain before the mean was taken";
+            assert_eq!(a.col, b.col, "{}", CHECKED);
+            assert_eq!(a.row, b.row, "{}", CHECKED);
+            assert_eq!(&a.lut_template, &b.lut_template, "{}", CHECKED);
             RefArc {
                 col: a.col,
                 row: a.row,
@@ -305,6 +323,32 @@ pub(crate) fn restore_arc(
         Array::ones((capacitance_dependent.len(), slew_dependent.len())) * slew_dependent;
 
     cap + slw.t()
+}
+
+/// The four table families a complete reference is drawn from, and so the only ones
+/// whose lookup template this conversion ever reads.
+pub(crate) const REFERENCE_FAMILIES: [&str; 4] = [
+    "cell_rise",
+    "cell_fall",
+    "rise_transition",
+    "fall_transition",
+];
+
+/// The domain each present reference family in one timing group is characterised on: the
+/// lookup template it names, and the number of rows and columns its table carries — which
+/// is the length of that template's two index lists.
+///
+/// Differing dimensions **are** a differing template, whatever the name says. Two tables
+/// cannot be transformed together unless they are indexed the same way, so the dimensions
+/// are part of the domain's identity rather than a separate test alongside the name. That
+/// is also why this reads them through `mean_timingtable`, the same reader the conversion
+/// itself uses: the dimensions checked are then necessarily the ones used.
+pub(crate) fn arc_domains(timing_group: &Group) -> Vec<(String, (usize, usize))> {
+    timing_group
+        .iter_subgroups()
+        .filter(|g| REFERENCE_FAMILIES.contains(&g.type_.as_str()))
+        .filter_map(|g| mean_timingtable(vec![g]).map(|t| (g.name.clone(), t.dim())))
+        .collect()
 }
 
 /// Extract timing tables from a timing group
@@ -473,6 +517,69 @@ mod tests {
         close(&mean.fall_trans, [0.225, 0.375, 0.525], "fall_trans");
         close(&mean.cell_rise, [1.5, 3.0, 4.5], "cell_rise");
         close(&mean.cell_fall, [2.25, 3.75, 5.25], "cell_fall");
+    }
+
+    // --- References::delay_for ---------------------------------------------
+
+    /// A skipped output has no clock-to-output delay, under either mode.
+    ///
+    /// `per_output` holds exactly the converted outputs, so presence there is the one
+    /// place convertedness is decided -- and that decision does not depend on the
+    /// mode. Pooling settles which reference a *converted* output is given; it is not
+    /// a licence to invent one for an output that supplies none. Handing a skipped
+    /// output the cell-wide mean would charge it a delay drawn from outputs it has
+    /// nothing to do with, describing a path nothing characterised.
+    ///
+    /// Killed by: `delay_for` restored to answering `Pooled` with `Some(self.mean)`
+    /// unconditionally, so the skipped output was handed the cell-wide mean.
+    #[test]
+    fn a_skipped_output_has_no_delay_under_either_mode() {
+        let refarc = |delay: f64| RefArc {
+            col: 0,
+            row: 0,
+            related_pin: "A".to_owned(),
+            lut_template: "T".to_owned(),
+            rise_trans: Array1::from(vec![0.0]),
+            fall_trans: Array1::from(vec![0.0]),
+            cell_rise: Array1::from(vec![delay]),
+            cell_fall: Array1::from(vec![0.0]),
+        };
+
+        // One converted output, and a cell-wide mean distinguishable from it so that
+        // handing the mean out where it should not be is visible.
+        let per_output: BTreeMap<String, RefArc> = BTreeMap::from([("Q".to_owned(), refarc(3.0))]);
+        let mean = refarc(13.0);
+
+        for mode in [ReferenceMode::Pooled, ReferenceMode::PerOutput] {
+            let references = References {
+                per_output: &per_output,
+                mean: &mean,
+                mode,
+            };
+
+            // The converted output is answered, with the reference this mode emits:
+            // its own under per-output, the cell-wide mean under pooled.
+            let expected = match mode {
+                ReferenceMode::Pooled => 13.0,
+                ReferenceMode::PerOutput => 3.0,
+            };
+            assert_eq!(
+                references
+                    .delay_for("Q")
+                    .expect("a converted output")
+                    .cell_rise[0],
+                expected,
+                "{:?}",
+                mode
+            );
+
+            // The skipped output is answered with nothing, in both modes.
+            assert!(
+                references.delay_for("QN").is_none(),
+                "a skipped output has no delay under {:?}",
+                mode
+            );
+        }
     }
 
     // --- restore_arc -------------------------------------------------------

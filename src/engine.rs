@@ -2,8 +2,8 @@
 //! against, and how a library is walked.
 
 use crate::arcs::{
-    extract_timing_tables_from_arc, mean_reference_arc, select_reference_arc, ArcAccumulator,
-    RefArc, ReferenceMode, References, WhenMerge,
+    arc_domains, extract_timing_tables_from_arc, mean_reference_arc, select_reference_arc,
+    ArcAccumulator, RefArc, ReferenceMode, References, WhenMerge,
 };
 use crate::emit::{
     convert_latch_to_flipflop, create_hold_timing_group, create_pseudo_output_timing_arc,
@@ -12,7 +12,10 @@ use crate::emit::{
 use crate::pins::{
     cell_qualifies, constraint_targets_mut, is_output_pin, timing_leaves, timing_leaves_mut,
 };
-use crate::report::{collect_arc_errors, ArcError, CellReport, ConditionedArc, FALL, RISE};
+use crate::report::{
+    collect_arc_errors, ArcError, CellReport, ConditionedArc, LibraryReport, Refusal, FALL, RISE,
+};
+use crate::templates::Templates;
 use itertools::Itertools;
 use liberty_parser::{
     ast::Value,
@@ -20,7 +23,7 @@ use liberty_parser::{
 };
 use ndarray::prelude::*;
 use regex::Regex;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Reduce the input-to-output arcs of one source pin to a single constraint.
 ///
@@ -28,6 +31,10 @@ use std::collections::{BTreeMap, HashSet};
 /// reference column, minus the clock-to-output delay that the pseudo-flop model
 /// will charge for that path. Which delay that is depends on `mode`; see
 /// [`ReferenceMode`].
+///
+/// `arcs` is already restricted to converted outputs by the caller, which is what
+/// makes the mixed-source rule hold: a source driving both a converted and a skipped
+/// output is averaged over the converted ones alone.
 fn constraints_from_arcs(
     arcs: &BTreeMap<(String, String), Array2<f64>>,
     ref_arcs: &BTreeMap<String, RefArc>,
@@ -54,9 +61,18 @@ fn constraints_from_arcs(
                 // Only the outputs this source actually drives contribute, so a
                 // rail-private input is referenced against its own rail alone.
                 if mode == ReferenceMode::PerOutput {
-                    ref_sum += ref_arcs
-                        .get(outpin)
-                        .map_or(select(mean_ref)[col], |r| select(r)[col]);
+                    // Substituting the cell-wide mean here would charge this input a
+                    // delay measured on a *different* output, for a path nothing
+                    // characterised. The caller's restriction to converted outputs
+                    // makes that unreachable, so this fails loudly instead: if the
+                    // restriction is ever relaxed, the failure is unambiguous rather
+                    // than a plausible number in the emitted library.
+                    ref_sum += ref_arcs.get(outpin).map(|r| select(r)[col]).unwrap_or_else(|| {
+                        panic!(
+                            "arc to output {} reached the constraint arithmetic with no reference of its own",
+                            outpin
+                        )
+                    });
                 }
             }
 
@@ -189,8 +205,9 @@ struct CellOptions<'a> {
 fn process_cell(
     cell: &mut Group,
     opts: &CellOptions,
+    templates: &Templates,
     lib_name: &str,
-    reports: &mut Vec<CellReport>,
+    reports: &mut LibraryReport,
 ) -> Result<String, String> {
     let CellOptions {
         clock_name,
@@ -216,15 +233,36 @@ fn process_cell(
     // condition, not just against the average it was built from.
     let mut raw_arcs: Vec<ConditionedArc> = Vec::new();
 
+    // Every output leaf, whether or not it turns out to carry a usable arc. The skip
+    // decision below is taken over this list rather than over the outputs that
+    // reached the model: an output whose only non-reset arc carries no
+    // characterisation table never enters `source_order`, and keying the decision on
+    // that map is what let such an output pass unnoticed.
+    let mut output_leaves: Vec<String> = Vec::new();
+    // The domain of every table the conversion will transform: the lookup template named,
+    // and the dimensions its table carries. Judged once, after this loop.
+    let mut domains: BTreeSet<(String, (usize, usize))> = BTreeSet::new();
+    // Outputs an arc of which was skipped at arc scope, so that the output-scope warning
+    // can give the reason that is true rather than the one that merely fits.
+    let mut axis_skipped: BTreeSet<String> = BTreeSet::new();
+
     for outpin in timing_leaves(cell, is_output_pin) {
         let outpin_name = &outpin.name;
+        output_leaves.push(outpin_name.clone());
 
         // Process each timing group in the output pin
         for timing_group in outpin.iter_subgroups_of_type("timing") {
-            let related_pin = timing_group
+            // Read rather than unwrapped. A timing group with no `related_pin` describes no
+            // path between two pins, so there would be nothing here to split. Constraints of
+            // that kind are input-pin constraints -- a clock's or a reset's -- and this walks
+            // output pins only, so it does not arise; reading it is merely cheaper than a
+            // panic that would take the whole run down if it ever did.
+            let Some(related_pin) = timing_group
                 .simple_attribute("related_pin")
-                .unwrap()
-                .string();
+                .map(|v| v.string())
+            else {
+                continue;
+            };
 
             // Skip reset pins
             if reset_name.is_match(&related_pin) {
@@ -233,6 +271,31 @@ fn process_cell(
 
             // Extract timing tables from this arc
             if let Some(timing_tables) = extract_timing_tables_from_arc(timing_group) {
+                // Arc scope. A template declaring only one axis cannot carry the
+                // split, so this arc is skipped and enters nothing: not the raw
+                // arcs, not the accumulator, not the source order. A one-axis
+                // template is ordinary Liberty -- it is the shape this tool's own
+                // derived templates take -- so the warning says what is missing
+                // rather than calling the input malformed.
+                if let Some(missing) = templates.missing_axis(&timing_tables.lut_template) {
+                    eprintln!(
+                        "Skipping arc {} -> {} of cell {} in library {}: lookup template {} {}",
+                        related_pin,
+                        outpin_name,
+                        cell_name,
+                        lib_name,
+                        timing_tables.lut_template,
+                        missing
+                    );
+                    axis_skipped.insert(outpin_name.clone());
+                    continue;
+                }
+
+                // This arc will be transformed, so its tables' domains are among those
+                // that must agree. Recorded per family rather than per group, because the
+                // four families of one group can name different templates.
+                domains.extend(arc_domains(timing_group));
+
                 let sources = source_order.entry(outpin_name.clone()).or_default();
                 if !sources.contains(&related_pin) {
                     sources.push(related_pin.clone());
@@ -258,6 +321,30 @@ fn process_cell(
                     .accumulate(timing_tables, &related_pin, outpin_name);
             }
         }
+    }
+
+    // Cell scope, judged at the earliest point it can be: every arc the conversion
+    // transforms must be on the same domain. The pseudo template pair is derived per cell
+    // from one lookup template, and values indexed on different dimensions are not
+    // comparable — so a cell carrying arcs on more than one domain is one this conversion
+    // cannot describe, and it is emitted verbatim.
+    //
+    // Differing dimensions count as a differing template even under one name, which is
+    // what makes this one rule rather than two. It also catches the case where the four
+    // families of a single timing group disagree: reading the axes of only the first
+    // present family would otherwise publish one family's table under a template derived
+    // from another's — silently wrong numbers on legal input.
+    //
+    // This is long before phase 3 mutates anything, so such a cell comes through exactly
+    // as it arrived.
+    if domains.len() > 1 {
+        return Err(format!(
+            "arcs on more than one domain: {}",
+            domains
+                .iter()
+                .map(|(template, (rows, cols))| format!("{} at {}x{}", template, rows, cols))
+                .join(", ")
+        ));
     }
 
     // Reduce each pin pair to its representative arc, then take each output's
@@ -291,74 +378,92 @@ fn process_cell(
         }
     }
 
-    // Phase 2: Calculate mean reference arc for delays and constraints
+    // Phase 2: the reference each converted output's delays are drawn against.
+    //
+    // No output at all supplying a complete reference is a cell-scope refusal:
+    // there is nothing to build a flip-flop model from, so the cell is emitted
+    // verbatim and named. This is the last read-only step -- phase 3 onwards mutates
+    // the cell, so a cell that will not be converted is never touched.
     let mean_ref_arc = mean_reference_arc(ref_arcs.values().cloned())
-        .ok_or_else(|| "no reference arc found".to_owned())?;
+        .ok_or_else(|| "no output supplies a complete reference".to_owned())?;
 
-    // Every output the library characterised must yield a reference arc, or the
-    // cell is left exactly as the library wrote it.
-    //
-    // `ff` is a cell-wide declaration and so is the promise that every output is
-    // driven by it: the outputs share one state element, so there is no
-    // converting one and leaving another in its combinational form. An output
-    // that was characterised but yields no reference would be given no
-    // clock-to-output delay, keep the combinational arc a converted cell no
-    // longer declares, and -- because [`constraints_from_arcs`] falls back to the
-    // cell-wide mean for an output with no reference of its own -- have every
-    // input driving it constrained against a delay drawn from a different
-    // output. Emitting that is worse than emitting nothing, so this takes the
-    // same branch as a cell no output of which yields a reference.
-    //
-    // The requirement is on the outputs phase 1 admitted into the model, which is
-    // exactly what `source_order` holds: those with at least one non-reset arc
-    // carrying at least one characterisation table. An output with none -- a
-    // tie-off, or one only the reset drives -- states no delay for the conversion
-    // to re-describe, so it is not uncharacterisable, it is simply not what this
-    // conversion is about, and leaving it without a clock arc loses nothing.
-    //
-    // This is the last read-only step: phase 3 onwards mutates the cell, so a
-    // cell that will not be converted is never touched.
-    let uncharacterisable: Vec<&str> = source_order
-        .keys()
-        .filter(|outpin_name| !ref_arcs.contains_key(*outpin_name))
-        .map(String::as_str)
+    // Output scope. An output the conversion cannot re-express is skipped, not
+    // converted: it keeps its timing groups exactly as the input wrote them and
+    // gains no clock-to-output arc, because an output with no arc being split has no
+    // clock-to-output delay to state. Convertibility is decided per output, so one
+    // skipped output does not cost the cell the outputs that can be converted.
+    let skipped: Vec<String> = output_leaves
+        .iter()
+        .filter(|name| !ref_arcs.contains_key(*name))
+        .cloned()
         .collect();
-    if !uncharacterisable.is_empty() {
-        return Err(format!(
-            "characterised outputs with no usable reference arc: {}",
-            uncharacterisable.join(", ")
-        ));
+    for outpin_name in &skipped {
+        // All three are the same output-scope refusal; the wording says which of the three
+        // ways the output fell short, so the warning can be acted on. The arc-scope case
+        // has to be asked about separately: an arc skipped there never reaches
+        // `source_order`, so judging by that map alone would report an output whose every
+        // arc was skipped for its template as having carried no table at all.
+        let reason = if source_order.contains_key(outpin_name) {
+            "no non-reset source supplies a complete reference"
+        } else if axis_skipped.contains(outpin_name) {
+            "every non-reset arc was skipped: no lookup template with both axes"
+        } else {
+            "no non-reset timing arc carrying a characterisation table"
+        };
+        eprintln!(
+            "Skipping output {} of cell {} in library {}: {}",
+            outpin_name, cell_name, lib_name, reason
+        );
+        reports.refusals.push(Refusal {
+            library: lib_name.to_owned(),
+            cell: cell_name.clone(),
+            output: Some(outpin_name.clone()),
+            reason: reason.to_owned(),
+        });
     }
 
     // Phase 3: Add pseudo timing to each output pin
     for outpin in timing_leaves_mut(cell, is_output_pin) {
         let outpin_name = &outpin.name;
 
-        if let Some(output_transitions) = ref_arcs.get(outpin_name) {
-            // Pooled hands every output the cell-wide mean delay; per-output lets
-            // each keep the delay of its own reference arc.
-            let delays = match mode {
-                ReferenceMode::Pooled => &mean_ref_arc,
-                ReferenceMode::PerOutput => output_transitions,
-            };
+        // A skipped output is left exactly as the input wrote it, and phase 2 has
+        // already named it. Note that the retain which strips a converted output's
+        // original non-reset arcs lives inside `add_pseudo_timing_to_output_pin`, so
+        // skipping here is what keeps a skipped output's originals in the default
+        // mode -- under `--latch` they survive by construction either way.
+        let Some(output_transitions) = ref_arcs.get(outpin_name) else {
+            continue;
+        };
 
-            add_pseudo_timing_to_output_pin(
-                outpin,
-                clock_name,
-                reset_name,
-                output_transitions,
-                delays,
-                latch,
-            );
-        } else {
-            // The bail above leaves only the outputs the library characterised
-            // with nothing at all, which have no delay to re-describe.
-            eprintln!(
-                "Output {} of cell {} in library {} has no characterised arc, so it takes no clock-to-output delay",
-                outpin_name, cell_name, lib_name
-            );
-        }
+        // Pooled hands every output the cell-wide mean delay; per-output lets
+        // each keep the delay of its own reference arc.
+        let delays = match mode {
+            ReferenceMode::Pooled => &mean_ref_arc,
+            ReferenceMode::PerOutput => output_transitions,
+        };
+
+        add_pseudo_timing_to_output_pin(
+            outpin,
+            clock_name,
+            reset_name,
+            output_transitions,
+            delays,
+            latch,
+        );
     }
+
+    // An input driving both a converted and a skipped output is constrained over the
+    // converted outputs only, and an input driving no converted output gets no
+    // constraint at all -- the degenerate case of the same rule, which phase 5's
+    // `has_constraints` then leaves untouched of its own accord.
+    //
+    // Restricting the arc maps here *is* that rule, and it is also what keeps a
+    // skipped output out of every reference computation in both modes: its arcs are
+    // no longer present to be averaged. The two halves of the split must sum back to
+    // the arc they came from, and a skipped output supplies no propagation half, so
+    // there is nothing for an input driving it to be charged against.
+    cell_rise_arcs.retain(|(_, output), _| ref_arcs.contains_key(output));
+    cell_fall_arcs.retain(|(_, output), _| ref_arcs.contains_key(output));
 
     // Phase 4: Calculate setup/hold constraints against the reference `mode` selects
     let ref_arc = mean_ref_arc;
@@ -391,7 +496,7 @@ fn process_cell(
         &mut arc_errors,
     );
 
-    reports.push(CellReport {
+    reports.cells.push(CellReport {
         library: lib_name.to_owned(),
         cell: cell_name.clone(),
         when_merge,
@@ -445,9 +550,10 @@ fn process_cell(
 /// Process a library to convert latches to flip-flops or add pseudo-synchronous
 /// timing, choosing how the clock-to-output reference is drawn.
 ///
-/// Returns a [`CellReport`] per processed cell, carrying the original arcs, the
-/// reconstruction and its residual, so the cost of the chosen [`ReferenceMode`]
-/// can be measured against the library it replaced.
+/// Returns a [`CellReport`] per converted cell -- carrying the original arcs, the
+/// reconstruction and its residual, so the cost of the chosen [`ReferenceMode`] can be
+/// measured against the library it replaced -- together with a [`Refusal`] for every
+/// candidate cell, or output of one, the conversion could not honour.
 pub(crate) fn process_library(
     lib: &mut Group,
     clock_name: &str,
@@ -455,7 +561,7 @@ pub(crate) fn process_library(
     latch: bool,
     mode: ReferenceMode,
     when_merge: WhenMerge,
-) -> Vec<CellReport> {
+) -> LibraryReport {
     eprintln!("Processing library {}", lib.name);
 
     let opts = CellOptions {
@@ -465,26 +571,39 @@ pub(crate) fn process_library(
         mode,
         when_merge,
     };
-    let mut reports: Vec<CellReport> = Vec::new();
+    let mut reports = LibraryReport::default();
 
     let mut lut_templates: HashSet<String> = HashSet::new();
     let lib_name = lib.name.clone();
+    // Owned, so the immutable borrow of the library ends here and the cells below
+    // can be walked mutably.
+    let templates = Templates::of_library(lib);
 
     // Process each qualifying cell
     for cell in lib
         .iter_cells_mut()
         .filter(|x| cell_qualifies(x, clock_name))
     {
-        match process_cell(cell, &opts, &lib_name, &mut reports) {
+        match process_cell(cell, &opts, &templates, &lib_name, &mut reports) {
             Ok(template_name) => {
                 lut_templates.insert(template_name);
             }
-            // A cell that could not be converted is left verbatim, so the reason
-            // it names is the only trace of it in the emitted library.
-            Err(reason) => eprintln!(
-                "Failed to process cell {} of library {}: {}",
-                cell.name, lib_name, reason
-            ),
+            // A candidate the conversion could not honour: left verbatim, named on
+            // standard error, and recorded in the report. With the exit status pinned
+            // at 0 those two are the only signals a caller has, so a refusal that
+            // reached only one of them would be half invisible.
+            Err(reason) => {
+                eprintln!(
+                    "Failed to process cell {} of library {}: {}",
+                    cell.name, lib_name, reason
+                );
+                reports.refusals.push(Refusal {
+                    library: lib_name.clone(),
+                    cell: cell.name.clone(),
+                    output: None,
+                    reason,
+                });
+            }
         }
     }
 
@@ -510,7 +629,7 @@ mod tests {
     };
     use regex::Regex;
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     // --- calculate_setup / hold constraints --------------------------------
 
@@ -1076,38 +1195,6 @@ library(test) {
         .expect("parse sample lib")
     }
 
-    /// Moves the process into a fresh temporary directory and puts it back when
-    /// dropped, taking the directory with it.
-    ///
-    /// The working directory is process-global while the test binary runs its
-    /// tests on parallel threads, so restoring it on the happy path only is not
-    /// enough: a panic in the code under test would unwind past the restore and
-    /// strand every other thread in a directory that has been removed. `Drop`
-    /// runs on the unwind too, so the window is closed.
-    struct CwdGuard {
-        prev: PathBuf,
-        dir: PathBuf,
-    }
-
-    impl CwdGuard {
-        fn enter(dir: PathBuf) -> Self {
-            std::fs::create_dir_all(&dir).expect("create temporary working directory");
-            let prev = std::env::current_dir().expect("read working directory");
-            std::env::set_current_dir(&dir).expect("enter temporary working directory");
-            Self { prev, dir }
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            // Leave before removing, and swallow both failures: panicking while
-            // already unwinding aborts the process, which would replace the real
-            // failure with a less informative one.
-            let _ = std::env::set_current_dir(&self.prev);
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
     /// The engine performs no I/O of its own: the reconstruction report is
     /// returned as data and written by the caller to a path it chooses.
     ///
@@ -1117,11 +1204,28 @@ library(test) {
     /// from library code is the behaviour that made that loss invisible, but it
     /// now guards a deliberate design rather than ratifying an accident.
     ///
-    /// Killed by: `process_library` wrote a `pseudosync.txt` into the process working directory.
+    /// It checks without relocating the process. The working directory is
+    /// process-global and the harness runs these tests on parallel threads, so moving it
+    /// would move the ground under every other test in the binary. Nothing else in the
+    /// tree writes this name, so asserting on the directory the run starts in
+    /// discriminates just as well -- and the precondition makes a file left over from an
+    /// earlier run a loud failure instead of a silent false pass.
+    ///
+    /// Killed by: `process_library` wrote a `pseudosync.txt` into the process working
+    /// directory, reddening the assertion after the run. Reverted, and the file the
+    /// mutation left behind deleted.
     #[test]
     fn engine_does_not_leak_pseudosync_txt_in_cwd() {
-        let guard = CwdGuard::enter(
-            std::env::temp_dir().join(format!("pseudosync_leak_{}", std::process::id())),
+        let leaked = std::env::current_dir()
+            .expect("read working directory")
+            .join("pseudosync.txt");
+
+        // A precondition rather than an assumption: a file already sitting there would
+        // fail this test for a reason that is not this run's.
+        assert!(
+            !leaked.exists(),
+            "{} exists before the run -- remove it; this test can say nothing while it is there",
+            leaked.display()
         );
 
         let mut lib = sample_lib();
@@ -1135,8 +1239,9 @@ library(test) {
         );
 
         assert!(
-            !guard.dir.join("pseudosync.txt").exists(),
-            "pseudosync.txt should not be created in CWD"
+            !leaked.exists(),
+            "the engine wrote {} into the working directory",
+            leaked.display()
         );
     }
 
@@ -1443,9 +1548,11 @@ library(clock_sourced_test) {{
     /// for it. `QN`'s arc is missing `fall_transition`, one of the four that
     /// function requires, so it yields none for `QN` -- while the arc still holds
     /// enough tables for `extract_timing_tables_from_arc` to accept it, which
-    /// puts `QN` among the outputs the conversion undertakes to re-describe. A
-    /// characterised output with no reference is precisely the case the cell is
-    /// skipped for.
+    /// puts `QN` among the outputs the conversion undertakes to re-describe.
+    ///
+    /// So this is the mixed case: `Q` converts, `QN` is skipped at output scope, and
+    /// `A` drives both. Convertibility is decided per output, so the cell is not lost
+    /// for `QN`'s sake -- but `A`'s constraint must be computed over `Q` alone.
     fn half_characterised_lib() -> Liberty {
         liberty_parser::parse_lib(&format!(
             r#"
@@ -1483,43 +1590,85 @@ library(half_characterised_test) {{
         .expect("parse half-characterised fixture")
     }
 
-    /// A cell one of whose characterised outputs yields no reference arc is left
-    /// exactly as the library wrote it.
+    /// A two-output latch whose second output carries a non-reset timing group with
+    /// no characterisation table at all -- `related_pin` and `timing_type` and
+    /// nothing else.
     ///
-    /// What a Liberty consumer must be given here follows from the model, not
-    /// from what the tool emits. `ff` versus `latch` is a cell-wide declaration,
-    /// and so is the promise that every output of the cell is driven by it --
-    /// there is no converting one output and leaving another in its original
-    /// form, because the two share one state element. Converting `HALF` half way
-    /// would not produce a partially useful model but an inconsistent one:
+    /// This is the shape that escapes notice most easily. Such an arc is refused by
+    /// `extract_timing_tables_from_arc`, so `QN` never reaches `source_order`, and a skip
+    /// decision keyed on that map would not consider `QN` at all: it would silently take
+    /// no clock arc, with nothing on standard error and nothing in the report.
+    fn tableless_output_lib() -> Liberty {
+        liberty_parser::parse_lib(&format!(
+            r#"
+library(tableless_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }}
+  cell(TABLELESS) {{
+    latch(IQ, IQN) {{ enable: "G"; data_in: "A"; }}
+    pin(G) {{ direction: input; clock: true; }}
+    pin(A) {{ direction: input; }}
+    pin(Q) {{
+      direction: output;
+      function: "IQ";
+      {}
+    }}
+    pin(QN) {{
+      direction: output;
+      function: "IQN";
+      timing() {{
+        related_pin: "A";
+        timing_type: combinational;
+      }}
+    }}
+  }}
+}}"#,
+            arc("A", "combinational", 1.0)
+        ))
+        .expect("parse tableless-output fixture")
+    }
+
+    /// An input driving both a converted and a skipped output is constrained over
+    /// the converted output alone, and the skipped output keeps what it had.
     ///
-    /// * `QN` would carry no `rising_edge` arc, so timing analysis would have no
-    ///   clock-to-output delay for it and every path it feeds would be left
-    ///   unconstrained rather than pessimistic;
-    /// * in flip-flop mode the arc stripping runs on the branch that emits a
-    ///   clock arc, so `QN` would keep the latch's combinational arc from a pin
-    ///   the same cell declares `next_state` and constrains with setup/hold --
-    ///   one pin declared both a synchronous data input and a combinational
-    ///   driver of the same cell's output;
-    /// * and the damage would not be confined to `QN`. [`constraints_from_arcs`]
-    ///   falls back to the cell-wide mean for an output with no reference of its
-    ///   own, so `A`'s emitted constraint -- averaged over `A -> Q` and
-    ///   `A -> QN` -- would charge the `QN` path a delay measured on `Q`. The
-    ///   constraints would be wrong, not merely incomplete.
+    /// Derivation, entirely from the model. `T` is 2 slews x 2 loads, and a
+    /// reference arc is the middle row and column of a table -- row 1, column 1 for
+    /// a 2x2. `arc("A", .., 1.0)` characterises `Q` as
     ///
-    /// None of those is better than emitting nothing, which is what the cell
-    /// already gets when *no* output yields a reference: `mean_reference_arc`
-    /// returns `None` and `process_cell` bails before it has mutated anything.
-    /// So the assertions are those of an untouched cell. Whole-cell equality
-    /// carries the claim, because the claim is about everything the engine did
-    /// not do -- including that it did not mutate the cell before abandoning it.
+    ///     cell_rise = [[1, 2], [3, 4]]        cell_fall = [[1.5, 2.5], [3.5, 4.5]]
     ///
-    /// Killed by: `process_cell`'s required-output bail moved below phase 3, so `Q` was converted before the cell was abandoned.
+    /// so `Q`'s own reference row is `cell_rise = [3, 4]`, `cell_fall = [3.5, 4.5]`.
+    /// `QN` supplies no reference -- its arc has no `fall_transition`, one of the
+    /// four a complete reference needs -- so the converted set is `{Q}` and the
+    /// cell-wide mean is `ref(Q)` itself.
+    ///
+    /// `A` drives both outputs. Constrained over the converted output alone, its
+    /// arc mean is `Q`'s arc unchanged, sampled at the reference column:
+    ///
+    ///     setup_rise(A) = [2, 4]     - 4   = [-2, 0]
+    ///     setup_fall(A) = [2.5, 4.5] - 4.5 = [-2, 0]
+    ///
+    /// and hold is the negation, `[2, 0]`. Were `QN` allowed into the arithmetic,
+    /// `A` would be charged a delay measured on an output nothing characterised
+    /// against the clock -- a number describing no real path.
+    ///
+    /// Killed by: the retain restricting the arc maps to converted outputs dropped, AND
+    /// `ref_sum` taking `ref_arcs.get(outpin).map_or(select(mean_ref)[col], |r| select(r)[col])`
+    /// so that a missing reference falls back to the cell-wide mean. `QN`'s arc then reaches
+    /// the arithmetic and `A` is charged a delay measured on `Q`. Observed to redden this
+    /// test alone, and through the constraint values it pins rather than through a panic.
+    ///
+    /// Dropping the retain alone also reddens it, by way of the guard that then fires, but
+    /// reddens the latch-mode test with it: that shows only the guard is reachable, not what
+    /// the constraint should be.
     #[test]
-    fn a_cell_with_an_uncharacterisable_output_is_left_verbatim() {
-        let original = half_characterised_lib();
+    fn an_input_driving_a_converted_and_a_skipped_output_is_constrained_over_the_converted_one() {
         let mut lib = half_characterised_lib();
-        process_library(
+        let produced = process_library(
             &mut lib[0],
             "G",
             &Regex::new("(R|S)N?").unwrap(),
@@ -1529,44 +1678,465 @@ library(half_characterised_test) {{
         );
         let cell = lib[0].get_cell("HALF").expect("HALF");
 
-        assert_eq!(
-            format!("{:?}", original[0].get_cell("HALF").expect("HALF")),
-            format!("{:?}", cell),
-            "a cell that cannot be converted comes through verbatim"
-        );
+        // The converted output gets the flop model: its combinational arc is
+        // replaced by the one clock arc, carrying its own reference row.
+        let q = cell.get_pin("Q").expect("Q");
+        assert_eq!(arc_census(q), census(&[("G", "rising_edge", 1)]));
+        let clock_arc = arcs_of_type(q, "rising_edge");
+        let cell_rise: Vec<&Group> = clock_arc[0].iter_subgroups_of_type("cell_rise").collect();
+        assert_eq!(table_values(cell_rise[0]), vec![3.0, 4.0]);
 
-        // What that means where a consumer would read it. The state element is
-        // still the latch the library declared, ...
-        assert_eq!(cell.iter_subgroups_of_type("ff").count(), 0);
-        let latches: Vec<&Group> = cell.iter_subgroups_of_type("latch").collect();
-        assert_eq!(latches.len(), 1, "the latch group survives");
-        assert_eq!(latches[0].simple_attribute("enable").unwrap().string(), "G");
+        // The skipped output keeps exactly the arc the input wrote it, and gains no
+        // clock arc: an output with nothing being split has no delay to state.
+        let qn = cell.get_pin("QN").expect("QN");
+        assert_eq!(arc_census(qn), census(&[("A", "combinational", 1)]));
 
-        // ... each output carries the one arc [`half_characterised_lib`] writes it
-        // and nothing else, so neither gained a clock-to-output delay, ...
-        for outpin in ["Q", "QN"] {
-            let pin = cell.get_pin(outpin).expect(outpin);
-            assert_eq!(
-                arc_census(pin),
-                census(&[("A", "combinational", 1)]),
-                "{} keeps the arc the library wrote it and gains no clock arc",
-                outpin
-            );
-        }
-
-        // ... and `A` is not constrained against a clock this cell does not have.
+        // `A`'s constraints, over the converted output alone.
         let a = cell.get_pin("A").expect("A");
-        assert!(
-            a.simple_attribute("nextstate_type").is_none(),
-            "A must not be declared a synchronous data input"
+        assert_eq!(
+            a.simple_attribute("nextstate_type").expect("data").expr(),
+            "data"
         );
-        for timing_type in ["setup_rising", "hold_rising"] {
-            assert!(
-                arcs_of_type(a, timing_type).is_empty(),
-                "A must not be given a {}",
-                timing_type
-            );
+        for (timing_type, expected) in [("setup_rising", -2.0), ("hold_rising", 2.0)] {
+            let groups = arcs_of_type(a, timing_type);
+            assert_eq!(groups.len(), 1, "A carries one {}", timing_type);
+            for table_type in ["rise_constraint", "fall_constraint"] {
+                let tables: Vec<&Group> = groups[0].iter_subgroups_of_type(table_type).collect();
+                assert_eq!(
+                    table_values(tables[0]),
+                    vec![expected, 0.0],
+                    "{} {}",
+                    timing_type,
+                    table_type
+                );
+            }
         }
+
+        // Convertibility is decided per output, so one skipped output does not cost
+        // the cell the output that can be converted: the state element is a flop.
+        assert_eq!(cell.iter_subgroups_of_type("latch").count(), 0);
+        assert_eq!(cell.iter_subgroups_of_type("ff").count(), 1);
+
+        // And the skip reached the report, not only standard error.
+        assert_eq!(
+            produced.refusals,
+            vec![Refusal {
+                library: "half_characterised_test".to_owned(),
+                cell: "HALF".to_owned(),
+                output: Some("QN".to_owned()),
+                reason: "no non-reset source supplies a complete reference".to_owned(),
+            }]
+        );
+    }
+
+    /// An output whose only non-reset arc carries no characterisation table is
+    /// skipped and recorded, not passed over in silence.
+    ///
+    /// Deciding this over the cell's output leaves is what makes it visible. Such an
+    /// output never enters `source_order`, because the arc is refused before it gets
+    /// there, so a decision keyed on that map would not consider this output at all.
+    ///
+    /// Killed by: the skipped set was built from `source_order` rather than from the
+    /// cell's output leaves, so `QN` produced no refusal at all.
+    #[test]
+    fn an_output_whose_only_arc_carries_no_table_is_skipped_and_recorded() {
+        let mut lib = tableless_output_lib();
+        let produced = process_library(
+            &mut lib[0],
+            "G",
+            &Regex::new("(R|S)N?").unwrap(),
+            false,
+            ReferenceMode::PerOutput,
+            WhenMerge::Mean,
+        );
+        let cell = lib[0].get_cell("TABLELESS").expect("TABLELESS");
+
+        // The first output still converts.
+        assert_eq!(
+            arc_census(cell.get_pin("Q").expect("Q")),
+            census(&[("G", "rising_edge", 1)])
+        );
+
+        // The second keeps its one tableless arc and gains no clock arc.
+        assert_eq!(
+            arc_census(cell.get_pin("QN").expect("QN")),
+            census(&[("A", "combinational", 1)])
+        );
+
+        // The refusal names it, with the reason distinguishing it from an output
+        // that did carry tables but supplied no complete reference.
+        assert_eq!(
+            produced.refusals,
+            vec![Refusal {
+                library: "tableless_test".to_owned(),
+                cell: "TABLELESS".to_owned(),
+                output: Some("QN".to_owned()),
+                reason: "no non-reset timing arc carrying a characterisation table".to_owned(),
+            }]
+        );
+    }
+
+    /// Skipped-ness is mode-independent: the same output is skipped under `--latch`,
+    /// where what differs is only what a skip means.
+    ///
+    /// Under `--latch` the original arcs survive by construction, so a converted
+    /// output gains the pseudo arc *alongside* them and a skipped output simply
+    /// gains nothing. The latch group stays a latch either way.
+    ///
+    /// Killed by: phase 3's skip was made conditional on `!latch`, so under `--latch`
+    /// the skipped output fell through and was handed the cell-wide mean arc --
+    /// giving `QN` a clock-to-output delay for a path nothing characterised.
+    #[test]
+    fn under_latch_mode_a_skipped_output_gains_nothing_and_the_converted_one_gains_one_arc() {
+        let mut lib = half_characterised_lib();
+        process_library(
+            &mut lib[0],
+            "G",
+            &Regex::new("(R|S)N?").unwrap(),
+            true,
+            ReferenceMode::PerOutput,
+            WhenMerge::Mean,
+        );
+        let cell = lib[0].get_cell("HALF").expect("HALF");
+
+        // Converted: the original arc is preserved and the pseudo arc added to it.
+        assert_eq!(
+            arc_census(cell.get_pin("Q").expect("Q")),
+            census(&[("A", "combinational", 1), ("G", "rising_edge", 1)])
+        );
+
+        // Skipped: the original arc alone, exactly as under the default mode.
+        assert_eq!(
+            arc_census(cell.get_pin("QN").expect("QN")),
+            census(&[("A", "combinational", 1)])
+        );
+
+        // The latch model keeps the latch group; this is the sign-off library.
+        assert_eq!(cell.iter_subgroups_of_type("ff").count(), 0);
+        assert_eq!(cell.iter_subgroups_of_type("latch").count(), 1);
+    }
+
+    // --- a cell whose outputs sit on different lookup templates -------------
+
+    /// Two candidate cells: the first with its two outputs characterised on two
+    /// different declared two-axis templates, the second an ordinary convertible cell.
+    ///
+    /// A cell like the first is one the conversion cannot describe. Its pseudo template
+    /// pair is derived per cell from one template, and averaging references indexed on
+    /// different axes would combine quantities that are not comparable. A bare assertion on
+    /// that condition would abort the entire run and take every other cell with it, which is
+    /// what the second cell here guards against.
+    fn mixed_template_lib() -> Liberty {
+        liberty_parser::parse_lib(
+            r#"
+library(mixed_template_test) {
+  lu_table_template(TA) {
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }
+  lu_table_template(TB) {
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.02, 0.2");
+    index_2("0.006, 0.06");
+  }
+  cell(MIXED) {
+    latch(IQ, IQN) { enable: "G"; data_in: "A"; }
+    pin(G) { direction: input; clock: true; }
+    pin(A) { direction: input; }
+    pin(Q) {
+      direction: output;
+      function: "IQ";
+      timing() {
+        related_pin: "A";
+        timing_type: combinational;
+        cell_rise(TA) { values("1.0, 2.0", "3.0, 4.0"); }
+        cell_fall(TA) { values("1.5, 2.5", "3.5, 4.5"); }
+        rise_transition(TA) { values("0.1, 0.2", "0.3, 0.4"); }
+        fall_transition(TA) { values("0.11, 0.21", "0.31, 0.41"); }
+      }
+    }
+    pin(QN) {
+      direction: output;
+      function: "IQN";
+      timing() {
+        related_pin: "A";
+        timing_type: combinational;
+        cell_rise(TB) { values("2.0, 3.0", "4.0, 5.0"); }
+        cell_fall(TB) { values("2.5, 3.5", "4.5, 5.5"); }
+        rise_transition(TB) { values("0.2, 0.3", "0.4, 0.5"); }
+        fall_transition(TB) { values("0.21, 0.31", "0.41, 0.51"); }
+      }
+    }
+  }
+  cell(PLAIN) {
+    latch(IQ, IQN) { enable: "G"; data_in: "A"; }
+    pin(G) { direction: input; clock: true; }
+    pin(A) { direction: input; }
+    pin(Q) {
+      direction: output;
+      function: "IQ";
+      timing() {
+        related_pin: "A";
+        timing_type: combinational;
+        cell_rise(TA) { values("1.0, 2.0", "3.0, 4.0"); }
+        cell_fall(TA) { values("1.5, 2.5", "3.5, 4.5"); }
+        rise_transition(TA) { values("0.1, 0.2", "0.3, 0.4"); }
+        fall_transition(TA) { values("0.11, 0.21", "0.31, 0.41"); }
+      }
+    }
+  }
+}
+"#,
+        )
+        .expect("parse mixed-template fixture")
+    }
+
+    /// A cell whose outputs draw references from different templates is flagged and
+    /// skipped, and every other cell in the library still converts.
+    ///
+    /// The run continues: one cell the conversion cannot describe is not a reason to
+    /// discard the rest, and a Liberty file holds many cells in its single library
+    /// block. The check is made before anything is mutated, so the cell is emitted
+    /// exactly as it arrived -- whole-cell equality carries that, because the claim is
+    /// about everything the engine did not do to it.
+    ///
+    /// Killed by: the template-agreement check moved below phase 3, so `MIXED`'s
+    /// convertible output was given its clock arc before the cell was abandoned and the
+    /// whole-cell comparison no longer matched.
+    #[test]
+    fn a_cell_whose_outputs_sit_on_different_templates_is_skipped_and_the_others_convert() {
+        let original = mixed_template_lib();
+        let mut lib = mixed_template_lib();
+        let produced = process_library(
+            &mut lib[0],
+            "G",
+            &Regex::new("(R|S)N?").unwrap(),
+            false,
+            ReferenceMode::PerOutput,
+            WhenMerge::Mean,
+        );
+
+        // Verbatim, and never mutated on the way to being abandoned.
+        let mixed = lib[0].get_cell("MIXED").expect("MIXED");
+        assert_eq!(
+            format!("{:?}", original[0].get_cell("MIXED").expect("MIXED")),
+            format!("{:?}", mixed),
+            "a cell the conversion cannot describe comes through verbatim"
+        );
+        assert_eq!(mixed.iter_subgroups_of_type("latch").count(), 1);
+        assert_eq!(mixed.iter_subgroups_of_type("ff").count(), 0);
+
+        // The part an abort would destroy: the rest of the library.
+        let plain = lib[0].get_cell("PLAIN").expect("PLAIN");
+        assert_eq!(plain.iter_subgroups_of_type("ff").count(), 1);
+        assert_eq!(
+            arc_census(plain.get_pin("Q").expect("Q")),
+            census(&[("G", "rising_edge", 1)])
+        );
+
+        // Recorded at cell scope: no output named, because the whole cell was left.
+        assert_eq!(
+            produced.refusals,
+            vec![Refusal {
+                library: "mixed_template_test".to_owned(),
+                cell: "MIXED".to_owned(),
+                output: None,
+                reason: "arcs on more than one domain: TA at 2x2, TB at 2x2".to_owned(),
+            }]
+        );
+    }
+
+    /// Two outputs on ONE declared template whose tables carry different dimensions:
+    /// `Q` at 2x3 and `QN` at 2x2.
+    ///
+    /// Differing dimensions are a differing template whatever the name says, so this is the
+    /// same refusal as two different names. Note the trap this fixture exists for: a
+    /// reference arc's `col` and `row` are HALVED index positions, so 3/2 and 2/2 are both 1
+    /// — comparing those instead of the dimensions themselves lets this pair through, and the
+    /// run then dies adding arrays of different shapes.
+    fn same_name_mixed_dimensions_lib() -> Liberty {
+        liberty_parser::parse_lib(
+            r#"
+library(mixed_dimensions_test) {
+  lu_table_template(TA) {
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }
+  cell(WIDE) {
+    latch(IQ, IQN) { enable: "G"; data_in: "A"; }
+    pin(G) { direction: input; clock: true; }
+    pin(A) { direction: input; }
+    pin(Q) {
+      direction: output;
+      function: "IQ";
+      timing() {
+        related_pin: "A";
+        timing_type: combinational;
+        cell_rise(TA) { values("1.0, 2.0, 3.0", "4.0, 5.0, 6.0"); }
+        cell_fall(TA) { values("1.5, 2.5, 3.5", "4.5, 5.5, 6.5"); }
+        rise_transition(TA) { values("0.1, 0.2, 0.3", "0.4, 0.5, 0.6"); }
+        fall_transition(TA) { values("0.11, 0.21, 0.31", "0.41, 0.51, 0.61"); }
+      }
+    }
+    pin(QN) {
+      direction: output;
+      function: "IQN";
+      timing() {
+        related_pin: "A";
+        timing_type: combinational;
+        cell_rise(TA) { values("2.0, 3.0", "4.0, 5.0"); }
+        cell_fall(TA) { values("2.5, 3.5", "4.5, 5.5"); }
+        rise_transition(TA) { values("0.2, 0.3", "0.4, 0.5"); }
+        fall_transition(TA) { values("0.21, 0.31", "0.41, 0.51"); }
+      }
+    }
+  }
+}
+"#,
+        )
+        .expect("parse mixed-dimensions fixture")
+    }
+
+    /// Arcs on one template name but different dimensions refuse the cell, rather than
+    /// killing the run.
+    ///
+    /// Killed by: the domain judged by template name alone —
+    /// `domains.iter().map(|(t, _)| t).collect::<BTreeSet<_>>().len() > 1` — so the
+    /// dimensions stop counting while the message still reports them. The cell then passes
+    /// the check and the run dies, `ShapeError/IncompatibleShape` while adding a 2x3
+    /// reference to a 2x2 one, which is the failure this refusal exists to prevent.
+    /// Observed to redden this test alone: the other two domain tests disagree on the name
+    /// as well, so they are still caught.
+    ///
+    /// Dropping the dimensions from the domain key itself also reddens this test, but it
+    /// reddens the other two with it, because it changes the dimensions the message
+    /// prints. That mutation shows only that the message is asserted, so it is not the one
+    /// recorded here.
+    #[test]
+    fn arcs_on_one_template_name_with_different_dimensions_refuse_the_cell() {
+        let original = same_name_mixed_dimensions_lib();
+        let mut lib = same_name_mixed_dimensions_lib();
+        let produced = process_library(
+            &mut lib[0],
+            "G",
+            &Regex::new("(R|S)N?").unwrap(),
+            false,
+            ReferenceMode::PerOutput,
+            WhenMerge::Mean,
+        );
+
+        let cell = lib[0].get_cell("WIDE").expect("WIDE");
+        assert_eq!(
+            format!("{:?}", original[0].get_cell("WIDE").expect("WIDE")),
+            format!("{:?}", cell),
+            "the cell comes through verbatim rather than the run dying"
+        );
+
+        // The message names the dimensions, because the name alone would read as a
+        // template disagreeing with itself.
+        assert_eq!(
+            produced.refusals,
+            vec![Refusal {
+                library: "mixed_dimensions_test".to_owned(),
+                cell: "WIDE".to_owned(),
+                output: None,
+                reason: "arcs on more than one domain: TA at 2x2, TA at 2x3".to_owned(),
+            }]
+        );
+    }
+
+    /// One timing group whose four families sit on two declared two-axis templates with
+    /// different dimensions: the delays on `T2` (2 rows), the transitions on `T3` (3).
+    fn mixed_family_lib() -> Liberty {
+        liberty_parser::parse_lib(
+            r#"
+library(mixed_family_test) {
+  lu_table_template(T2) {
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }
+  lu_table_template(T3) {
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1, 1.0");
+    index_2("0.005, 0.05");
+  }
+  cell(SPLITFAM) {
+    latch(IQ, IQN) { enable: "G"; data_in: "A"; }
+    pin(G) { direction: input; clock: true; }
+    pin(A) { direction: input; }
+    pin(Q) {
+      direction: output;
+      function: "IQ";
+      timing() {
+        related_pin: "A";
+        timing_type: combinational;
+        cell_rise(T2) { values("1.0, 2.0", "3.0, 4.0"); }
+        cell_fall(T2) { values("1.5, 2.5", "3.5, 4.5"); }
+        rise_transition(T3) { values("0.1, 0.2", "0.3, 0.4", "0.5, 0.6"); }
+        fall_transition(T3) { values("0.11, 0.21", "0.31, 0.41", "0.51, 0.61"); }
+      }
+    }
+  }
+}
+"#,
+        )
+        .expect("parse mixed-family fixture")
+    }
+
+    /// The four families of one timing group must agree on their domain too, not only
+    /// the outputs of a cell with each other.
+    ///
+    /// This is the case that yields silently wrong numbers rather than a failure if it is
+    /// not refused. The axis check reads the template of the first present family alone,
+    /// and every table is sliced at a row taken from `cell_rise`, so a transition family
+    /// on a taller template would have one of its rows published under a template derived
+    /// from the delays': exit 0, no warning, wrong values in the product.
+    ///
+    /// Killed by: the domains collected per timing GROUP — inserting only the
+    /// representative `(lut_template, dimensions)` — instead of per family. The
+    /// disagreement inside the group then becomes invisible and the cell converts.
+    /// Neither of the other two domain tests reddens under it: in both of those the
+    /// representative template already differs between outputs.
+    #[test]
+    fn one_timing_groups_families_must_agree_on_their_domain() {
+        let original = mixed_family_lib();
+        let mut lib = mixed_family_lib();
+        let produced = process_library(
+            &mut lib[0],
+            "G",
+            &Regex::new("(R|S)N?").unwrap(),
+            false,
+            ReferenceMode::PerOutput,
+            WhenMerge::Mean,
+        );
+
+        let cell = lib[0].get_cell("SPLITFAM").expect("SPLITFAM");
+        assert_eq!(
+            format!("{:?}", original[0].get_cell("SPLITFAM").expect("SPLITFAM")),
+            format!("{:?}", cell),
+            "the cell comes through verbatim rather than emitting a mixed arc"
+        );
+        // Specifically: no clock arc was published carrying a transition row taken from
+        // the taller template.
+        assert!(arcs_of_type(cell.get_pin("Q").expect("Q"), "rising_edge").is_empty());
+
+        assert_eq!(
+            produced.refusals,
+            vec![Refusal {
+                library: "mixed_family_test".to_owned(),
+                cell: "SPLITFAM".to_owned(),
+                output: None,
+                reason: "arcs on more than one domain: T2 at 2x2, T3 at 3x2".to_owned(),
+            }]
+        );
     }
 
     // --- constraint arithmetic at full characterisation size ----------------
@@ -1779,14 +2349,13 @@ library({}_test) {{
 
     // --- the real ASCEND libraries -----------------------------------------
     //
-    // These replace the golden-file comparisons the old suite ran against the
-    // committed `_pseudoflop.lib` and `_pseudolatch.lib` outputs. A golden file
-    // either passes vacuously or fails on every intended change, so the coverage
-    // is restated as semantic assertions and the golden files are not read.
+    // Semantic assertions against the real libraries, deliberately not byte comparisons
+    // against the committed `_pseudoflop.lib` and `_pseudolatch.lib` outputs: a golden
+    // file either passes vacuously or fails on every intended change, so those files are
+    // documentation and are not read here.
     //
-    // The paths go through `CARGO_MANIFEST_DIR` rather than being relative,
-    // because `engine_does_not_leak_pseudosync_txt_in_cwd` above changes the
-    // process working directory and shares this test binary.
+    // The paths go through `CARGO_MANIFEST_DIR` rather than being relative, because a test
+    // must not depend on the directory it happens to be run from.
 
     const ASCEND_FF_1V25: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1907,6 +2476,7 @@ library({}_test) {{
             WhenMerge::Mean,
         );
         let report = reports
+            .cells
             .iter()
             .find(|r| r.cell == "RACELEM21X1")
             .expect("a report for RACELEM21X1");

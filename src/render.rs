@@ -2,7 +2,7 @@
 //! and the sections they are laid out in.
 
 use crate::arcs::ReferenceMode;
-use crate::report::{ArcError, CellReport, ConditionedArc};
+use crate::report::{ArcError, CellReport, ConditionedArc, Refusal};
 use gpoint::GPoint;
 use itertools::Itertools;
 use ndarray::prelude::*;
@@ -18,27 +18,29 @@ fn dump<D: Dimension>(
     sink: &mut dyn Write,
     label: &str,
     a: &ArrayBase<ndarray::OwnedRepr<f64>, D>,
-) {
-    let _ = writeln!(sink, "{}", label);
+) -> Result<(), Box<dyn Error>> {
+    writeln!(sink, "{}", label)?;
     let mut table = prettytable::Table::new();
     for row in a.rows() {
         table.add_row(prettytable::Row::new(
             row.iter().map(|v| prettytable::Cell::new(&g(*v))).collect(),
         ));
     }
-    let _ = writeln!(sink, "{}", table);
+    writeln!(sink, "{}", table)?;
+
+    Ok(())
 }
 
-fn dump_cell(sink: &mut dyn Write, r: &CellReport) {
-    let _ = writeln!(sink, "cell {} of library {}", r.cell, r.library);
+fn dump_cell(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>> {
+    writeln!(sink, "cell {} of library {}", r.cell, r.library)?;
 
     // The reduced arcs the constraints were derived from. The per-condition
     // originals are printed with their comparisons below.
     for ((src, dst), v) in &r.cell_rise_arcs {
-        dump(sink, &format!("mean rise arc {} -> {}:", src, dst), v);
+        dump(sink, &format!("mean rise arc {} -> {}:", src, dst), v)?;
     }
     for ((src, dst), v) in &r.cell_fall_arcs {
-        dump(sink, &format!("mean fall arc {} -> {}:", src, dst), v);
+        dump(sink, &format!("mean fall arc {} -> {}:", src, dst), v)?;
     }
 
     for (out, v) in &r.ref_arcs {
@@ -46,12 +48,12 @@ fn dump_cell(sink: &mut dyn Write, r: &CellReport) {
             sink,
             &format!("ref rise arc {} -> {} (row {}):", v.related_pin, out, v.row),
             &v.cell_rise,
-        );
+        )?;
         dump(
             sink,
             &format!("ref fall arc {} -> {} (row {}):", v.related_pin, out, v.row),
             &v.cell_fall,
-        );
+        )?;
     }
 
     dump(
@@ -61,14 +63,14 @@ fn dump_cell(sink: &mut dyn Write, r: &CellReport) {
             r.mean_ref.col, r.mean_ref.row
         ),
         &r.mean_ref.cell_rise,
-    );
-    dump(sink, "mean ref fall arc:", &r.mean_ref.cell_fall);
+    )?;
+    dump(sink, "mean ref fall arc:", &r.mean_ref.cell_fall)?;
 
     for (k, v) in &r.setup_rise {
-        dump(sink, &format!("setup rise arc {}:", k), v);
+        dump(sink, &format!("setup rise arc {}:", k), v)?;
     }
     for (k, v) in &r.setup_fall {
-        dump(sink, &format!("setup fall arc {}:", k), v);
+        dump(sink, &format!("setup fall arc {}:", k), v)?;
     }
 
     for a in &r.arcs {
@@ -80,11 +82,13 @@ fn dump_cell(sink: &mut dyn Write, r: &CellReport) {
         };
         let head = format!("{} arc {} -> {}{}", a.edge, a.source, a.output, condition);
 
-        dump(sink, &format!("{}\noriginal:", head), &a.original);
-        dump(sink, "reconstructed:", &a.reconstructed);
-        dump(sink, "error:", &a.error);
-        let _ = writeln!(sink, "{}\n", stat_line(a));
+        dump(sink, &format!("{}\noriginal:", head), &a.original)?;
+        dump(sink, "reconstructed:", &a.reconstructed)?;
+        dump(sink, "error:", &a.error)?;
+        writeln!(sink, "{}\n", stat_line(a))?;
     }
+
+    Ok(())
 }
 
 /// Statistics of an arbitrary residual, in the same shape as `stat_line`.
@@ -120,16 +124,16 @@ fn stats_of(err: &Array2<f64>, reference: &Array2<f64>) -> String {
 /// one mean of them. This measures that mean against each state it stands in
 /// for, so the reduction's error can be read separately from the error of the
 /// separable setup-plus-delay form that consumes it.
-fn dump_reduction(sink: &mut dyn Write, r: &CellReport) {
-    let _ = writeln!(
+fn dump_reduction(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>> {
+    writeln!(
         sink,
         "== when-reduction error, cell {} of library {} ==",
         r.cell, r.library
-    );
-    let _ = writeln!(
+    )?;
+    writeln!(
         sink,
         "mean arc measured against each condition it replaces, no split involved\n"
-    );
+    )?;
 
     for (edge, means) in [("rise", &r.cell_rise_arcs), ("fall", &r.cell_fall_arcs)] {
         for ((source, output), mean) in means.iter() {
@@ -165,7 +169,7 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) {
             let mean_of_scales =
                 condition_scales.iter().sum::<f64>() / condition_scales.len().max(1) as f64;
 
-            let _ = writeln!(
+            writeln!(
                 sink,
                 "{} arc {} -> {}: mean of {} condition(s)  |  mean scale {}  mean-of-condition scales {}",
                 edge,
@@ -174,7 +178,7 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) {
                 conditions.len(),
                 g(scale_of(mean)),
                 g(mean_of_scales)
-            );
+            )?;
 
             let mut worst: f64 = 0.0;
             for c in &conditions {
@@ -188,7 +192,7 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) {
                 }
                 let err = mean - raw;
                 worst = worst.max(err.iter().fold(0.0_f64, |m, v| m.max(v.abs())));
-                let _ = writeln!(
+                writeln!(
                     sink,
                     "  {:<44} {}",
                     match (&c.timing_type, &c.when) {
@@ -198,7 +202,7 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) {
                         (None, None) => "unconditioned".to_owned(),
                     },
                     stats_of(&err, raw)
-                );
+                )?;
             }
             // What is actually being pooled under this one key. Two arcs on the
             // same edge between the same pins are still different arcs if their
@@ -227,31 +231,33 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) {
                 .iter()
                 .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
             if spread.0 > 0.0 && spread.1 / spread.0 > 2.0 {
-                let _ = writeln!(
+                writeln!(
                     sink,
                     "  WIDE SPREAD: conditions range {} .. {} ({:.1}x) -- the merged arc \n               represents no single operating state",
                     g(spread.0),
                     g(spread.1),
                     spread.1 / spread.0
-                );
+                )?;
             }
             // Liberty's combinational / combinational_dir split is a grouping
-            // artifact; the arcs it contains are what matter. Listed only so the
+            // artefact; the arcs it contains are what matter. Listed only so the
             // spread above can be traced back to states.
-            let _ = writeln!(sink, "  conditions by declared kind:");
+            writeln!(sink, "  conditions by declared kind:")?;
             for (kind, (n, mag, neg)) in &kinds {
-                let _ = writeln!(
+                writeln!(
                     sink,
                     "    {:<42} x{:<3} |mean| {:>10}  neg/table {:.0}",
                     kind,
                     n,
                     g(mag / *n as f64),
                     neg / *n as f64
-                );
+                )?;
             }
-            let _ = writeln!(sink, "  worst |mean - condition|: {}\n", g(worst));
+            writeln!(sink, "  worst |mean - condition|: {}\n", g(worst))?;
         }
     }
+
+    Ok(())
 }
 
 /// One-line statistical summary of a single comparison.
@@ -332,10 +338,10 @@ fn write_summary(sink: &mut dyn Write, arcs: &[&ArcError]) -> Result<(), Box<dyn
         )
     };
 
-    // `dedup` would only drop *adjacent* repeats, and the reports accumulate
-    // across every library in the file, so one cell defined in two libraries
-    // comes back as two non-adjacent runs and would be rolled up twice. Order is
-    // first appearance, not sorted: the rollup lines are compared between runs.
+    // `dedup` would only drop *adjacent* repeats. Nothing in this function's signature
+    // guarantees that one cell's arcs arrive adjacent, so it does not assume they do:
+    // `unique` is correct for any ordering, `dedup` only for one. Order is first
+    // appearance, not sorted, because the rollup lines are compared between runs.
     let cells: Vec<&str> = arcs.iter().map(|a| a.cell.as_str()).unique().collect();
     for cell in cells {
         rollup(cell, &|a: &ArcError| a.cell == cell, sink)?;
@@ -347,6 +353,7 @@ fn write_summary(sink: &mut dyn Write, arcs: &[&ArcError]) -> Result<(), Box<dyn
 pub(crate) fn write_report(
     sink: &mut dyn Write,
     reports: &[CellReport],
+    refusals: &[Refusal],
     mode: ReferenceMode,
     summary_only: bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -359,13 +366,37 @@ pub(crate) fn write_report(
         "residual of reconstructing each arc as setup + clock-to-output delay\n"
     )?;
 
+    // Before the tables, and under `--report-summary-only` as well. That flag limits
+    // the tables; a refusal is not a table. A run with skips exits 0, so the report
+    // and standard error are the only signals it has -- suppressing refusals here
+    // would make the flag a mode in which skips vanish from the machine-readable
+    // artefact altogether.
+    if !refusals.is_empty() {
+        writeln!(sink, "refusals")?;
+        for r in refusals {
+            match &r.output {
+                Some(output) => writeln!(
+                    sink,
+                    "refused: cell {} of library {}, output {}: {}",
+                    r.cell, r.library, output, r.reason
+                )?,
+                None => writeln!(
+                    sink,
+                    "refused: cell {} of library {}: {}",
+                    r.cell, r.library, r.reason
+                )?,
+            }
+        }
+        writeln!(sink)?;
+    }
+
     if !summary_only {
         // The reduction is upstream of the split, so it is reported first.
         for r in reports {
-            dump_reduction(sink, r);
+            dump_reduction(sink, r)?;
         }
         for r in reports {
-            dump_cell(sink, r);
+            dump_cell(sink, r)?;
         }
     }
 
@@ -380,13 +411,13 @@ mod tests {
     use super::*;
     use crate::arcs::{RefArc, ReferenceMode, WhenMerge};
     use std::collections::BTreeMap;
-    use std::io::Write;
+    use std::io::{self, Write};
 
     /// Every renderer takes a `&mut dyn Write`, so a report can be produced into
     /// memory: none of these tests touch the filesystem or the binary.
-    fn rendered(render: impl FnOnce(&mut dyn Write)) -> String {
+    fn rendered(render: impl FnOnce(&mut dyn Write) -> Result<(), Box<dyn Error>>) -> String {
         let mut sink: Vec<u8> = Vec::new();
-        render(&mut sink);
+        render(&mut sink).expect("a Vec accepts every byte, so rendering into memory cannot fail");
         String::from_utf8(sink).expect("the renderers emit utf-8")
     }
 
@@ -516,7 +547,11 @@ mod tests {
 
     /// A 1-D arc -- a reference or a setup constraint -- is one row, not a column.
     ///
-    /// Killed by: `dump` emitted only the first value of each row -- `row.iter().take(1)`.
+    /// Killed by: `dump` special-cased `a.ndim() == 1`, emitting one single-cell row per
+    /// element instead of one row holding all of them. Observed to redden this test
+    /// alone: `dump_writes_the_label_then_one_table_row_per_array_row` stays green under
+    /// it, because the two-dimensional path is left untouched.
+
     #[test]
     fn dump_renders_a_one_dimensional_array_as_a_single_row() {
         let a = Array1::from(vec![1.0, 2.0, 3.0]);
@@ -524,6 +559,94 @@ mod tests {
 
         assert_eq!(out.lines().next(), Some("setup rise arc D:"));
         assert_eq!(table_rows(&out), vec![vec!["1", "2", "3"]]);
+    }
+
+    // --- dump: a line that could not be stored is not a success ------------
+
+    /// A sink that fails the first write carrying some nominated text and accepts
+    /// every other byte.
+    ///
+    /// The write is named by what it contains rather than by a call index, because
+    /// one `writeln!` becomes however many `write` calls the formatting machinery
+    /// chooses -- an index would be a number read off a run rather than one derived
+    /// from what the renderer emits.
+    ///
+    /// A sink that failed *every* write would redden both tests below at once, and
+    /// so could not show that any particular site propagates its own error.
+    struct FailOn {
+        needle: &'static str,
+        failed: bool,
+    }
+
+    impl FailOn {
+        fn carrying(needle: &'static str) -> Self {
+            FailOn {
+                needle,
+                failed: false,
+            }
+        }
+    }
+
+    impl Write for FailOn {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if !self.failed && String::from_utf8_lossy(buf).contains(self.needle) {
+                self.failed = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "no space left on device",
+                ));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The label carries no digit and the table carries nothing else, so each test
+    /// below can name its own write without naming the other's.
+    const LABEL: &str = "mean rise arc:";
+
+    /// Killed by: `dump`'s label write restored to `let _ = writeln!(..)`, which
+    /// leaves the table write to succeed and `dump` to report Ok. The table test
+    /// below stays green under that, so this pins the label write alone.
+    #[test]
+    fn dump_reports_a_label_that_could_not_be_stored() {
+        let a = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let mut sink = FailOn::carrying(LABEL);
+
+        let err = dump(&mut sink, LABEL, &a)
+            .expect_err("a report line that could not be stored is not a line that was written");
+
+        // The error is the sink's own, raised as it was, rather than some unrelated
+        // failure that happens to also be an Err.
+        assert_eq!(
+            err.downcast_ref::<io::Error>().expect("io error").kind(),
+            io::ErrorKind::StorageFull
+        );
+    }
+
+    /// Killed by: `dump`'s table write restored to `let _ = writeln!(..)`, so the
+    /// label wrote fine and `dump` reported Ok having lost the entire table. The
+    /// label test above stays green under that, so this pins the table write alone.
+    ///
+    /// The remaining ten sites are carried by the signature change rather than by a
+    /// test each: with these three renderers returning Result, a discarded write at any
+    /// of them does not compile.
+    #[test]
+    fn dump_reports_a_table_that_could_not_be_stored() {
+        let a = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        // A table value. `LABEL` holds no digit, so this cannot match the label write.
+        let mut sink = FailOn::carrying("3");
+
+        let err = dump(&mut sink, LABEL, &a)
+            .expect_err("a table that could not be stored is not a table that was written");
+
+        assert_eq!(
+            err.downcast_ref::<io::Error>().expect("io error").kind(),
+            io::ErrorKind::StorageFull
+        );
     }
 
     // --- stats_of / stat_line ----------------------------------------------
@@ -569,9 +692,14 @@ mod tests {
 
     // --- write_summary -----------------------------------------------------
 
-    /// One Liberty file can hold several libraries and the reports accumulate
-    /// across all of them, so the arcs of one cell need not be adjacent. Dropping
-    /// only adjacent repeats would roll that cell up twice.
+    /// `write_summary` is handed a list of arcs and must not depend on their order, so a
+    /// cell whose arcs are not adjacent is still rolled up once. Dropping only adjacent
+    /// repeats would roll it up twice.
+    ///
+    /// The arcs are supplied directly here rather than produced by a run: the point is
+    /// what this function does with an ordering, not which orderings the engine can
+    /// produce. A Liberty file holds one library block, so today the engine emits one
+    /// contiguous run per cell — this pins that the rollup does not rest on that.
     ///
     /// Killed by: `write_summary` used itertools' `.dedup()` instead of `.unique()` on the cell list.
     #[test]
@@ -581,7 +709,7 @@ mod tests {
         let again = arc_error("cellA");
         let arcs: Vec<&ArcError> = vec![&first, &other, &again];
 
-        let out = rendered(|s| write_summary(s, &arcs).unwrap());
+        let out = rendered(|s| write_summary(s, &arcs));
 
         assert_eq!(rollup_names(&out), vec!["cellA", "cellB", "ALL"]);
         let cell_a = out
@@ -605,7 +733,7 @@ mod tests {
         let first_alphabetically = arc_error("acell");
         let arcs: Vec<&ArcError> = vec![&last_alphabetically, &first_alphabetically];
 
-        let out = rendered(|s| write_summary(s, &arcs).unwrap());
+        let out = rendered(|s| write_summary(s, &arcs));
 
         assert_eq!(rollup_names(&out), vec!["zcell", "acell", "ALL"]);
     }
@@ -724,6 +852,66 @@ mod tests {
 
     // --- write_report ------------------------------------------------------
 
+    // --- refusals ----------------------------------------------------------
+
+    /// Every refusal reaches the report, `--report-summary-only` included.
+    ///
+    /// A run with skips exits 0, so the report and the standard-error warnings are the
+    /// only signals it has. That flag limits the tables, and a refusal is not a table:
+    /// suppressing it there would make the flag a mode in which skips vanish from the
+    /// machine-readable artefact altogether, which is the defect the refusal section
+    /// exists to close.
+    ///
+    /// Killed by: the refusals section gated on `!summary_only`, which reddens the
+    /// summary-only pass of the loop below and leaves the full-report pass green.
+    #[test]
+    fn refusals_reach_the_report_under_summary_only_as_well() {
+        let reports = vec![cell_report(&[[1.0, 1.0], [4.0, 4.0]])];
+        let refusals = vec![
+            Refusal {
+                library: "testlib".to_owned(),
+                cell: "DUT".to_owned(),
+                output: Some("QN".to_owned()),
+                reason: "no non-reset source supplies a complete reference".to_owned(),
+            },
+            Refusal {
+                library: "testlib".to_owned(),
+                cell: "OTHER".to_owned(),
+                output: None,
+                reason: "no output supplies a complete reference".to_owned(),
+            },
+        ];
+
+        for summary_only in [true, false] {
+            let out = rendered(|s| {
+                write_report(
+                    s,
+                    &reports,
+                    &refusals,
+                    ReferenceMode::PerOutput,
+                    summary_only,
+                )
+            });
+
+            // An output-scope refusal names the output. A cell-scope one does not,
+            // because the whole cell was left verbatim rather than one output of it.
+            assert!(
+                out.contains("refused: cell DUT of library testlib, output QN: no non-reset source supplies a complete reference\n"),
+                "summary_only = {}: {}",
+                summary_only,
+                out
+            );
+            assert!(
+                out.contains("refused: cell OTHER of library testlib: no output supplies a complete reference\n"),
+                "summary_only = {}: {}",
+                summary_only,
+                out
+            );
+        }
+    }
+
+    // --- write_report: summary against full --------------------------------
+
     /// The summary is what the report always carries; the per-arc and per-cell
     /// tables are what `--report-summary-only` leaves out.
     ///
@@ -731,9 +919,7 @@ mod tests {
     #[test]
     fn write_report_with_summary_only_omits_the_per_arc_sections() {
         let reports = vec![cell_report(&[[1.0, 1.0], [4.0, 4.0]])];
-        let out = rendered(|s| {
-            write_report(s, &reports, ReferenceMode::PerOutput, true).unwrap();
-        });
+        let out = rendered(|s| write_report(s, &reports, &[], ReferenceMode::PerOutput, true));
 
         assert!(
             out.starts_with("reference mode: PerOutput\nwhen-arc merge: Mean\n"),
@@ -757,9 +943,7 @@ mod tests {
     #[test]
     fn write_report_in_full_adds_the_reduction_and_per_cell_sections() {
         let reports = vec![cell_report(&[[1.0, 1.0], [4.0, 4.0]])];
-        let out = rendered(|s| {
-            write_report(s, &reports, ReferenceMode::PerOutput, false).unwrap();
-        });
+        let out = rendered(|s| write_report(s, &reports, &[], ReferenceMode::PerOutput, false));
 
         assert!(
             out.contains("== when-reduction error, cell DUT of library testlib ==\n"),

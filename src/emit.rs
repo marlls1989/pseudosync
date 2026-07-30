@@ -201,6 +201,21 @@ pub(crate) fn convert_latch_to_flipflop(cell: &mut Group) {
     }
 }
 
+/// The axis attribute of a template the conversion has decided to derive from.
+///
+/// Only a template that passed `Templates::missing_axis` can become a used template,
+/// so by the time this is reached both axes are present. It fails loudly rather than
+/// indexing so that relaxing that guarantee later is reported as a defect in
+/// pseudosync, instead of surfacing as a panic blamed on the input.
+fn template_axis<'a>(template: &'a Group, axis: &str) -> &'a Vec<Attribute> {
+    template.attributes.get(axis).unwrap_or_else(|| {
+        panic!(
+            "lookup template {} became a used template without {}",
+            template.name, axis
+        )
+    })
+}
+
 /// Generate pseudo LUT templates for constraints and delays
 pub(crate) fn generate_pseudo_lut_templates(
     lib: &Group,
@@ -220,7 +235,7 @@ pub(crate) fn generate_pseudo_lut_templates(
                                 "constrained_pin_transition".to_owned(),
                             ))],
                         ),
-                        ("index_1".to_owned(), g.attributes["index_1"].clone()),
+                        ("index_1".to_owned(), template_axis(g, "index_1").clone()),
                     ]),
                     subgroups: vec![],
                 },
@@ -234,7 +249,7 @@ pub(crate) fn generate_pseudo_lut_templates(
                                 "total_output_net_capacitance".to_owned(),
                             ))],
                         ),
-                        ("index_1".to_owned(), g.attributes["index_2"].clone()),
+                        ("index_1".to_owned(), template_axis(g, "index_2").clone()),
                     ]),
                     subgroups: vec![],
                 },
@@ -440,10 +455,10 @@ library(test) {
 
     /// The pseudo-flop output arc draws on two different arcs, and which number
     /// comes from which one is the whole model: the transitions are the output's
-    /// own, the clock-to-output delays are the reference's. Commit c5d4559 swapped
-    /// the delays for a cell-wide pooled mean under a commit titled "Refactor" and
-    /// no test noticed, hence the deliberately disjoint value ranges here -- 1.x
-    /// against 9.x -- which no swap of the two sources can survive.
+    /// own, the clock-to-output delays are the reference's. Substituting a cell-wide
+    /// pooled mean for those delays is a defect no shape or count can catch, which is why
+    /// the two sources here are given deliberately disjoint value ranges -- 1.x against
+    /// 9.x -- that no swap between them can survive.
     ///
     /// Killed by: `create_pseudo_output_timing_arc` emitted `mean_delays.rise_trans` as the rise_transition table instead of `output_transitions.rise_trans`.
     #[test]
@@ -479,7 +494,7 @@ library(test) {
             table_values(&group.subgroups[1]),
             transitions.fall_trans.to_vec()
         );
-        // ... while the delays are the reference's. Swapping these is c5d4559.
+        // ... while the delays are the reference's. Swapping the two is the defect.
         assert_eq!(table_values(&group.subgroups[2]), delays.cell_rise.to_vec());
         assert_eq!(table_values(&group.subgroups[3]), delays.cell_fall.to_vec());
 
@@ -540,12 +555,12 @@ library(pseudo_arc_test) {
     /// The constructor is exercised directly above; this is the same arc seen where
     /// it has to arrive, on the pin, after the whole engine has run.
     ///
-    /// Only the engine decides *which* reference an output is handed, so the pooling
-    /// regression of c5d4559 is invisible to the constructor and visible here. The
-    /// two outputs are characterised an order of magnitude apart, which no cell-wide
-    /// mean can land on.
+    /// Only the engine decides *which* reference an output is handed, so handing every
+    /// output the cell-wide mean is invisible to the constructor and visible only here. The
+    /// two outputs are characterised an order of magnitude apart, which no cell-wide mean
+    /// can land on.
     ///
-    /// Killed by: `process_cell`'s phase 3 handed `PerOutput` the cell-wide `&mean_ref_arc` as its delays -- the c5d4559 pooling regression itself.
+    /// Killed by: `process_cell`'s phase 3 handed `PerOutput` the cell-wide `&mean_ref_arc` as its delays, pooling what should be each output's own.
     #[test]
     fn each_output_pin_gains_a_clock_arc_built_from_its_own_reference() {
         let mut lib = dual_output_latch_lib();
