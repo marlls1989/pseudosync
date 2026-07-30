@@ -18,6 +18,14 @@ report; fix the cause. If a lint appears unfixable, STOP and raise a BLOCKER.
   make the fixture synthetic, or delete the test.
 - A test that cannot fail is worse than no test.
 
+## Test fixtures are invented, never copied from a private library
+This repository is public. Fixtures must be synthetic data written for the test.
+Never copy cell names, pin names, function expressions, timing values, or any other
+content out of a proprietary or customer library into this tree. The
+`examples/ASCEND_*` libraries are the only real-library fixtures and are already
+public. A private library may be used for local verification whose outputs stay
+outside the repository — never as a source of committed content.
+
 ## Formatting is mandatory
 `cargo fmt` is not optional and not a matter of taste. `cargo fmt --check` is part
 of the green bar; a tree that fails it is broken. Never hand-format around rustfmt,

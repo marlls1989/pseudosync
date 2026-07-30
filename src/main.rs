@@ -1,4 +1,5 @@
 use gpoint::GPoint;
+use itertools::Itertools;
 use ndarray::prelude::*;
 use pseudosync::{
     parse_liberty_file, process_library_with_reference, write_liberty_file, ArcError, CellReport,
@@ -12,6 +13,9 @@ use std::{
     path::PathBuf,
 };
 use structopt::StructOpt;
+
+#[cfg(test)]
+mod render_tests;
 
 #[derive(Debug, StructOpt)]
 struct ProgramOptions {
@@ -379,8 +383,11 @@ fn write_summary(sink: &mut dyn Write, arcs: &[&ArcError]) -> Result<(), Box<dyn
         )
     };
 
-    let mut cells: Vec<&str> = arcs.iter().map(|a| a.cell.as_str()).collect();
-    cells.dedup();
+    // `dedup` would only drop *adjacent* repeats, and the reports accumulate
+    // across every library in the file, so one cell defined in two libraries
+    // comes back as two non-adjacent runs and would be rolled up twice. Order is
+    // first appearance, not sorted: the rollup lines are compared between runs.
+    let cells: Vec<&str> = arcs.iter().map(|a| a.cell.as_str()).unique().collect();
     for cell in cells {
         rollup(cell, &|a: &ArcError| a.cell == cell, sink)?;
     }
