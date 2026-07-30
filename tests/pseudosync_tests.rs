@@ -361,34 +361,26 @@ fn test_process_library_latch_mode() {
         assert!(timing.iter_subgroups_of_type("cell_fall").next().is_some());
     }
 
-    // Check that input pins have setup/hold timing
+    // Output Q's only arc is related to G, so the clock is the sole constraint
+    // source here and is never constrained against itself. Input D carries a
+    // combinational arc to A but none to an output, so nothing characterises it
+    // against the clock and it must be left alone rather than given a
+    // setup_rising group with no constraint table in it.
     let d_pin = latch_cell.get_pin("D").expect("D pin not found");
-    let setup_timing = d_pin.iter_subgroups_of_type("timing").find(|t| {
-        t.simple_attribute("timing_type")
-            .map(|tt| tt.expr() == "setup_rising")
-            .unwrap_or(false)
-    });
+    let constraint_arcs = d_pin
+        .iter_subgroups_of_type("timing")
+        .filter_map(|t| t.simple_attribute("timing_type").map(|tt| tt.expr()))
+        .filter(|tt| tt == "setup_rising" || tt == "hold_rising")
+        .count();
 
-    assert!(
-        setup_timing.is_some(),
-        "Setup timing should be added to D pin"
-    );
-
-    let hold_timing = d_pin.iter_subgroups_of_type("timing").find(|t| {
-        t.simple_attribute("timing_type")
-            .map(|tt| tt.expr() == "hold_rising")
-            .unwrap_or(false)
-    });
-
-    assert!(
-        hold_timing.is_some(),
-        "Hold timing should be added to D pin"
-    );
-
-    // Check that nextstate_type attribute is added
     assert_eq!(
-        d_pin.simple_attribute("nextstate_type").unwrap().expr(),
-        "data"
+        constraint_arcs, 0,
+        "D has no arc to an output and must not receive empty constraints"
+    );
+
+    assert!(
+        d_pin.simple_attribute("nextstate_type").is_none(),
+        "D should not be marked as data without a characterised constraint"
     );
 
     // In latch mode, latch group should remain as latch

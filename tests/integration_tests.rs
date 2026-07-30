@@ -373,73 +373,37 @@ fn test_pseudo_timing_constraints_generation() {
     let lib = &liberty[0];
     let cell = lib.get_cell("LBTIEX1").expect("LBTIEX1 cell not found");
 
-    // Check that input pin A gets setup/hold timing constraints
-    let a_pin = cell.get_pin("A").expect("A pin not found");
+    // Constraints are attached only to inputs the library actually characterised
+    // against an output, and never to the clock. In this fixture every output arc
+    // is related to G, so G is the sole constraint source: it is the clock and is
+    // therefore skipped, and data pin A -- which has no arc to Q or QN -- has
+    // nothing to be constrained by. Neither may be given an empty constraint, as a
+    // setup_rising group with no rise/fall_constraint table is not usable timing.
+    // Constraint values landing on a genuine data pin are covered by
+    // bundle_members_take_their_own_constraints in the library's own test module.
+    for pin_name in ["A", "G", "RN"].iter() {
+        let pin = cell
+            .get_pin(pin_name)
+            .unwrap_or_else(|| panic!("{} pin not found", pin_name));
 
-    // Should have nextstate_type attribute
-    assert_eq!(
-        a_pin.simple_attribute("nextstate_type").unwrap().expr(),
-        "data"
-    );
-
-    // Should have setup timing
-    let setup_timing = a_pin.iter_subgroups_of_type("timing").find(|t| {
-        t.simple_attribute("timing_type")
-            .map(|tt| tt.expr() == "setup_rising")
-            .unwrap_or(false)
-    });
-    assert!(
-        setup_timing.is_some(),
-        "Setup timing should be added to input pin"
-    );
-
-    if let Some(timing) = setup_timing {
-        assert_eq!(
-            timing.simple_attribute("related_pin").unwrap().string(),
-            "G"
+        assert!(
+            pin.simple_attribute("nextstate_type").is_none(),
+            "{} has no characterised constraint and must not be marked as data",
+            pin_name
         );
-        // Check if constraint tables exist, but don't require them if timing calculation fails
-        let has_constraints = timing
-            .iter_subgroups_of_type("rise_constraint")
-            .next()
-            .is_some()
-            || timing
-                .iter_subgroups_of_type("fall_constraint")
-                .next()
-                .is_some();
-        if !has_constraints {
-            eprintln!("Warning: Setup timing exists but no constraint tables generated - may be due to insufficient timing data");
-        }
-    }
 
-    // Should have hold timing
-    let hold_timing = a_pin.iter_subgroups_of_type("timing").find(|t| {
-        t.simple_attribute("timing_type")
-            .map(|tt| tt.expr() == "hold_rising")
-            .unwrap_or(false)
-    });
-    assert!(
-        hold_timing.is_some(),
-        "Hold timing should be added to input pin"
-    );
+        let constraint_arcs: Vec<String> = pin
+            .iter_subgroups_of_type("timing")
+            .filter_map(|t| t.simple_attribute("timing_type").map(|tt| tt.expr()))
+            .filter(|tt| tt == "setup_rising" || tt == "hold_rising")
+            .collect();
 
-    if let Some(timing) = hold_timing {
-        assert_eq!(
-            timing.simple_attribute("related_pin").unwrap().string(),
-            "G"
+        assert!(
+            constraint_arcs.is_empty(),
+            "{} must not receive empty constraint groups, found {:?}",
+            pin_name,
+            constraint_arcs
         );
-        // Check if constraint tables exist, but don't require them if timing calculation fails
-        let has_constraints = timing
-            .iter_subgroups_of_type("rise_constraint")
-            .next()
-            .is_some()
-            || timing
-                .iter_subgroups_of_type("fall_constraint")
-                .next()
-                .is_some();
-        if !has_constraints {
-            eprintln!("Warning: Hold timing exists but no constraint tables generated - may be due to insufficient timing data");
-        }
     }
 }
 

@@ -740,7 +740,13 @@ library(nested_test) {
         "Should handle nested timing structures"
     );
 
-    // Verify that multiple timing arcs are processed
+    // Output Q's only arc is related to CLK, so the clock is the sole constraint
+    // source in this fixture -- and the clock is never constrained against
+    // itself. Input D carries nested timing groups of its own but has no arc to
+    // any output, so it has nothing to be constrained by. Neither may be given
+    // an empty setup_rising group; the point of the test is that the nested
+    // structure is traversed without breaking processing, which the ff group
+    // above confirms.
     let d_pin = cell.get_pin("D").expect("D pin not found");
     let setup_count = d_pin
         .iter_subgroups_of_type("timing")
@@ -751,9 +757,20 @@ library(nested_test) {
         })
         .count();
 
+    assert_eq!(
+        setup_count, 0,
+        "D has no arc to an output and must not receive an empty setup constraint"
+    );
+
+    // The output still gets its pseudo arc, proving the nested cell processed.
+    let q_pin = cell.get_pin("Q").expect("Q pin not found");
     assert!(
-        setup_count > 0,
-        "Should generate setup timing for nested structures"
+        q_pin.iter_subgroups_of_type("timing").any(|t| {
+            t.simple_attribute("timing_type")
+                .map(|tt| tt.expr() == "rising_edge")
+                .unwrap_or(false)
+        }),
+        "Q should gain a pseudo-synchronous clock arc"
     );
 }
 
@@ -1029,49 +1046,58 @@ library({}_test) {{
                 test_name
             );
 
-            // All non-reset input pins should have timing constraints
+            // Only A is characterised against output Q in this fixture; the M
+            // and P pins are declared without any arc, so they have nothing to
+            // be constrained against and must not be given empty constraints.
+            let count_arcs = |pin: &liberty_parser::liberty::Group, timing_type: &str| {
+                pin.iter_subgroups_of_type("timing")
+                    .filter(|t| {
+                        t.simple_attribute("timing_type")
+                            .map(|tt| tt.expr() == timing_type)
+                            .unwrap_or(false)
+                    })
+                    .count()
+            };
+
             for pin_name in &all_pins {
                 let pin = cell.iter_pins().find(|p| &p.name == pin_name).unwrap();
+                let drives_an_output = *pin_name == "A";
 
-                // Should have nextstate_type
-                assert_eq!(
-                    pin.simple_attribute("nextstate_type").unwrap().expr(),
-                    "data",
-                    "Pin {} should have nextstate_type in {}",
-                    pin_name,
-                    test_name
-                );
-
-                // Should have both setup and hold timing
-                let setup_count = pin
-                    .iter_subgroups_of_type("timing")
-                    .filter(|t| {
-                        t.simple_attribute("timing_type")
-                            .map(|tt| tt.expr() == "setup_rising")
-                            .unwrap_or(false)
-                    })
-                    .count();
-                assert!(
-                    setup_count > 0,
-                    "Pin {} should have setup timing in {}",
-                    pin_name,
-                    test_name
-                );
-
-                let hold_count = pin
-                    .iter_subgroups_of_type("timing")
-                    .filter(|t| {
-                        t.simple_attribute("timing_type")
-                            .map(|tt| tt.expr() == "hold_rising")
-                            .unwrap_or(false)
-                    })
-                    .count();
-                assert!(
-                    hold_count > 0,
-                    "Pin {} should have hold timing in {}",
-                    pin_name,
-                    test_name
-                );
+                if drives_an_output {
+                    assert_eq!(
+                        pin.simple_attribute("nextstate_type").unwrap().expr(),
+                        "data",
+                        "Pin {} drives Q and should have nextstate_type in {}",
+                        pin_name,
+                        test_name
+                    );
+                    assert!(
+                        count_arcs(pin, "setup_rising") > 0,
+                        "Pin {} should have setup timing in {}",
+                        pin_name,
+                        test_name
+                    );
+                    assert!(
+                        count_arcs(pin, "hold_rising") > 0,
+                        "Pin {} should have hold timing in {}",
+                        pin_name,
+                        test_name
+                    );
+                } else {
+                    assert!(
+                        pin.simple_attribute("nextstate_type").is_none(),
+                        "Pin {} has no arc to an output and should be untouched in {}",
+                        pin_name,
+                        test_name
+                    );
+                    assert_eq!(
+                        count_arcs(pin, "setup_rising") + count_arcs(pin, "hold_rising"),
+                        0,
+                        "Pin {} must not receive empty constraints in {}",
+                        pin_name,
+                        test_name
+                    );
+                }
             }
         });
 
@@ -1166,17 +1192,23 @@ library({}_reset_test) {{
             );
         }
 
-        // Non-reset pins should get constraints
-        for pin_name in ["A", "B"] {
-            let pin = cell.iter_pins().find(|p| p.name == pin_name).unwrap();
-            assert_eq!(
-                pin.simple_attribute("nextstate_type").unwrap().expr(),
-                "data",
-                "Pin {} should have nextstate_type with reset pattern {}",
-                pin_name,
-                test_name
-            );
-        }
+        // A drives Q, so it is constrained. B has no arc to any output, so there
+        // is nothing to constrain it against and it must be left alone rather
+        // than given an empty constraint.
+        let a_pin = cell.iter_pins().find(|p| p.name == "A").unwrap();
+        assert_eq!(
+            a_pin.simple_attribute("nextstate_type").unwrap().expr(),
+            "data",
+            "Pin A drives Q and should have nextstate_type with reset pattern {}",
+            test_name
+        );
+
+        let b_pin = cell.iter_pins().find(|p| p.name == "B").unwrap();
+        assert!(
+            b_pin.simple_attribute("nextstate_type").is_none(),
+            "Pin B has no arc to an output and should be untouched with reset pattern {}",
+            test_name
+        );
     }
 }
 
