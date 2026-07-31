@@ -137,10 +137,13 @@ measurement, at the cost of standing for no single characterised point.
 **`--offset-placement`** — `delay(A→Z) = propagation(G→Z) + setup(A→G)` fixes the *sum* of
 the two halves, not how the constant at the anchor point is divided between them. `setup`
 (the default) leaves it in the setup constraint; `prop` folds it into the clock-to-output
-delay and leaves the constraint the arc's own slew profile. Nothing else moves: the
-reconstruction and its residual are identical either way, because the constant is
-subtracted from one half and added to the other. The choice is about which of the two
-artefacts reads as the larger number.
+delay and leaves the constraint the arc's own slew profile. The two halves still sum to the
+same arc either way, but the residual does not: each arc's own crossing is folded in where
+its reference is drawn (`select_reference_arc`), while a source pin's constraint is averaged
+over every output that pin drives (`constraints_from_arcs`, grouped on `(src, scope)`), and
+the two operations do not commute. `setup` is exact at the anchor point for every arc;
+`prop` adds a constant bias — that arc's crossing minus the mean crossing across the
+group — on any pin driving two or more outputs.
 
 ## 5. Reference mode: the ladder, and how widely one reference is drawn
 

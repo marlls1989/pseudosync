@@ -249,8 +249,13 @@ impl std::str::FromStr for Anchor {
 /// Which half of the split carries the constant the two are separated around.
 ///
 /// `delay(A→Z) = propagation(G→Z) + setup(A→G)` fixes the sum, not how the constant
-/// at the anchor point is divided between the halves. Moving it changes neither the
-/// sum nor the residual — only which of the two artefacts reads as the larger number.
+/// at the anchor point is divided between the halves. The residual is a different
+/// matter: each arc's own crossing is folded in where its reference is drawn
+/// (`select_reference_arc`), but a source pin's constraint is then averaged over
+/// every output that pin drives (`constraints_from_arcs`, grouped on `(src, scope)`),
+/// and the two operations do not commute. `Setup` is exact at the anchor point for
+/// every arc; `Prop` adds a constant bias — that arc's crossing minus the mean
+/// crossing across the group — on any pin driving two or more outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OffsetPlacement {
     /// The constant stays in the setup constraint, which is therefore referred to the
@@ -765,6 +770,11 @@ pub(crate) fn select_reference_arc(
     // already-decided pair: the delay this edge emits and the constant the
     // constraint half still owes. `Prop` folds the constant into the delay and
     // leaves nothing to subtract; the sum of the two halves is the same either way.
+    // The residual is not: this folds in the arc's own crossing, but
+    // `constraints_from_arcs` averages a source pin's reference over every output it
+    // drives, so the two do not commute. `Setup` lands exactly on the anchor point
+    // for every arc; `Prop` shifts the residual by that arc's crossing minus the
+    // group's mean crossing wherever a pin drives more than one output.
     let edge = |delays: Option<&Array2<f64>>, transitions: Option<&Array2<f64>>| {
         let (delays, transitions) = (delays?, transitions?);
         let delay = prop_profile(delays, anchor);

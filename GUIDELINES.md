@@ -76,6 +76,20 @@ Derive each expected value from what the domain requires, and state the derivati
 Where a value cannot be justified from the model, that is a finding about the tool —
 report it, rather than quietly recording what it currently emits.
 
+## Nothing enters the documentation without evidence
+
+Every claim written into `docs/` carries what backs it: a page of the Liberty Reference
+Manual or User Guide, a section of the Pulsar paper, a named test, or a measurement
+actually run and reported.
+
+A claim with no such backing is left out. A gap is correct; an inference written in a
+confident voice is not. The documentation is derived work and holds no authority — a
+sentence invented in it has been read as policy and implemented as if it were a decision
+before now, which is how a defect gets manufactured rather than merely described.
+
+This binds reading as well as writing: that the documentation states something is never
+the justification for a test, an expected value, or a behaviour.
+
 ## Every test records the mutation that proved it can fail
 
 A passing test proves nothing until you can say what would have made it fail. So every

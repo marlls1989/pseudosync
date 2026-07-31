@@ -890,6 +890,9 @@ fn process_cell(
                 // bears on, so there the arc converts exactly as any other does.
                 if mode == ReferenceMode::PerState && matches!(post, ArcPost::Unreadable) {
                     unreadable_arcs.push(outpin_name.clone());
+                    arc_skipped
+                        .entry(outpin_name.clone())
+                        .or_insert("every non-reset arc was skipped: its `when` could not be read");
                     continue;
                 }
 
@@ -1049,9 +1052,11 @@ fn process_cell(
     for outpin_name in &skipped {
         // All three are the same output-scope refusal; the wording says which of the three
         // ways the output fell short, so the warning can be acted on. The arc-scope case
-        // has to be asked about separately: an arc skipped there never reaches
-        // `source_order`, so judging by that map alone would report an output whose every
-        // arc was skipped for its template as having carried no table at all.
+        // has to be asked about separately: an arc skipped there -- for a template missing
+        // an axis, for a direction the tool cannot derive, or, under a per-state reference,
+        // for a `when` it cannot read -- never reaches `source_order`, so judging by that
+        // map alone would report an output skipped for any of those reasons as having
+        // carried no table at all.
         let reason = if source_order.keys().any(|(output, _)| output == outpin_name) {
             "no non-reset source supplies a complete reference"
         } else if let Some(reason) = arc_skipped.get(outpin_name) {
@@ -1072,10 +1077,16 @@ fn process_cell(
     }
 
     // Output scope, and per-state only: an arc whose `when` could not be read was
-    // skipped, and the output converts without it. Named here rather than at the
-    // skip, because a cell that turns out not to convert at all is emitted verbatim
-    // and makes no output-scope refusal about anything.
+    // skipped. Restricted to outputs that still converted despite the skip: one
+    // that did not convert already carries the output-scope refusal above, drawn
+    // from the same skip via `arc_skipped`, and must not carry this one as well.
+    // Named here rather than at the skip either way, because a cell that turns out
+    // not to convert at all is emitted verbatim and makes no output-scope refusal
+    // about anything.
     for outpin_name in &unreadable_arcs {
+        if !converted(outpin_name) {
+            continue;
+        }
         reports.refusals.push(Refusal {
             library: lib_name.to_owned(),
             cell: cell_name.clone(),
@@ -4014,6 +4025,98 @@ library(sense_test) {{
         );
     }
 
+    /// A two-output latch under a per-state reference: `Q`'s only non-reset arc
+    /// carries an unreadable `when`, and `QN`'s is fully characterised and
+    /// unconditioned, so the cell still converts.
+    ///
+    /// `Q`'s arc carries all four families -- the shape the output-scope ladder's
+    /// fallback wording denies -- so a defect that let the ladder fall through to
+    /// that fallback would misdescribe a `when` this tool refused to read as an
+    /// output that carried no table at all.
+    fn per_state_unreadable_when_is_the_only_arc_lib() -> Liberty {
+        liberty_parser::parse_lib(&format!(
+            r#"
+library(sense_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }}
+  cell(SENSE) {{
+    latch(IQ, IQN) {{ enable: "G"; data_in: "A"; }}
+    pin(G) {{ direction: input; clock: true; }}
+    pin(A) {{ direction: input; }}
+    pin(Q) {{
+      direction: output;
+      function: "IQ";
+      {}
+    }}
+    pin(QN) {{
+      direction: output;
+      function: "IQN";
+      {}
+    }}
+  }}
+}}"#,
+            full_sense_arc_when(
+                "A",
+                "positive_unate",
+                Some("A'"),
+                r#""1.0, 2.0", "3.0, 4.0""#,
+                r#""10.0, 20.0", "30.0, 40.0""#,
+            ),
+            full_sense_arc(
+                "A",
+                Some("positive_unate"),
+                r#""1.0, 2.0", "3.0, 4.0""#,
+                r#""10.0, 20.0", "30.0, 40.0""#,
+            ),
+        ))
+        .expect("parse per-state unreadable-when-only-arc fixture")
+    }
+
+    /// Under a per-state reference, an output whose only non-reset arc carries an
+    /// unreadable `when` carries exactly one refusal -- the arc-scope one now
+    /// recorded into `arc_skipped` -- and not also the output-scope ladder's
+    /// generic fallback, which would say `Q` carried no characterisation table at
+    /// all when in fact its one arc carried all four families.
+    ///
+    /// Killed by: deleting the `arc_skipped.entry(...)` insertion this step adds
+    /// alongside the `unreadable_arcs.push` at the per-state skip site. With that
+    /// insertion gone, `Q` reaches neither `source_order` nor `arc_skipped`, so the
+    /// ladder falls through to the generic wording. Observed to redden this test
+    /// alone; `per_state_skips_an_unreadable_when_and_converts_the_rest_of_the_output`
+    /// stays green under the same mutation, because there `Q` converts by its other,
+    /// readable arc and the ladder never runs for it.
+    #[test]
+    fn per_state_names_the_unreadable_when_reason_when_it_is_the_outputs_only_arc() {
+        let mut lib = per_state_unreadable_when_is_the_only_arc_lib();
+        let produced = process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let q_refusals: Vec<&Refusal> = produced
+            .refusals
+            .iter()
+            .filter(|r| r.output.as_deref() == Some("Q"))
+            .collect();
+        assert_eq!(q_refusals.len(), 1, "{:?}", produced.refusals);
+        assert!(
+            q_refusals[0].reason.contains("`when` could not be read"),
+            "{:?}",
+            q_refusals[0]
+        );
+        assert!(
+            !q_refusals[0]
+                .reason
+                .contains("no non-reset timing arc carrying a characterisation table"),
+            "{:?}",
+            q_refusals[0]
+        );
+    }
+
     // --- constraint arithmetic at full characterisation size ----------------
 
     /// The emitted setup constraint on a full-size 10x10 characterisation is the
@@ -4116,6 +4219,168 @@ library(large_table_test) {{
                     );
                 }
             }
+        }
+    }
+
+    // --- offset placement: where the anchor's constant lands ----------------
+
+    /// A 3x3 table's `values(...)` text, filled row-major from `base`: row 1 (the
+    /// middle row) is `[base+3, base+4, base+5]` and the middle element `base+4` --
+    /// the same shape `arcs::tests::nine` samples the crossing from.
+    fn nine_values(base: f64) -> String {
+        let row = |r: f64| format!("\"{}, {}, {}\"", base + r, base + r + 1.0, base + r + 2.0);
+        format!("{}, {}, {}", row(0.0), row(3.0), row(6.0))
+    }
+
+    /// One `positive_unate` arc on all four families, each a 3x3 table built from
+    /// `base` so its own middle-element crossing is `base + 4`. The three families
+    /// besides `cell_rise` are offset well clear of it and of each other so that a
+    /// value read from the wrong family cannot be mistaken for the right one.
+    fn nine_arc(related_pin: &str, base: f64) -> String {
+        format!(
+            r#"
+      timing() {{
+        related_pin: "{}";
+        timing_sense : positive_unate;
+        timing_type: combinational;
+        cell_rise(T) {{ values({}); }}
+        cell_fall(T) {{ values({}); }}
+        rise_transition(T) {{ values({}); }}
+        fall_transition(T) {{ values({}); }}
+      }}"#,
+            related_pin,
+            nine_values(base),
+            nine_values(base + 1000.0),
+            nine_values(base + 2000.0),
+            nine_values(base + 3000.0),
+        )
+    }
+
+    /// One input `D` fanning out to two outputs `Q1`, `Q2`, each carrying its own
+    /// `positive_unate` arc from `D` on a 3x3 template -- `Q1`'s middle-element
+    /// crossing `c1 = 4.0`, `Q2`'s `c2 = 104.0`, well separated so a mix-up between
+    /// them cannot read as rounding.
+    fn fanout_lib() -> Liberty {
+        liberty_parser::parse_lib(&format!(
+            r#"
+library(offset_placement_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1, 1.0");
+    index_2("0.005, 0.05, 0.5");
+  }}
+  cell(FANOUT) {{
+    latch(IQ, IQN) {{ enable: "G"; data_in: "D"; }}
+    pin(G) {{ direction: input; clock: true; }}
+    pin(D) {{ direction: input; }}
+    pin(Q1) {{
+      direction: output;
+      function: "IQ1";
+      {}
+    }}
+    pin(Q2) {{
+      direction: output;
+      function: "IQ2";
+      {}
+    }}
+  }}
+}}"#,
+            nine_arc("D", 0.0),
+            nine_arc("D", 100.0),
+        ))
+        .expect("parse fanout fixture")
+    }
+
+    /// `--offset-placement` decides only where the anchor's constant is charged, not
+    /// its size, on a source driving more than one output.
+    ///
+    /// Derivation from the model, on `fanout_lib`. `D` drives `Q1` (base 0) and `Q2`
+    /// (base 100), both `positive_unate` on a 3x3 template, so a rise arc's raw
+    /// `cell_rise` middle row is `[3, 4, 5]` for `Q1` and `[103, 104, 105]` for `Q2`,
+    /// crossing `c1 = 4.0` and `c2 = 104.0`.
+    ///
+    /// `select_reference_arc` (arcs.rs:779-784) applies placement once, per output,
+    /// before anything downstream reads it:
+    /// - `Setup` keeps the middle row whole and leaves the crossing owing to the
+    ///   constraint: `G->Q1.cell_rise = [3, 4, 5]`, `G->Q2.cell_rise = [103, 104, 105]`.
+    /// - `Prop` folds the crossing into the delay and zeroes it:
+    ///   `G->Q1.cell_rise = [3, 4, 5] - 4 = [-1, 0, 1]`,
+    ///   `G->Q2.cell_rise = [103, 104, 105] - 104 = [-1, 0, 1]`.
+    ///
+    /// `D`'s `rise_constraint` is `constraints_from_arcs` (engine.rs:446-491): the
+    /// mean of `Q1` and `Q2`'s own RAW `cell_rise` tables -- unaffected by placement,
+    /// which only touches the reference -- minus the mean of what each output's
+    /// reference still owes. Elementwise, `(nine(0) + nine(100)) / 2 = nine(50)`,
+    /// whose middle column is `[51, 54, 57]` -- anchor element `54 = mean(c1, c2)`.
+    /// - `Setup` leaves both crossings owing: mean owed `= (4 + 104) / 2 = 54`, so
+    ///   `rise_constraint = [51, 54, 57] - 54 = [-3, 0, 3]` -- anchor element `0`.
+    /// - `Prop` has already paid both, out of the delay half: mean owed `= 0`, so
+    ///   `rise_constraint = [51, 54, 57] - 0 = [51, 54, 57]` -- anchor element
+    ///   `54 = mean(c1, c2)`, unsubtracted.
+    ///
+    /// Killed by: dropping the mean-crossing subtraction in `constraints_from_arcs`
+    /// (`group.ref_sum / group.n` replaced by `0.0`) reddened this test alone, with
+    /// `arcs.rs`'s `prop_placement_moves_the_crossing_into_the_delay_and_leaves_none_to_subtract`
+    /// observed GREEN under the same mutation -- that test never reaches the
+    /// constraint arithmetic this one does. Restored afterwards.
+    #[test]
+    fn offset_placement_moves_the_anchor_constant_between_delay_and_constraint() {
+        let reset_name = Regex::new("(R|S)N?").unwrap();
+
+        for (placement, want_q1_rise, want_q2_rise, want_rise_constraint) in [
+            (
+                OffsetPlacement::Setup,
+                vec![3.0, 4.0, 5.0],
+                vec![103.0, 104.0, 105.0],
+                vec![-3.0, 0.0, 3.0],
+            ),
+            (
+                OffsetPlacement::Prop,
+                vec![-1.0, 0.0, 1.0],
+                vec![-1.0, 0.0, 1.0],
+                vec![51.0, 54.0, 57.0],
+            ),
+        ] {
+            let mut lib = fanout_lib();
+            process_library(
+                &mut lib[0],
+                &CellOptions {
+                    clock_name: "G",
+                    reset_name: &reset_name,
+                    latch: false,
+                    mode: ReferenceMode::PerOutput,
+                    when_merge: WhenMerge::Mean,
+                    anchor: Anchor::Middle,
+                    placement,
+                },
+            );
+
+            let cell = lib[0].get_cell("FANOUT").expect("FANOUT");
+
+            for (outpin, want) in [("Q1", &want_q1_rise), ("Q2", &want_q2_rise)] {
+                let pin = cell.get_pin(outpin).expect(outpin);
+                let arc = pseudo_output_arc(pin, "G");
+                let cell_rise = arc
+                    .iter_subgroups_of_type("cell_rise")
+                    .next()
+                    .unwrap_or_else(|| panic!("{} carries no cell_rise", outpin));
+                assert_eq!(
+                    table_values(cell_rise),
+                    *want,
+                    "{}.cell_rise under {:?}",
+                    outpin,
+                    placement
+                );
+            }
+
+            let d = cell.get_pin("D").expect("D");
+            assert_eq!(
+                constraint_values(d, "setup_rising", "rise_constraint"),
+                Some(want_rise_constraint),
+                "D.rise_constraint under {:?}",
+                placement
+            );
         }
     }
 

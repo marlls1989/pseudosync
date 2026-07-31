@@ -53,7 +53,11 @@ struct ProgramOptions {
 
     /// Which half of the split carries the constant the two are separated
     /// around: "setup" leaves it in the setup constraint, "prop" folds it into
-    /// the clock-to-output delay. The two halves sum to the same arc either way.
+    /// the clock-to-output delay. The two halves sum to the same arc either way,
+    /// but the residual does not: "setup" is exact at the anchor point for every
+    /// arc, "prop" adds a constant bias on any pin driving two or more outputs,
+    /// because the per-arc crossing folded in here is later averaged per source
+    /// pin over the outputs it drives.
     #[structopt(long, default_value = "setup")]
     offset_placement: OffsetPlacement,
 
