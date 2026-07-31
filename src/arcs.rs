@@ -1064,12 +1064,14 @@ mod tests {
     /// because every key there is `Scope::Whole` already.
     #[test]
     fn per_state_answers_each_state_with_its_own_reference() {
-        // Real class ids, minted by the classifier over three distinct conditions:
+        // Real class ids, minted by the classifier over three mutually exclusive
+        // conditions -- three states of a cell, which is what three ids means:
         // `ClassId` is opaque, and widening it so a test could write one down would
-        // be widening visibility to suit a test.
-        let conditions: Vec<Condition> = ["A", "B", "C"]
+        // be widening visibility to suit a test. Conditions that could hold at once
+        // would collide into one class and leave this fixture with one state.
+        let conditions: Vec<Condition> = ["A * B", "A * !B", "!A"]
             .iter()
-            .map(|t| Condition::parse(t).expect("a pin name is a condition"))
+            .map(|t| Condition::parse(t).expect("a product of literals is a condition"))
             .collect();
         let classes = collision_classes(&conditions);
 

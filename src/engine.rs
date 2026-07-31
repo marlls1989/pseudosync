@@ -7,7 +7,7 @@ use crate::arcs::{
     ReferenceMode, References, Scope, TableAccumulator, TimingSense, TimingTables, Transition,
     WhenMerge,
 };
-use crate::conditions::{collision_classes, ClassId, Condition};
+use crate::conditions::{collision_classes, merge_conditions, ClassId, Condition};
 use crate::emit::{
     convert_latch_to_flipflop, create_hold_timing_group, create_pseudo_output_timing_arc,
     create_setup_timing_group, generate_pseudo_lut_templates, Guard,
@@ -160,30 +160,35 @@ fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<Sta
     rows
 }
 
-/// The representative condition of each post-settled class, in Liberty's spelling of
-/// it.
+/// The merged condition each post-settled class is emitted under: the least
+/// restrictive condition covering the whole class.
 ///
-/// First appearance wins, which is the same rule `collision_classes` numbers by, so
-/// the state a class is emitted under is the first one the library described it with.
-/// Every arc of a class denotes the same function, so which representative is kept
-/// decides the spelling and nothing else.
-fn class_representatives(
+/// A class's members can hold at once — that is what put them in one class — so no
+/// one member's condition describes the state the class's merged tables were
+/// computed over. [`merge_conditions`] takes the union of the members' own
+/// conditions, which is what the merged arc actually holds under.
+///
+/// The members are collected in appearance order, so a class whose union equals one
+/// of them is stated in the first such member's spelling — which is every class that
+/// was an equality class before conditions began colliding on overlap.
+fn merged_class_conditions(
     raw_arcs: &[ConditionedArc],
     post: &[ArcPost],
 ) -> BTreeMap<ClassId, Condition> {
-    let mut representatives: BTreeMap<ClassId, Condition> = BTreeMap::new();
+    let mut members: BTreeMap<ClassId, Vec<&Condition>> = BTreeMap::new();
     for (arc, entry) in raw_arcs.iter().zip(post.iter()) {
         if let ArcPost::Settled { rise, fall, .. } = entry {
             for (condition, class) in [(rise, arc.class_rise), (fall, arc.class_fall)] {
                 if let (Some(condition), Some(class)) = (condition, class) {
-                    representatives
-                        .entry(class)
-                        .or_insert_with(|| condition.clone());
+                    members.entry(class).or_default().push(condition);
                 }
             }
         }
     }
-    representatives
+    members
+        .into_iter()
+        .map(|(class, members)| (class, merge_conditions(&members)))
+        .collect()
 }
 
 /// One emitted pair of checks on one input pin: the condition they are stated under,
@@ -207,6 +212,15 @@ struct CheckGroup {
 /// numbers its classes per pin, so nothing here can be confused for a state of the
 /// cell. Grouping on the BDD rather than on the text is what makes two spellings of
 /// one condition impossible to emit as two overlapping check groups.
+///
+/// A group states its whole class's merged condition and not the condition of the
+/// arc that opened it. Liberty UG p.7-49–50's mutual-exclusivity requirement is
+/// about a pin's state-dependent timing arcs, which a check group is as much as a
+/// delay group is: two of a pin's check `when`s that can both hold are as
+/// inadmissible as two of an output's. Where the class's union equals one of its
+/// members — every class that was an equality class before conditions began
+/// colliding on overlap — the merge returns that member, so the emitted text is
+/// still the library's own.
 ///
 /// The conditioned groups come out in first-appearance order and the catch-all last,
 /// which is the order Liberty reads a `default_timing` group in.
@@ -239,6 +253,18 @@ fn check_groups(
             .collect();
         let ids = collision_classes(&conditions);
 
+        // The condition each class is stated under, taken over its own members in
+        // appearance order -- the same derivation an output's states take, on the
+        // raw source conditions rather than the post-settled ones.
+        let mut class_members: BTreeMap<ClassId, Vec<&Condition>> = BTreeMap::new();
+        for (condition, id) in conditions.iter().zip(ids.iter()) {
+            class_members.entry(*id).or_default().push(condition);
+        }
+        let labels: BTreeMap<ClassId, Condition> = class_members
+            .into_iter()
+            .map(|(id, members)| (id, merge_conditions(&members)))
+            .collect();
+
         // Indexed by class where the arc states a condition, and by `None` for the
         // catch-all, so the catch-all can be moved to the end whatever order it
         // first appeared in.
@@ -250,10 +276,17 @@ fn check_groups(
         for &index in &members {
             let arc = &raw_arcs[index];
             let (class, condition) = match &post[index] {
-                ArcPost::Settled { source, .. } => {
+                ArcPost::Settled { .. } => {
                     let class = ids[settled];
                     settled += 1;
-                    (Some(class), Some(source.clone()))
+                    let label = labels.get(&class).unwrap_or_else(|| {
+                        panic!(
+                            "internal: check class {:?} of pin {} was numbered without a \
+                             merged condition",
+                            class, pin
+                        )
+                    });
+                    (Some(class), Some(label.clone()))
                 }
                 ArcPost::CatchAll => (None, None),
                 // Only reachable where a condition that could not be read was kept,
@@ -941,7 +974,7 @@ fn process_cell(
     // order, so two arcs describing the same state share an id however they were
     // spelled -- and the ids run in the order the library declares the arcs.
     let classes = classify_states(&mut raw_arcs, &post_conditions);
-    let class_conditions = class_representatives(&raw_arcs, &post_conditions);
+    let class_conditions = merged_class_conditions(&raw_arcs, &post_conditions);
 
     // Phase 1b: file each arc's two edge halves under the scope this mode draws its
     // references at. The walk order is preserved, so each accumulator sums the same
@@ -3946,6 +3979,341 @@ library(sense_test) {{
         // arcs and not four.
         let q = cell.get_pin("Q").expect("Q");
         assert_eq!(q.iter_subgroups_of_type("timing").count(), 2);
+    }
+
+    /// A condition covering another is one state with it, merged at computation
+    /// time: one clock arc per edge, its delay the merge of both arcs, and one check
+    /// group under the covering condition.
+    ///
+    /// Derivation from the model. Both arcs are on `D` and `positive_unate`, under
+    /// `A * B` and `A * B * C`. `A * B` holds wherever `A * B * C` does, so the two
+    /// cannot be emitted as separate states -- Liberty UG p.7-49–50 requires a pin's
+    /// state-dependent conditions to be mutually exclusive. Conjoining the direction
+    /// the input settled in gives `A * B * D` and `A * B * C * D` for the rise
+    /// tables, which collide, and `A * B * !D` and `A * B * C * !D` for the fall,
+    /// which collide with each other and with neither of the first two. So two
+    /// states, one per edge, each stated under its covering member.
+    ///
+    /// The merge is the existing `--when-merge` machinery, reached because both arcs
+    /// now key on one scope. `T` is 2 slews x 2 loads, so a middle anchor reads row 1
+    /// of the merged delay: `cell_rise` is the mean of `[[1, 2], [3, 4]]` and
+    /// `[[5, 6], [7, 8]]`, whose row 1 is `[5, 6]`, and `cell_fall` the mean of the
+    /// ten-times tables, whose row 1 is `[50, 60]`.
+    ///
+    /// The check is charged against that same merged reference, which is the point of
+    /// merging at computation time. Its constraint is the merged arc's column 1 minus
+    /// the merged arc's crossing: `[4, 6] - 6 = [-2, 0]` rising and
+    /// `[40, 60] - 60 = [-20, 0]` falling. A check computed against either arc alone
+    /// lands on neither.
+    ///
+    /// Killed by: `collision_classes` reverted to interning on BDD-handle equality, which split the class in two and emitted four clock arcs carrying two unmerged tables. Observed to redden this test and the two overlap tests below it, which need the same class to exist at all, while `disjoint_conditions_sharing_a_literal_stay_separate_states` stays green -- equality keeps disjoint conditions apart and splits overlapping ones, which is the defect. (Reverting `merged_class_conditions` to the first-appearance representative was applied and observed to leave this test GREEN: the first member of this class IS its covering one, so this fixture pins the merge and not the choice of label. That choice is pinned by the two tests below.)
+    #[test]
+    fn a_covered_condition_merges_into_the_covering_one_at_computation_time() {
+        let mut lib = sense_lib(
+            &["D", "A", "B", "C"],
+            &format!(
+                "{}\n{}",
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * B"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#,
+                ),
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * B * C"),
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#,
+                ),
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let q = cell.get_pin("Q").expect("Q");
+        let groups: Vec<&Group> = q.iter_subgroups_of_type("timing").collect();
+
+        let stated: Vec<(String, Vec<&str>)> = groups
+            .iter()
+            .map(|g| (guard_of(g), table_types(g)))
+            .collect();
+        assert_eq!(
+            stated,
+            vec![
+                (
+                    "when A * B * D | sdf A == 1'B1 && B == 1'B1 && D == 1'B1".to_owned(),
+                    vec!["rise_transition", "cell_rise"]
+                ),
+                (
+                    "when A * B * !D | sdf A == 1'B1 && B == 1'B1 && D == 1'B0".to_owned(),
+                    vec!["fall_transition", "cell_fall"]
+                ),
+            ]
+        );
+        assert_eq!(table_values(&groups[0].subgroups[1]), vec![5.0, 6.0]);
+        assert_eq!(table_values(&groups[1].subgroups[1]), vec![50.0, 60.0]);
+
+        // One check group, under the covering condition the library itself wrote.
+        let d = cell.get_pin("D").expect("D");
+        let checks = arcs_of_type(d, "setup_rising");
+        assert_eq!(checks.len(), 1, "one state, one check group");
+        assert_eq!(
+            guard_of(checks[0]),
+            "when A * B | sdf A == 1'B1 && B == 1'B1"
+        );
+        assert_eq!(
+            table_types(checks[0]),
+            vec!["rise_constraint", "fall_constraint"]
+        );
+        assert_eq!(table_values(&checks[0].subgroups[0]), vec![-2.0, 0.0]);
+        assert_eq!(table_values(&checks[0].subgroups[1]), vec![-20.0, 0.0]);
+    }
+
+    /// Two arcs from different source pins whose conditions overlap are one state,
+    /// stated under the least restrictive condition -- and its reference is one
+    /// arc's, not a blend of the two.
+    ///
+    /// Derivation from the model. `D` is characterised under `A * B` and `E` under
+    /// `A * B * C`, the shape of the overlapping pairs the emitted libraries carried.
+    /// The four post-settled conditions are `A * B * D`, `A * B * !D`,
+    /// `A * B * C * E` and `A * B * C * !E`: `D` and `E` are independent pins, so
+    /// every condition drawn from one shares assignments with both drawn from the
+    /// other, and the closure of that makes all four one state. Their union is
+    /// `A * B * (D + !D) + A * B * C * (E + !E)`, which is `A * B` -- the least
+    /// restrictive condition of the class, and a single product term, so the label is
+    /// `A * B` with nothing conjoined.
+    ///
+    /// One state means one clock arc, and it carries both edges because the source
+    /// supplying its reference was characterised on both. That source is `D`, the
+    /// first the library declares: a reference is drawn from ONE pin's arcs, because
+    /// the propagation half belongs to the output while the setup half belongs to the
+    /// input, so blending two inputs into it would put an input's quantity in an
+    /// output's. Row 1 of `D`'s own tables is `[3, 4]` rising and `[30, 40]` falling;
+    /// the blend with `E` would be `[5, 6]` and `[50, 60]`, which is what this rules
+    /// out.
+    ///
+    /// Killed by: `merged_class_conditions` reverted to the first-appearance representative, which stated the merged state as `A * B * D` -- a condition `E`'s arcs hold outside, so the emitted state would have been narrower than the tables filed under it. Observed to redden this test alone: it is the only fixture whose class has no member equal to its union, so it is the only one whose label the representative rule can get wrong.
+    #[test]
+    fn overlapping_conditions_on_two_pins_are_one_state_with_one_pins_reference() {
+        let mut lib = sense_lib(
+            &["D", "E", "A", "B", "C"],
+            &format!(
+                "{}\n{}",
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * B"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#,
+                ),
+                full_sense_arc_when(
+                    "E",
+                    "positive_unate",
+                    Some("A * B * C"),
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#,
+                ),
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let q = cell.get_pin("Q").expect("Q");
+        let groups: Vec<&Group> = q.iter_subgroups_of_type("timing").collect();
+        assert_eq!(groups.len(), 1, "four colliding conditions are one state");
+
+        // A minimised label is spelled from the cover espresso returns, whose column
+        // order is its own, so the literals are compared as a set. `guard_of` is what
+        // asserts the `when` and its `sdf_cond` are both there.
+        let guard = guard_of(groups[0]);
+        let (when, sdf) = guard
+            .split_once(" | sdf ")
+            .unwrap_or_else(|| panic!("a conditioned group states both halves: {}", guard));
+        assert_eq!(
+            when.trim_start_matches("when ")
+                .split(" * ")
+                .collect::<BTreeSet<&str>>(),
+            BTreeSet::from(["A", "B"])
+        );
+        assert_eq!(
+            sdf.split(" && ").collect::<BTreeSet<&str>>(),
+            BTreeSet::from(["A == 1'B1", "B == 1'B1"])
+        );
+
+        // The reference is D's own arc, unblended with E's.
+        assert_eq!(
+            table_types(groups[0]),
+            vec![
+                "rise_transition",
+                "fall_transition",
+                "cell_rise",
+                "cell_fall"
+            ]
+        );
+        assert_eq!(table_values(&groups[0].subgroups[2]), vec![3.0, 4.0]);
+        assert_eq!(table_values(&groups[0].subgroups[3]), vec![30.0, 40.0]);
+    }
+
+    /// One pin's check conditions that overlap without either covering the other are
+    /// one group, stated under their union.
+    ///
+    /// Derivation from the model. Both arcs are on `D`, under `A * B` and `B * C`;
+    /// both hold with `A`, `B` and `C` high, so Liberty UG p.7-49–50 forbids emitting
+    /// them as two check groups, and neither covers the other, so the group can be
+    /// stated under neither member. Their union is `A * B + B * C`, whose prime
+    /// implicants are exactly those two products and both are essential -- `A * B` is
+    /// the only cover of `A * B * !C` and `B * C` the only cover of `!A * B * C` --
+    /// so the minimised label is that two-term sum. A `when` need not be one product
+    /// term.
+    ///
+    /// Killed by: `check_groups` took its group's condition from the arc that opened the slot, as it did before the classes began merging, which stated the group under `A * B` alone -- a condition the second arc's values were not confined to. Observed to redden this test alone; every other fixture's class has a member equal to its union, so the arc that opened the slot happens to state it and no other test can tell the two rules apart.
+    #[test]
+    fn overlapping_check_conditions_on_one_pin_are_grouped_under_their_union() {
+        let mut lib = sense_lib(
+            &["D", "A", "B", "C"],
+            &format!(
+                "{}\n{}",
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * B"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#,
+                ),
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("B * C"),
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#,
+                ),
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let d = cell.get_pin("D").expect("D");
+        let checks = arcs_of_type(d, "setup_rising");
+        assert_eq!(
+            checks.len(),
+            1,
+            "two colliding conditions are one check group"
+        );
+
+        // A minimised label is spelled from the cover espresso returns, whose term
+        // and column order are its own, so the products are compared as a set of
+        // sets. `guard_of` is what asserts the `when` and its `sdf_cond` are both
+        // there.
+        let guard = guard_of(checks[0]);
+        let (when, sdf) = guard
+            .split_once(" | sdf ")
+            .unwrap_or_else(|| panic!("a conditioned group states both halves: {}", guard));
+        fn products<'a>(text: &'a str, or: &str, and: &str) -> BTreeSet<BTreeSet<&'a str>> {
+            text.split(or)
+                .map(|term| term.split(and).collect())
+                .collect()
+        }
+        assert_eq!(
+            products(when.trim_start_matches("when "), " + ", " * "),
+            BTreeSet::from([BTreeSet::from(["A", "B"]), BTreeSet::from(["B", "C"])])
+        );
+        assert_eq!(
+            products(sdf, " || ", " && "),
+            BTreeSet::from([
+                BTreeSet::from(["A == 1'B1", "B == 1'B1"]),
+                BTreeSet::from(["B == 1'B1", "C == 1'B1"])
+            ])
+        );
+
+        // The two arcs describe one state per edge, so the output carries two clock
+        // arcs and not four.
+        let q = cell.get_pin("Q").expect("Q");
+        assert_eq!(q.iter_subgroups_of_type("timing").count(), 2);
+    }
+
+    /// Conditions that cannot hold at once are still separate states: sharing a
+    /// literal is not sharing an assignment.
+    ///
+    /// Derivation from the model. Both arcs are on `D`, under `A * B` and `A * !B`.
+    /// The two agree on `A` and disagree on `B`, so no assignment satisfies both and
+    /// nothing may be merged; conjoining the settled direction gives four conditions
+    /// that are pairwise exclusive, hence four states. Each was characterised by one
+    /// arc's one family, so each emits that family alone, at that arc's own row 1:
+    /// `[3, 4]`, `[30, 40]`, `[7, 8]` and `[70, 80]`. A criterion that collided them
+    /// would emit one arc of the mean, `[5, 6]`, under a label neither library
+    /// condition wrote.
+    ///
+    /// Killed by: `collision_classes` treated every conjunction as satisfiable -- `is_contradiction()` replaced by `false` -- which collapsed the four states into one. Observed to redden this test and fifteen others: every fixture in the tree whose conditions have to stay apart. No mutation separates them, because over-eager collision is one defect and they are its fixtures; this is the one whose two conditions share a literal, which is the shape a criterion keyed on shared pins rather than on shared assignments would get wrong.
+    #[test]
+    fn disjoint_conditions_sharing_a_literal_stay_separate_states() {
+        let mut lib = sense_lib(
+            &["D", "A", "B"],
+            &format!(
+                "{}\n{}",
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * B"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#,
+                ),
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * !B"),
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#,
+                ),
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let q = cell.get_pin("Q").expect("Q");
+        let groups: Vec<&Group> = q.iter_subgroups_of_type("timing").collect();
+
+        let stated: Vec<String> = groups.iter().map(|g| guard_of(g)).collect();
+        assert_eq!(
+            stated,
+            vec![
+                "when A * B * D | sdf A == 1'B1 && B == 1'B1 && D == 1'B1".to_owned(),
+                "when A * B * !D | sdf A == 1'B1 && B == 1'B1 && D == 1'B0".to_owned(),
+                "when A * !B * D | sdf A == 1'B1 && B == 1'B0 && D == 1'B1".to_owned(),
+                "when A * !B * !D | sdf A == 1'B1 && B == 1'B0 && D == 1'B0".to_owned(),
+            ]
+        );
+        assert_eq!(table_values(&groups[0].subgroups[1]), vec![3.0, 4.0]);
+        assert_eq!(table_values(&groups[1].subgroups[1]), vec![30.0, 40.0]);
+        assert_eq!(table_values(&groups[2].subgroups[1]), vec![7.0, 8.0]);
+        assert_eq!(table_values(&groups[3].subgroups[1]), vec![70.0, 80.0]);
+
+        // And two check groups, each under the condition the library wrote.
+        let d = cell.get_pin("D").expect("D");
+        let checks: Vec<String> = arcs_of_type(d, "setup_rising")
+            .into_iter()
+            .map(guard_of)
+            .collect();
+        assert_eq!(
+            checks,
+            vec![
+                "when A * B | sdf A == 1'B1 && B == 1'B1".to_owned(),
+                "when A * !B | sdf A == 1'B1 && B == 1'B0".to_owned(),
+            ]
+        );
     }
 
     /// Under a per-state reference an arc whose `when` cannot be read is skipped and

@@ -166,13 +166,15 @@ modes are one ladder, differing only in how finely the reference is keyed:
   otherwise — keeps its own reference, and the emitted delays and checks are conditioned on
   it.
 
-Arcs that collide on one key share a reference. `Scope::Whole` is the key `pooled` and
-`per-output` draw at — every arc of an output shares it, which is what keeps those two modes
-exactly what they always were. `Scope::State` and `Scope::CatchAll` are the two keys
-`per-state` draws at instead: a conditioned arc under the post-settled state its condition
-names, a whenless arc under the catch-all for its own output and edge. Two arcs describing
-the same state share one reference however many `when`s the library spelled it under — which
-is why the finest key is per-*state* and not per-arc.
+Arcs that collide on one key share a reference. To **collide** is for two conditions to be
+satisfiable together — for some assignment of the pins to meet both — and not merely for
+them to denote one function; §6 states the rule and what it is drawn from. `Scope::Whole` is
+the key `pooled` and `per-output` draw at — every arc of an output shares it, which is what
+keeps those two modes exactly what they always were. `Scope::State` and `Scope::CatchAll` are
+the two keys `per-state` draws at instead: a conditioned arc under the post-settled state its
+condition names, a whenless arc under the catch-all for its own output and edge. Arcs whose
+conditions can hold at once share one reference however many `when`s the library spelled them
+under — which is why the finest key is per-*state* and not per-arc.
 
 The derived `<name>_pseudo_constraint`/`<name>_pseudo_delay` lookup-template pair is
 generated once per lookup template the conversion used, whichever mode is asked for: the
@@ -198,17 +200,33 @@ state a delay is filed under and the family a constraint is written to are read 
 table family and the same `timing_sense`, never off `timing_type`'s clock-edge suffix, which
 names the clock and not the constrained pin.
 
-Two arcs whose conditions denote the same Boolean function collide into one state however
-differently they were spelled — `A * B` and `B * A` name one class, decided on a BDD rather
-than on text, so two spellings of one function are never emitted as two overlapping states.
+Two conditions **collide** when their conjunction is satisfiable — when some assignment of
+the pins meets both — decided on a BDD rather than on text, and a state is the transitive
+closure of pairwise collision, collision not being transitive on its own. So `A * B` and
+`B * A` are one state, being one function; `A * B` and `A * B * C` are one state, because
+`A * B` covers `A * B * C`; and `A * B` and `B * C` are one state, because both hold with all
+three pins high.
+
+UG p.7-49–50 is what this is drawn from: "You must define mutually exclusive conditions for
+state-dependent timing arcs", mutually exclusive meaning that no more than one condition may
+be met at any time. Two conditions that can both be met are therefore one state and not two,
+whatever their spellings. A source `when` need not name every pin, which is what makes
+overlap rather than equality the question: conditions are not all full assignments, and two
+of them over different pin subsets can share satisfying assignments without denoting the same
+function. The five cases are pinned in `src/conditions.rs` by
+`collision_classes_intern_by_function_in_first_appearance_order`,
+`a_condition_covering_another_is_one_class_with_it`,
+`two_overlapping_conditions_are_one_class`, `disjoint_conditions_are_two_classes` and
+`a_bridging_condition_closes_two_disjoint_ones_into_one_class`.
+
 `--when-merge` decides how the several arcs an accumulator collects for one key are combined
 into the single table the model emits for it: `mean` (representative), `max` (the
 pessimistic envelope) or `min` (the optimistic one), elementwise per slew/load point. Under
 `pooled`/`per-output` the key is the whole output, so this merges every `when`-conditioned
 arc of a pin pair into the cell's one arc. Under `per-state` the key is one post-settled
-state, so it instead resolves a **collision** — several conditions the library spelled
-differently but which denote the same state — within that one state; arcs describing
-different states are filed apart and never merged into each other.
+state, so it instead resolves a **collision** — several conditions that can hold at once, and
+are therefore one state — within that one state; arcs whose conditions cannot hold at once
+are filed apart and never merged into each other.
 
 ## 7. Checks and clock arcs conditioned on a post-settled state
 
@@ -217,13 +235,20 @@ Under `per-state`, an input pin's checks are grouped by a second classification:
 classification above and numbered per pin rather than per cell. The conditioned groups come
 first, the catch-all last — the order Liberty reads a `default_timing` group in.
 
-Each group's `when` and `sdf_cond` state the source condition **verbatim, with nothing
-conjoined**: what the check constrains is said by `timing_type` (`setup_rising`/
-`hold_rising`), never by the condition it holds under, and the condition itself is one the
-library actually wrote, not a synthetic one this tool invented. `setup_rising`/`hold_rising`
-name the **clock's** edge (RM p.332), which is why that suffix stays fixed however many
-conditions the checks multiply into — the fictitious clock this model refers everything to
-only ever rises.
+Each group's `when` and `sdf_cond` state its class's condition **with nothing conjoined**:
+what the check constrains is said by `timing_type` (`setup_rising`/`hold_rising`), never by
+the condition it holds under. That condition is the library's own spelling wherever the
+class's union equals one of its members — a class of one, a class of equal spellings, or a
+class one of whose members covers the rest — and the class's minimised union otherwise, which
+is a condition no library wrote. UG p.7-49–50's mutual-exclusivity requirement is about a
+pin's state-dependent timing arcs, which a check group is as much as a delay group is, so a
+class that overlaps without containment can be stated under no member of it.
+`overlapping_check_conditions_on_one_pin_are_grouped_under_their_union` in `src/engine.rs`
+pins that case, and `two_spellings_of_one_condition_are_one_check_group` the common one.
+
+`setup_rising`/`hold_rising` name the **clock's** edge (RM p.332), which is why that suffix
+stays fixed however many conditions the checks multiply into — the fictitious clock this
+model refers everything to only ever rises.
 
 A condition characterised in both input directions still yields **one** setup group and one
 hold group, not two: UG p.7-56 asks a constraint group for at least one lookup table, not for
@@ -253,15 +278,24 @@ It is rendered in **SDF 2.1 comparison form**: a pin is written as a comparison 
 one-bit literal (`P == 1'B1`, `P == 1'B0`) rather than as a bare name or its complement, which
 is the form a Verilog timing-check condition takes.
 
-Under `--latch`, the original arcs survive unchanged — including whatever `when` each was
-characterised under, spelled exactly as the library wrote it — while the new pseudo-
-synchronous groups carry the **representative** spelling of their state's collision class:
-first appearance wins, so two arcs that collided into one class because they denoted the
-same function keep their own distinct source spellings on the originals while the one pseudo
-group speaks for the class in whichever spelling was seen first. Two spellings of one
-function coexisting on the same cell this way is expected, not a defect: both are correct,
-and nothing here promises byte-identical spellings between an original arc and the pseudo
-group its state collided into.
+Wherever an original arc is preserved — every arc under `--latch`, and in the default flop
+mode a converted cell's reset arcs (§3) together with every arc of a cell or an output the
+conversion left alone (§1, §2) — it survives unchanged, including whatever `when` and
+whatever `sdf_cond` the library wrote on it. The new pseudo-synchronous groups meanwhile
+carry the **least restrictive** condition of their state's collision class: a class whose
+union equals one of its members — a class of one, a class of equal spellings, or a class one
+of whose members covers the rest, as `A * B * C * D` beside `A * B * C` — is stated in that
+member's source spelling verbatim, and a class that overlaps without containment carries the
+minimised union of its own members, rendered as a sum of product terms. A `when` need not be
+a single product term. Preserved arcs keep their own spellings either way.
+
+Several spellings of a condition coexisting in one emitted file is therefore expected, not a
+defect, and in either output mode. Whatever the conversion preserves — a reset arc, an arc
+of an output it skipped, every arc of a cell it is not a candidate for — keeps the spelling
+the source library wrote, whatever that spelling is; the groups pseudosync generates carry
+its own regenerated comparison form. All are correct, and nothing here promises
+byte-identical spellings between a preserved arc and the pseudo group whose state its
+condition collided into.
 
 Every condition `BoolExpr` builds is normalised to disjunctive normal form before it is ever
 rendered, so a source `when` combining an XOR — or any disjunction — is regenerated in

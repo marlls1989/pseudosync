@@ -957,7 +957,10 @@ mod tests {
                 output: "Q".to_owned(),
                 when: Some(whens[i].clone()),
                 sense: TimingSense::Positive,
-                // Each condition names a different pin, so each is its own class.
+                // The classifier's own answer over these conditions. Which ids it
+                // mints decides nothing here: every scope this fixture is rendered
+                // at is `Scope::Whole`, which `in_scope` accepts without reading a
+                // class at all.
                 class_rise: Some(ids[i]),
                 class_fall: None,
                 cell_rise: Some(table(*v)),
@@ -1026,11 +1029,14 @@ mod tests {
 
         // Real class ids from the classifier over the fixture's own conditions:
         // `ClassId` is opaque, and widening it so a test could write one down would
-        // be widening visibility to suit a test.
-        let whens = ["(C0)", "(C1)"];
+        // be widening visibility to suit a test. The two are the two values of one
+        // pin, so they cannot hold at once and are two states -- conditions that
+        // could hold at once would collide into one, which is a fixture with one
+        // state in it and nothing per-state to render.
+        let whens = ["(C0)", "(!C0)"];
         let parsed: Vec<Condition> = whens
             .iter()
-            .map(|w| Condition::parse(w).expect("a parenthesised pin name is a condition"))
+            .map(|w| Condition::parse(w).expect("a parenthesised literal is a condition"))
             .collect();
         let ids = collision_classes(&parsed);
 
@@ -1723,24 +1729,24 @@ mod tests {
             vec![
                 "cell DUT of library testlib",
                 "mean cell_rise arc D -> Q [C0] (input rise):",
-                "mean cell_rise arc D -> Q [C1] (input rise):",
+                "mean cell_rise arc D -> Q [!C0] (input rise):",
                 // Only the edge each state was characterised on, and the constant its
                 // constraint half was offset by.
                 "ref rise arc G -> Q [C0] (row 0):",
                 "crossing: 2",
-                "ref rise arc G -> Q [C1] (row 0):",
+                "ref rise arc G -> Q [!C0] (row 0):",
                 "crossing: 12",
                 "mean ref rise arc (col 1, row 0):",
                 "mean ref fall arc:",
                 "setup arc D [C0] (input rise):",
-                "setup arc D [C1] (input rise):",
+                "setup arc D [!C0] (input rise):",
                 // Hold is only worth printing once there is more than one of it.
                 "hold arc D [C0] (input rise):",
-                "hold arc D [C1] (input rise):",
+                "hold arc D [!C0] (input rise):",
                 "check conditions",
                 "the source `when` each pin's setup and hold groups are stated under, classified per pin",
                 &check_row("(C0)"),
-                &check_row("(C1)"),
+                &check_row("(!C0)"),
                 "rise arc D -> Q  when (C0)",
                 "original:",
                 "reconstructed:",
@@ -1765,7 +1771,7 @@ mod tests {
     fn dump_reduction_measures_each_state_against_its_own_members() {
         let out = rendered(|s| dump_reduction(s, &per_state_report()));
 
-        for (state, scale) in [("C0", 10), ("C1", 30)] {
+        for (state, scale) in [("C0", 10), ("!C0", 30)] {
             assert!(
                 out.contains(&format!(
                     "cell_rise arc D -> Q [{}] (input rise): mean of 1 condition(s)  |  mean scale {}  mean-of-condition scales {}\n",

@@ -10,42 +10,46 @@ how it was found, so that whoever picks it up later does not have to rediscover 
 
 ---
 
-## A missing delay family beside a present transition family is unpinned
+## A delay family with no slew family beside it is representable and cannot occur
 
-**Where.** `select_reference_arc` in `src/arcs.rs` refuses an edge unless it carries both a
-delay family and a transition family — the `edge` closure destructures `(delays?,
-transitions?)`. That behaviour is correct. Nothing in the suite pins it.
+**The domain fact.** A characterised `cell_rise` or `cell_fall` delay table is **always**
+accompanied by its slew table. Affirmed by this repository's owner, the author of the
+method the tool implements. No legal input delivers one without the other.
 
-**What is seen.** Nothing today: the tool behaves correctly. The exposure is that the
-behaviour could be weakened and no test would notice. Proven by execution — with
+**Where.** `TimingTables` carries the four families as independent optional tables, so the
+type permits a delay with no transition beside it. `select_reference_arc` in `src/arcs.rs`
+therefore has a branch refusing that combination — the `edge` closure's
+`(delays?, transitions?)`.
 
-```rust
-let (delays, transitions) = (delays.or(transitions)?, transitions?);
-```
+**What is seen.** Nothing. The tool is correct today, and the deferred item is not a fault
+in its behaviour.
 
-substituted in that closure, so a transition table silently stands in for a missing delay
-table, the whole suite still passes.
+**Why this is registered.** The branch exists, and a branch with no test reads as lost
+coverage — reasonably so, on the evidence available to a reviewer, since nothing in the
+tree records that the input cannot arrive. A review panel raised exactly that, calling for
+the deleted test `arcs::select_reference_arc_requires_all_four_tables` to be restored on
+the grounds that its replacement never constructs the case. An attempt to restore it then
+failed to produce a test that could discriminate its own killer mutation. Left as it is,
+this will be raised again by the next review, from the same evidence, to the same end.
 
-**How it was found.** A review panel observed that
-`arcs::select_reference_arc_requires_all_four_tables` had been deleted as subsumed by
-`a_scope_decides_how_complete_a_reference_has_to_be`, and that the subsumption claim was
-false: the survivor's two helpers drop both tables of an edge together, or drop a
-transition while keeping its delay — the mirror of the missing case. Neither constructs a
-delay missing beside a present transition.
+**The fix: make the state unrepresentable, not tested.** An edge should carry its delay and
+its slew as one thing — present or absent together — so a delay with no transition cannot
+be constructed at all. Then there is no branch refusing it, no untested path for a review
+to find, and no test to want: a test for it would pin an input that cannot arrive, which is
+worse than no test.
 
-**The trap, for whoever re-pins it.** The obvious fixture — clear `cell_rise`, keep
-`rise_transition`, clear both fall families — does **not** discriminate the mutation, and
-was confirmed not to by running it. `select_reference_arc` later reads
+Adding that test is explicitly **not** the fix, and neither is a comment asserting the
+domain fact. Both leave the unreachable branch in place for the next reviewer to find, and
+this repository does not treat prose as authority.
 
-```rust
-let sized = timing_tables.cell_rise.as_ref().or(timing_tables.cell_fall.as_ref())?;
-```
+**Where the pairing belongs.** Not in the Liberty crate: that is a structural parser,
+reading text and returning an AST, and it carries no semantics — asking it to guarantee
+that a delay arrives with its slew is asking the wrong layer. The pairing is constructed on
+the consumer's side of the crate boundary, in pseudosync, where the AST becomes the tool's
+own timing representation. A family arriving without its partner then yields no edge, which
+is exactly what happens today by a different route — the edge is built and
+`select_reference_arc` refuses it — so the observable outcome is unchanged and the branch
+disappears. Nothing detects, guards or reports: the pair is simply not constructible, which
+keeps this inside the settled rule that nothing defends against malformed input.
 
-which consults the raw delay fields rather than anything the `edge` closure computed. With
-both delay families cleared, the function returns `None` there for a reason unrelated to
-the mutation, so mutated and unmutated runs are indistinguishable. A fixture that keeps
-`cell_fall` present and clears only `fall_transition` lets that lookup succeed, leaving the
-two edges as mirrored gaps; the mutation then rescues only the rise side, `Scope::State`
-and `Scope::CatchAll` begin accepting, and the test reddens while
-`a_scope_decides_how_complete_a_reference_has_to_be` stays green. That construction is
-untried.
+The change reaches `TimingTables` and every reader of those four fields.
