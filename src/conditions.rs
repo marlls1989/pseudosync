@@ -22,7 +22,7 @@
 
 use espresso_logic::{bdd_builder, BoolExpr, ExprNode};
 
-/// How one rendering spells the operators.
+/// How one rendering spells the operators, and how it writes a pin held at a value.
 ///
 /// The single fold below is parameterised by this rather than duplicated, so a
 /// second rendering — the SDF spelling — cannot drift from the Liberty one: both
@@ -35,6 +35,10 @@ struct Spelling {
     xor: &'static str,
     one: &'static str,
     zero: &'static str,
+    /// A pin at a stated value. Spelled here rather than composed from `not`,
+    /// because a comparison rendering writes a low pin as a comparison against zero
+    /// and not as the complement of a comparison against one.
+    literal: fn(&str, bool) -> String,
 }
 
 /// Liberty's own spelling of a Boolean function.
@@ -45,6 +49,30 @@ const LIBERTY: Spelling = Spelling {
     xor: " ^ ",
     one: "1",
     zero: "0",
+    literal: |pin, value| {
+        if value {
+            pin.to_owned()
+        } else {
+            format!("!{}", pin)
+        }
+    },
+};
+
+/// SDF's spelling of the same function, as an `sdf_cond` states it.
+///
+/// An SDF condition is a Verilog expression over the ports, so a pin is written as
+/// a comparison against a one-bit literal rather than as a bare name, and the
+/// logical operators take their Verilog spellings. A low pin is `P == 1'B0` rather
+/// than the complement of `P == 1'B1`: the two denote the same thing, and the
+/// comparison is the form a timing-check condition is written in.
+const SDF: Spelling = Spelling {
+    not: "!",
+    and: " && ",
+    or: " || ",
+    xor: " ^ ",
+    one: "1'B1",
+    zero: "1'B0",
+    literal: |pin, value| format!("{} == 1'B{}", pin, if value { 1 } else { 0 }),
 };
 
 // Espresso's ladder, as tightness: an operand binding less tightly than the
@@ -55,33 +83,63 @@ const PREC_AND: u8 = 2;
 const PREC_NOT: u8 = 3;
 const PREC_ATOM: u8 = 4;
 
+/// One rendered subexpression: its text, how tightly it binds, and the pin it names
+/// where it is a bare variable.
+///
+/// The pin is carried because a spelling may write a low pin as something other than
+/// the complement of a high one — SDF writes `P == 1'B0` — and only a bare variable
+/// can be spelled that way. Recording it here is what lets the negation be decided
+/// bottom-up, in the one fold, rather than by a second walk of the tree.
+struct Rendered {
+    text: String,
+    tightness: u8,
+    variable: Option<String>,
+}
+
 /// Parenthesise an operand that binds less tightly than the operator taking it.
 ///
 /// Equal tightness needs no parentheses: every binary operator here is
 /// left-associative, and each is associative as a function, so the re-parsed tree
 /// denotes the same thing.
-fn operand((text, tightness): (String, u8), operator: u8) -> String {
-    if tightness < operator {
-        format!("({})", text)
+fn operand(rendered: Rendered, operator: u8) -> String {
+    if rendered.tightness < operator {
+        format!("({})", rendered.text)
     } else {
-        text
+        rendered.text
+    }
+}
+
+/// A rendering that names no pin, which is everything but a bare variable.
+fn compound(text: String, tightness: u8) -> Rendered {
+    Rendered {
+        text,
+        tightness,
+        variable: None,
     }
 }
 
 /// Render an expression in `spelling`, adding exactly the parentheses the
 /// precedence ladder requires.
 fn render(expr: &BoolExpr, spelling: Spelling) -> String {
-    expr.fold(|node| match node {
-        ExprNode::Variable(name) => (name.to_owned(), PREC_ATOM),
-        ExprNode::Constant(value) => (
+    expr.fold(|node: ExprNode<Rendered>| match node {
+        ExprNode::Variable(name) => Rendered {
+            text: (spelling.literal)(name, true),
+            tightness: PREC_ATOM,
+            variable: Some(name.to_owned()),
+        },
+        ExprNode::Constant(value) => compound(
             if value { spelling.one } else { spelling.zero }.to_owned(),
             PREC_ATOM,
         ),
-        ExprNode::Not(inner) => (
-            format!("{}{}", spelling.not, operand(inner, PREC_NOT)),
-            PREC_NOT,
-        ),
-        ExprNode::And(left, right) => (
+        // A negated pin has a spelling of its own; anything else is complemented.
+        ExprNode::Not(mut inner) => match inner.variable.take() {
+            Some(pin) => compound((spelling.literal)(&pin, false), PREC_ATOM),
+            None => compound(
+                format!("{}{}", spelling.not, operand(inner, PREC_NOT)),
+                PREC_NOT,
+            ),
+        },
+        ExprNode::And(left, right) => compound(
             format!(
                 "{}{}{}",
                 operand(left, PREC_AND),
@@ -90,7 +148,12 @@ fn render(expr: &BoolExpr, spelling: Spelling) -> String {
             ),
             PREC_AND,
         ),
-        ExprNode::Xor(left, right) => (
+        // Espresso normalises to disjunctive normal form, so no `Xor` node reaches
+        // this fold; the arm exists to make the match exhaustive. It also settles a
+        // divergence in the SDF spelling: this ladder places XOR below AND, whereas
+        // Verilog binds `^` tighter than `&&`, so an XOR taking an AND operand would
+        // be rendered without the parentheses it needs. That shape cannot occur.
+        ExprNode::Xor(left, right) => compound(
             format!(
                 "{}{}{}",
                 operand(left, PREC_XOR),
@@ -99,7 +162,7 @@ fn render(expr: &BoolExpr, spelling: Spelling) -> String {
             ),
             PREC_XOR,
         ),
-        ExprNode::Or(left, right) => (
+        ExprNode::Or(left, right) => compound(
             format!(
                 "{}{}{}",
                 operand(left, PREC_OR),
@@ -109,7 +172,7 @@ fn render(expr: &BoolExpr, spelling: Spelling) -> String {
             PREC_OR,
         ),
     })
-    .0
+    .text
 }
 
 /// A Boolean condition over pin names.
@@ -171,6 +234,15 @@ impl Condition {
     /// This condition in Liberty's spelling.
     pub(crate) fn liberty(&self) -> String {
         render(&self.expr, LIBERTY)
+    }
+
+    /// This condition in SDF's spelling, as an `sdf_cond` attribute states it.
+    ///
+    /// Rendered from the same expression the `when` beside it was parsed from, and
+    /// through the same fold, so the pair states one condition by construction
+    /// rather than by two translations that could disagree.
+    pub(crate) fn sdf(&self) -> String {
+        render(&self.expr, SDF)
     }
 
     /// The source library's own spelling where there was one, and the Liberty
@@ -340,6 +412,46 @@ mod tests {
         assert_eq!(
             Condition::parse("!(A + B) * !C").expect("parse").liberty(),
             "!(A + B) * !C"
+        );
+    }
+
+    /// SDF states a condition as a Verilog expression over the ports, so every pin
+    /// is a comparison against a one-bit literal and a low pin is a comparison
+    /// against zero rather than a complemented comparison against one.
+    ///
+    /// Derivation from the domain, not from the renderer. `!M * P` holds while M is
+    /// low and P is high, which SDF writes `M == 1'B0 && P == 1'B1`. A comparison is
+    /// an operand in its own right, so nothing brackets it; the conjunction of two
+    /// of them therefore carries no parentheses at all.
+    ///
+    /// Killed by: `SDF.one` spelled the true constant `"1"`, Liberty's spelling rather than SDF's one-bit literal. Observed to redden this test alone -- it is the only one that asks the SDF rendering for a constant.
+    #[test]
+    fn the_sdf_rendering_states_each_pin_as_a_comparison() {
+        let sdf = |text: &str| Condition::parse(text).expect("parse").sdf();
+
+        // The product of literals a post-settled state is built as.
+        assert_eq!(sdf("!M * P"), "M == 1'B0 && P == 1'B1");
+        // The other two binary operators take their Verilog spellings.
+        assert_eq!(sdf("A + B"), "A == 1'B1 || B == 1'B1");
+        assert_eq!(sdf("A ^ B"), "A == 1'B1 ^ B == 1'B1");
+        // A one-bit constant is written as one.
+        assert_eq!(sdf("true"), "1'B1");
+        assert_eq!(sdf("false"), "1'B0");
+    }
+
+    /// Only a bare pin has a low spelling of its own; a negated compound is
+    /// complemented, and bracketed exactly where the ladder requires.
+    ///
+    /// `!(A + B)` is not a pin at a value, so there is no comparison to invert: it
+    /// has to be written as the complement of the disjunction, and the disjunction
+    /// has to keep its parentheses or the complement would apply to `A` alone.
+    ///
+    /// Killed by: `render`'s `Not` arm took the variable spelling for every inner rendering -- `inner.variable.take().or(Some(inner.text.clone()))` -- so a complemented disjunction was written as a comparison of one. That also reddens `the_liberty_rendering_parenthesises_by_precedence_and_no_more`, which negates a compound in the other spelling; the SDF sibling above stays green under it, because that one negates bare pins alone, and that is the pair the mutation separates.
+    #[test]
+    fn a_negated_compound_is_complemented_rather_than_compared() {
+        assert_eq!(
+            Condition::parse("!(A + B) * !C").expect("parse").sdf(),
+            "!(A == 1'B1 || B == 1'B1) && C == 1'B0"
         );
     }
 

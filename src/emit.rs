@@ -1,6 +1,7 @@
 //! Construction of the Liberty groups the pseudo-flop model is written as.
 
 use crate::arcs::RefArc;
+use crate::conditions::Condition;
 use crate::pins::LATCH_REGEX;
 use indexmap::IndexMap;
 use liberty_parser::{
@@ -9,6 +10,53 @@ use liberty_parser::{
 };
 use ndarray::prelude::*;
 use std::collections::HashSet;
+
+/// What condition a timing group is emitted under.
+///
+/// One knob rather than an optional `when` beside an optional `sdf_cond`, because
+/// those two must never be written apart: a `when` with no `sdf_cond` leaves the SDF
+/// side of the same check unconditioned.
+pub(crate) enum Guard<'a> {
+    /// No condition at all. The group is the only one of its kind on the pin, which
+    /// is what a single-reference mode emits.
+    Unguarded,
+    /// The group holds only in this state.
+    Conditioned(&'a Condition),
+    /// The group covers whatever the conditioned ones do not.
+    CatchAll,
+}
+
+/// Write a guard onto a timing group's attributes.
+///
+/// Called last by every constructor below, so the guard's attributes are appended
+/// after the group's own: an [`IndexMap`] keeps insertion order, so an unguarded
+/// group is byte for byte the group it was before there were guards.
+///
+/// A `when` is never written without its `sdf_cond`, and both are rendered from the
+/// one [`Condition`] -- the `when` as the library spelled it, the `sdf_cond` from the
+/// expression that spelling parsed to -- so the pair states one condition by
+/// construction rather than by two translations that could disagree.
+fn apply_guard(attributes: &mut IndexMap<String, Vec<Attribute>>, guard: &Guard) {
+    match guard {
+        Guard::Unguarded => {}
+        Guard::Conditioned(condition) => {
+            attributes.insert(
+                "when".to_owned(),
+                vec![Attribute::Simple(Value::String(condition.as_written()))],
+            );
+            attributes.insert(
+                "sdf_cond".to_owned(),
+                vec![Attribute::Simple(Value::String(condition.sdf()))],
+            );
+        }
+        Guard::CatchAll => {
+            attributes.insert(
+                "default_timing".to_owned(),
+                vec![Attribute::Simple(Value::Expression("true".to_owned()))],
+            );
+        }
+    }
+}
 
 /// Create a constraint table group (rise_constraint or fall_constraint)
 fn create_constraint_table_group(
@@ -54,6 +102,7 @@ pub(crate) fn create_setup_timing_group(
     ref_arc: &RefArc,
     input_rise: Option<&Array1<f64>>,
     input_fall: Option<&Array1<f64>>,
+    guard: &Guard,
 ) -> Group {
     let mut setup_values = Vec::with_capacity(2);
 
@@ -73,7 +122,7 @@ pub(crate) fn create_setup_timing_group(
         ));
     }
 
-    Group {
+    let mut group = Group {
         type_: "timing".to_owned(),
         name: "".to_owned(),
         attributes: IndexMap::from([
@@ -81,6 +130,10 @@ pub(crate) fn create_setup_timing_group(
                 "related_pin".to_owned(),
                 vec![Attribute::Simple(Value::String(clock_name.to_owned()))],
             ),
+            // `setup_rising` names the CLOCK's edge (RM p.332), not the constrained
+            // pin's, and the fictitious clock this model refers everything to rises.
+            // So the suffix is fixed however many conditions the checks multiply
+            // into, and no `setup_falling` is ever emitted.
             (
                 "timing_type".to_owned(),
                 vec![Attribute::Simple(Value::Expression(
@@ -89,7 +142,9 @@ pub(crate) fn create_setup_timing_group(
             ),
         ]),
         subgroups: setup_values,
-    }
+    };
+    apply_guard(&mut group.attributes, guard);
+    group
 }
 
 /// Create a hold timing group for an input pin
@@ -101,6 +156,7 @@ pub(crate) fn create_hold_timing_group(
     ref_arc: &RefArc,
     input_rise: Option<&Array1<f64>>,
     input_fall: Option<&Array1<f64>>,
+    guard: &Guard,
 ) -> Group {
     let mut hold_values = Vec::with_capacity(2);
 
@@ -120,7 +176,7 @@ pub(crate) fn create_hold_timing_group(
         ));
     }
 
-    Group {
+    let mut group = Group {
         type_: "timing".to_owned(),
         name: "".to_owned(),
         attributes: IndexMap::from([
@@ -128,6 +184,7 @@ pub(crate) fn create_hold_timing_group(
                 "related_pin".to_owned(),
                 vec![Attribute::Simple(Value::String(clock_name.to_owned()))],
             ),
+            // As with the setup group above, the suffix names the clock's edge.
             (
                 "timing_type".to_owned(),
                 vec![Attribute::Simple(Value::Expression(
@@ -136,16 +193,27 @@ pub(crate) fn create_hold_timing_group(
             ),
         ]),
         subgroups: hold_values,
-    }
+    };
+    apply_guard(&mut group.attributes, guard);
+    group
 }
 
 /// Create a pseudo-synchronous output timing arc
+///
+/// Each table family is emitted only where the reference carries the edge it names:
+/// a state characterised in one direction alone has no delay to state for the other,
+/// and inventing one would describe a transition nothing measured.
 pub(crate) fn create_pseudo_output_timing_arc(
     clock_name: &str,
     output_transitions: &RefArc,
     mean_delays: &RefArc,
+    guard: &Guard,
 ) -> Group {
-    Group {
+    let table = |type_: &str, values: Option<&Array1<f64>>| {
+        values.map(|values| create_timing_table_group(type_, &mean_delays.lut_template, values))
+    };
+
+    let mut group = Group {
         type_: "timing".to_owned(),
         name: "".to_owned(),
         attributes: IndexMap::from([
@@ -164,30 +232,25 @@ pub(crate) fn create_pseudo_output_timing_arc(
                 ))],
             ),
         ]),
-        subgroups: vec![
+        subgroups: [
             // Use mean_delays.lut_template for consistency, but output's own transition values
-            create_timing_table_group(
+            table(
                 "rise_transition",
-                &mean_delays.lut_template,
-                &output_transitions.rise.transition,
+                output_transitions.rise.as_ref().map(|e| &e.transition),
             ),
-            create_timing_table_group(
+            table(
                 "fall_transition",
-                &mean_delays.lut_template,
-                &output_transitions.fall.transition,
+                output_transitions.fall.as_ref().map(|e| &e.transition),
             ),
-            create_timing_table_group(
-                "cell_rise",
-                &mean_delays.lut_template,
-                &mean_delays.rise.delay,
-            ),
-            create_timing_table_group(
-                "cell_fall",
-                &mean_delays.lut_template,
-                &mean_delays.fall.delay,
-            ),
-        ],
-    }
+            table("cell_rise", mean_delays.rise.as_ref().map(|e| &e.delay)),
+            table("cell_fall", mean_delays.fall.as_ref().map(|e| &e.delay)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+    };
+    apply_guard(&mut group.attributes, guard);
+    group
 }
 
 /// Convert latch groups to flip-flop groups
@@ -463,17 +526,42 @@ library(test) {
             related_pin: "CK".to_owned(),
             lut_template: lut_template.to_owned(),
             anchor: Anchor::Middle,
-            rise: EdgeRef {
+            rise: Some(EdgeRef {
                 delay: Array1::from(tables[2].to_vec()),
                 transition: Array1::from(tables[0].to_vec()),
                 crossing: tables[2][0],
-            },
-            fall: EdgeRef {
+            }),
+            fall: Some(EdgeRef {
                 delay: Array1::from(tables[3].to_vec()),
                 transition: Array1::from(tables[1].to_vec()),
                 crossing: tables[3][0],
-            },
+            }),
         }
+    }
+
+    /// The same reference with one edge removed, for the single-edge assertions.
+    fn one_edge(mut arc: RefArc, edge: &str) -> RefArc {
+        match edge {
+            "rise" => arc.fall = None,
+            _ => arc.rise = None,
+        }
+        arc
+    }
+
+    /// The text of one simple attribute, or `None` where the group carries none.
+    ///
+    /// Read structurally rather than through `Value::string`, which panics on a value
+    /// spelled as a bare expression -- and a `default_timing` is one.
+    fn attribute(group: &Group, name: &str) -> Option<String> {
+        group.simple_attribute(name).map(|v| match v {
+            Value::Expression(text) | Value::String(text) => text.clone(),
+            other => panic!("attribute {} is not a text value: {:?}", name, other),
+        })
+    }
+
+    /// The attribute keys of a group, in the order they were inserted.
+    fn attribute_order(group: &Group) -> Vec<&str> {
+        group.attributes.keys().map(String::as_str).collect()
     }
 
     /// The numbers a table group carries, which must be exactly one `FloatGroup`.
@@ -501,7 +589,7 @@ library(test) {
         let transitions = ref_arc("tplA", [[1.1, 1.2], [1.3, 1.4], [1.5, 1.6], [1.7, 1.8]]);
         let delays = ref_arc("tplB", [[9.1, 9.2], [9.3, 9.4], [9.5, 9.6], [9.7, 9.8]]);
 
-        let group = create_pseudo_output_timing_arc("G", &transitions, &delays);
+        let group = create_pseudo_output_timing_arc("G", &transitions, &delays, &Guard::Unguarded);
 
         assert_eq!(group.type_, "timing");
         assert_eq!(group.attributes["related_pin"], simple_string("G"));
@@ -520,23 +608,27 @@ library(test) {
             ]
         );
 
+        let edge = |arc: &RefArc, rise: bool| {
+            let edge = if rise { &arc.rise } else { &arc.fall };
+            edge.as_ref().expect("the fixture draws both edges").clone()
+        };
         // The transitions are the output's own ...
         assert_eq!(
             table_values(&group.subgroups[0]),
-            transitions.rise.transition.to_vec()
+            edge(&transitions, true).transition.to_vec()
         );
         assert_eq!(
             table_values(&group.subgroups[1]),
-            transitions.fall.transition.to_vec()
+            edge(&transitions, false).transition.to_vec()
         );
         // ... while the delays are the reference's. Swapping the two is the defect.
         assert_eq!(
             table_values(&group.subgroups[2]),
-            delays.rise.delay.to_vec()
+            edge(&delays, true).delay.to_vec()
         );
         assert_eq!(
             table_values(&group.subgroups[3]),
-            delays.fall.delay.to_vec()
+            edge(&delays, false).delay.to_vec()
         );
 
         // Every table indexes the reference's template, not the output's.
@@ -714,7 +806,7 @@ library(pseudo_arc_test) {
     fn create_setup_timing_group_targets_the_clock_with_setup_rising() {
         let arc = ref_arc("tplE", [[0.0, 0.0]; 4]);
 
-        let group = create_setup_timing_group("CK", &arc, None, None);
+        let group = create_setup_timing_group("CK", &arc, None, None, &Guard::Unguarded);
 
         assert_eq!(group.type_, "timing");
         assert_eq!(group.attributes["related_pin"], simple_string("CK"));
@@ -730,21 +822,22 @@ library(pseudo_arc_test) {
         let types =
             |g: &Group| -> Vec<String> { g.subgroups.iter().map(|s| s.type_.clone()).collect() };
 
-        let rise_only = create_setup_timing_group("CK", &arc, Some(&rise), None);
+        let rise_only = create_setup_timing_group("CK", &arc, Some(&rise), None, &Guard::Unguarded);
         assert_eq!(types(&rise_only), vec!["rise_constraint"]);
         assert_eq!(table_values(&rise_only.subgroups[0]), vec![1.0, 2.0]);
 
-        let fall_only = create_setup_timing_group("CK", &arc, None, Some(&fall));
+        let fall_only = create_setup_timing_group("CK", &arc, None, Some(&fall), &Guard::Unguarded);
         assert_eq!(types(&fall_only), vec!["fall_constraint"]);
         assert_eq!(table_values(&fall_only.subgroups[0]), vec![3.0, 4.0]);
 
         // Both sides present: rise leads, so the emitted order stays stable.
-        let both = create_setup_timing_group("CK", &arc, Some(&rise), Some(&fall));
+        let both =
+            create_setup_timing_group("CK", &arc, Some(&rise), Some(&fall), &Guard::Unguarded);
         assert_eq!(types(&both), vec!["rise_constraint", "fall_constraint"]);
         assert_eq!(table_values(&both.subgroups[0]), vec![1.0, 2.0]);
         assert_eq!(table_values(&both.subgroups[1]), vec![3.0, 4.0]);
 
-        let neither = create_setup_timing_group("CK", &arc, None, None);
+        let neither = create_setup_timing_group("CK", &arc, None, None, &Guard::Unguarded);
         assert!(neither.subgroups.is_empty());
     }
 
@@ -753,7 +846,7 @@ library(pseudo_arc_test) {
     fn create_hold_timing_group_targets_the_clock_with_hold_rising() {
         let arc = ref_arc("tplE", [[0.0, 0.0]; 4]);
 
-        let group = create_hold_timing_group("CK", &arc, None, None);
+        let group = create_hold_timing_group("CK", &arc, None, None, &Guard::Unguarded);
 
         assert_eq!(group.type_, "timing");
         assert_eq!(group.attributes["related_pin"], simple_string("CK"));
@@ -769,21 +862,149 @@ library(pseudo_arc_test) {
         let types =
             |g: &Group| -> Vec<String> { g.subgroups.iter().map(|s| s.type_.clone()).collect() };
 
-        let rise_only = create_hold_timing_group("CK", &arc, Some(&rise), None);
+        let rise_only = create_hold_timing_group("CK", &arc, Some(&rise), None, &Guard::Unguarded);
         assert_eq!(types(&rise_only), vec!["rise_constraint"]);
         assert_eq!(table_values(&rise_only.subgroups[0]), vec![-1.0, -2.0]);
 
-        let fall_only = create_hold_timing_group("CK", &arc, None, Some(&fall));
+        let fall_only = create_hold_timing_group("CK", &arc, None, Some(&fall), &Guard::Unguarded);
         assert_eq!(types(&fall_only), vec!["fall_constraint"]);
         assert_eq!(table_values(&fall_only.subgroups[0]), vec![-3.0, -4.0]);
 
         // Both sides present: rise leads, so the emitted order stays stable.
-        let both = create_hold_timing_group("CK", &arc, Some(&rise), Some(&fall));
+        let both =
+            create_hold_timing_group("CK", &arc, Some(&rise), Some(&fall), &Guard::Unguarded);
         assert_eq!(types(&both), vec!["rise_constraint", "fall_constraint"]);
         assert_eq!(table_values(&both.subgroups[0]), vec![-1.0, -2.0]);
         assert_eq!(table_values(&both.subgroups[1]), vec![-3.0, -4.0]);
 
-        let neither = create_hold_timing_group("CK", &arc, None, None);
+        let neither = create_hold_timing_group("CK", &arc, None, None, &Guard::Unguarded);
         assert!(neither.subgroups.is_empty());
+    }
+
+    // --- guards -------------------------------------------------------------
+
+    /// A conditioned group states its condition twice and in two languages, and the
+    /// two must always be written together.
+    ///
+    /// `when` is what Liberty conditions the group on and `sdf_cond` is what the SDF
+    /// annotation carries; a group with one and not the other conditions the delay
+    /// calculator and leaves the annotator unconditioned, or the reverse. Both are
+    /// rendered from the ONE `Condition`, so the pair cannot say two different
+    /// things: the `when` is the source spelling verbatim and the `sdf_cond` is the
+    /// expression that spelling parsed to.
+    ///
+    /// Killed by: `apply_guard` wrote the `when` as `condition.liberty()` rather than as `condition.as_written()`, which normalised the source spelling to `!M * P`. Observed to redden this test alone: it is the only one whose source spelling differs from the rendering, which is exactly the difference it is here to catch. (Dropping the `sdf_cond` insert altogether reddens this and six per-state neighbours, because `guard_of` refuses a group stated by halves anywhere.)
+    #[test]
+    fn a_conditioned_group_carries_its_when_and_its_sdf_cond_together() {
+        // A source spelling the renderer would not produce, so a `when` taken from
+        // the rendering rather than from the library is visible.
+        let condition = Condition::parse("(!M)*(P)").expect("a parenthesised conjunction");
+        let arc = ref_arc("tplF", [[0.0, 0.0]; 4]);
+
+        for group in [
+            create_setup_timing_group("CK", &arc, None, None, &Guard::Conditioned(&condition)),
+            create_hold_timing_group("CK", &arc, None, None, &Guard::Conditioned(&condition)),
+        ] {
+            // The library's own text, byte for byte.
+            assert_eq!(attribute(&group, "when").as_deref(), Some("(!M)*(P)"));
+            // ... and the same condition as SDF states it: M low and P high.
+            assert_eq!(
+                attribute(&group, "sdf_cond").as_deref(),
+                Some("M == 1'B0 && P == 1'B1")
+            );
+            assert_eq!(attribute(&group, "default_timing"), None);
+        }
+    }
+
+    /// The catch-all states no condition at all: it is the group Liberty falls back
+    /// to when no conditioned one applies, which `default_timing` is what says.
+    ///
+    /// Killed by: `apply_guard`'s `CatchAll` arm inserted a `when` of `"1"` beside the `default_timing`, which is a conditioned group claiming to hold always rather than a fallback. That also reddens the two engine tests whose fixtures carry a catch-all; `an_unguarded_group_gains_nothing_and_keeps_its_attribute_order` stays green under it, which is the sibling that separates the catch-all arm from the unguarded one.
+    #[test]
+    fn a_catch_all_group_states_a_default_and_no_condition() {
+        let arc = ref_arc("tplF", [[0.0, 0.0]; 4]);
+        let group = create_setup_timing_group("CK", &arc, None, None, &Guard::CatchAll);
+
+        assert_eq!(attribute(&group, "default_timing").as_deref(), Some("true"));
+        assert_eq!(attribute(&group, "when"), None);
+        assert_eq!(attribute(&group, "sdf_cond"), None);
+    }
+
+    /// An unguarded group is the group it was before there were guards: the same
+    /// attributes, in the same order, and nothing appended.
+    ///
+    /// Order is what this pins beyond the absence: the guard's attributes are
+    /// appended last, so a mode that emits one unguarded group per pin emits the
+    /// bytes it always did.
+    ///
+    /// Killed by: `apply_guard` inserted `default_timing` for `Guard::Unguarded` as well as for `Guard::CatchAll`, which appended an attribute to every group the default mode emits.
+    #[test]
+    fn an_unguarded_group_gains_nothing_and_keeps_its_attribute_order() {
+        let arc = ref_arc("tplF", [[0.0, 0.0]; 4]);
+
+        assert_eq!(
+            attribute_order(&create_setup_timing_group(
+                "CK",
+                &arc,
+                None,
+                None,
+                &Guard::Unguarded
+            )),
+            vec!["related_pin", "timing_type"]
+        );
+        assert_eq!(
+            attribute_order(&create_pseudo_output_timing_arc(
+                "G",
+                &arc,
+                &arc,
+                &Guard::Unguarded
+            )),
+            vec!["related_pin", "timing_sense", "timing_type"]
+        );
+
+        // A guard appends; it never reorders or replaces what was there.
+        let condition = Condition::parse("M").expect("a pin name is a condition");
+        assert_eq!(
+            attribute_order(&create_pseudo_output_timing_arc(
+                "G",
+                &arc,
+                &arc,
+                &Guard::Conditioned(&condition)
+            )),
+            vec![
+                "related_pin",
+                "timing_sense",
+                "timing_type",
+                "when",
+                "sdf_cond"
+            ]
+        );
+    }
+
+    /// A state characterised in one direction alone emits the two tables of that
+    /// direction and no others.
+    ///
+    /// The four tables are two pairs, and each pair belongs to one output edge: a
+    /// `combinational_rise` group carries the rise families alone, and inventing the
+    /// fall ones would state a delay and a slew for a transition nothing measured.
+    ///
+    /// Killed by: `create_pseudo_output_timing_arc` fell back to the other edge's tables where one was absent -- `mean_delays.rise.as_ref().or(mean_delays.fall.as_ref())` for the `cell_rise` table -- so a fall-only state emitted a `cell_rise` copied from its fall delay. That also reddens `per_state_emits_one_conditioned_clock_arc_per_state_and_a_catch_all_last`, which asks the same question of the whole engine path; every other emit test hands both edges, where the fallback never fires.
+    #[test]
+    fn a_single_edge_reference_emits_that_edge_alone() {
+        let arc = ref_arc("tplG", [[1.1, 1.2], [1.3, 1.4], [1.5, 1.6], [1.7, 1.8]]);
+
+        let rise = one_edge(arc.clone(), "rise");
+        let group = create_pseudo_output_timing_arc("G", &rise, &rise, &Guard::Unguarded);
+        let types: Vec<&str> = group.subgroups.iter().map(|g| g.type_.as_str()).collect();
+        assert_eq!(types, vec!["rise_transition", "cell_rise"]);
+        assert_eq!(table_values(&group.subgroups[0]), vec![1.1, 1.2]);
+        assert_eq!(table_values(&group.subgroups[1]), vec![1.5, 1.6]);
+
+        let fall = one_edge(arc, "fall");
+        let group = create_pseudo_output_timing_arc("G", &fall, &fall, &Guard::Unguarded);
+        let types: Vec<&str> = group.subgroups.iter().map(|g| g.type_.as_str()).collect();
+        assert_eq!(types, vec!["fall_transition", "cell_fall"]);
+        assert_eq!(table_values(&group.subgroups[0]), vec![1.3, 1.4]);
+        assert_eq!(table_values(&group.subgroups[1]), vec![1.7, 1.8]);
     }
 }

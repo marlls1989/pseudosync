@@ -1,7 +1,7 @@
 //! Rendering of the reconstruction report: the tables, the per-arc statistics
 //! and the sections they are laid out in.
 
-use crate::arcs::{input_transition, Anchor, OffsetPlacement, ReferenceMode, Transition};
+use crate::arcs::{input_transition, Anchor, OffsetPlacement, ReferenceMode, Scope, Transition};
 use crate::report::{ArcError, CellReport, ConditionedArc, Refusal};
 use gpoint::GPoint;
 use itertools::Itertools;
@@ -115,6 +115,56 @@ fn mean_anchor_caption(anchor: Anchor, col: usize, row: usize) -> String {
     }
 }
 
+/// Whether this report was drawn per state, which is what the per-class sections
+/// are for.
+///
+/// Read off the keys rather than handed in: a report holding a reference at anything
+/// finer than the whole output is a per-state one, and one holding none has nothing
+/// per-class to say.
+fn is_per_state(r: &CellReport) -> bool {
+    r.ref_arcs.keys().any(|(_, scope)| *scope != Scope::Whole)
+}
+
+/// How a table filed under a scope is captioned.
+///
+/// Empty for a whole-output scope, because that is the output's only reference and
+/// naming it would say nothing -- so every caption drawn under a mode that has only
+/// that scope reads exactly as it always has.
+fn scope_caption(scope: &Scope, r: &CellReport) -> String {
+    match scope {
+        Scope::Whole => String::new(),
+        // A `when`-less arc states no condition; it covers whatever the conditioned
+        // arcs of its output do not.
+        Scope::CatchAll => " [catch-all]".to_owned(),
+        Scope::State(class) => format!(
+            " [{}]",
+            r.class_conditions
+                .get(class)
+                .map(String::as_str)
+                .unwrap_or("unnamed state")
+        ),
+    }
+}
+
+/// Whether one raw arc's own edge was filed under `scope`.
+///
+/// Stated without reference to the mode: a whole-output scope covers every arc of
+/// its output, a catch-all covers the arcs that state no condition, and a state
+/// covers the arcs whose edge fell in that class.
+fn in_scope(arc: &ConditionedArc, family: &str, scope: &Scope) -> bool {
+    match scope {
+        Scope::Whole => true,
+        Scope::CatchAll => arc.when.is_none(),
+        Scope::State(class) => {
+            let edge = match family_output(family) {
+                Transition::Rise => arc.class_rise,
+                Transition::Fall => arc.class_fall,
+            };
+            edge == Some(*class)
+        }
+    }
+}
+
 fn dump_cell(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>> {
     writeln!(sink, "cell {} of library {}", r.cell, r.library)?;
 
@@ -123,19 +173,22 @@ fn dump_cell(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>>
     let grid = Labels::grid(r.slews.as_ref(), r.loads.as_ref());
     let by_slew = Labels::rows(r.slews.as_ref());
     let by_load = Labels::columns(r.loads.as_ref());
+    let per_state = is_per_state(r);
 
     // Captioned with both keys the values are filed under: the family they were
     // characterised in, which names the OUTPUT's direction, and the input's own
     // direction, which is what the constraint built from them is keyed on. Naming
-    // only one of the two would read as a claim that they agree.
-    for ((src, dst, input_edge, family), v) in &r.constraint_arcs {
+    // only one of the two would read as a claim that they agree. Under a per-state
+    // reference the state they were referred to is named beside them.
+    for ((src, dst, scope, input_edge, family), v) in &r.constraint_arcs {
         dump(
             sink,
             &format!(
-                "mean {} arc {} -> {} (input {}):",
+                "mean {} arc {} -> {}{} (input {}):",
                 family,
                 src,
                 dst,
+                scope_caption(scope, r),
                 input_edge.name()
             ),
             v,
@@ -143,39 +196,71 @@ fn dump_cell(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>>
         )?;
     }
 
-    for (out, v) in &r.ref_arcs {
+    for ((out, scope), v) in &r.ref_arcs {
         let at = anchor_caption(v.anchor, v.row);
-        dump(
-            sink,
-            &format!("ref rise arc {} -> {} {}:", v.related_pin, out, at),
-            &v.rise.delay,
-            by_load,
-        )?;
-        dump(
-            sink,
-            &format!("ref fall arc {} -> {} {}:", v.related_pin, out, at),
-            &v.fall.delay,
-            by_load,
-        )?;
+        let state = scope_caption(scope, r);
+        // Only the edges this reference carries: a state characterised in one
+        // direction alone has no profile to print for the other.
+        for (edge_name, edge) in [("rise", v.rise.as_ref()), ("fall", v.fall.as_ref())] {
+            let Some(edge) = edge else { continue };
+            dump(
+                sink,
+                &format!(
+                    "ref {} arc {} -> {}{} {}:",
+                    edge_name, v.related_pin, out, state, at
+                ),
+                &edge.delay,
+                by_load,
+            )?;
+            // The constant the constraint half of this state is offset by. Printed
+            // per state only: with one reference per output it is the same number
+            // for every table below, and is read off the setup arcs there.
+            if per_state {
+                writeln!(sink, "crossing: {}", g(edge.crossing))?;
+            }
+        }
     }
 
-    dump(
-        sink,
-        &format!(
-            "mean ref rise arc {}:",
-            mean_anchor_caption(r.mean_ref.anchor, r.mean_ref.col, r.mean_ref.row)
-        ),
-        &r.mean_ref.rise.delay,
-        by_load,
-    )?;
-    dump(sink, "mean ref fall arc:", &r.mean_ref.fall.delay, by_load)?;
+    if let Some(rise) = r.mean_ref.rise.as_ref() {
+        dump(
+            sink,
+            &format!(
+                "mean ref rise arc {}:",
+                mean_anchor_caption(r.mean_ref.anchor, r.mean_ref.col, r.mean_ref.row)
+            ),
+            &rise.delay,
+            by_load,
+        )?;
+    }
+    if let Some(fall) = r.mean_ref.fall.as_ref() {
+        dump(sink, "mean ref fall arc:", &fall.delay, by_load)?;
+    }
 
-    for (k, v) in &r.setup_input_rise {
-        dump(sink, &format!("setup arc {} (input rise):", k), v, by_slew)?;
+    for ((k, scope), v) in &r.setup_input_rise {
+        let label = format!("setup arc {}{} (input rise):", k, scope_caption(scope, r));
+        dump(sink, &label, v, by_slew)?;
     }
-    for (k, v) in &r.setup_input_fall {
-        dump(sink, &format!("setup arc {} (input fall):", k), v, by_slew)?;
+    for ((k, scope), v) in &r.setup_input_fall {
+        let label = format!("setup arc {}{} (input fall):", k, scope_caption(scope, r));
+        dump(sink, &label, v, by_slew)?;
     }
+
+    // The hold constraints are the setup ones negated, so with one group per pin
+    // they say nothing the section above does not. Per state there is one pair per
+    // condition, and which condition carries which figure is what the section is
+    // for.
+    if per_state {
+        for ((k, scope), v) in &r.hold_input_rise {
+            let label = format!("hold arc {}{} (input rise):", k, scope_caption(scope, r));
+            dump(sink, &label, v, by_slew)?;
+        }
+        for ((k, scope), v) in &r.hold_input_fall {
+            let label = format!("hold arc {}{} (input fall):", k, scope_caption(scope, r));
+            dump(sink, &label, v, by_slew)?;
+        }
+    }
+
+    dump_check_conditions(sink, r)?;
 
     // How much error the conversion introduces over the characterised arcs it
     // aims to replace, and in which regions and regimes that error is most
@@ -198,6 +283,42 @@ fn dump_cell(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>>
         dump(sink, "error % of original:", &a.relative_error(), grid)?;
         writeln!(sink, "{}\n", stat_line(a))?;
     }
+
+    Ok(())
+}
+
+/// The conditions each input pin's setup and hold groups were stated under.
+///
+/// Deliberately its own block, and deliberately not the `collision classes` one: that
+/// numbers the states the cell's OUTPUTS settle in and is what the emitted delays are
+/// conditioned on, while this numbers the conditions the library characterised each
+/// INPUT under and is what the emitted checks are conditioned on. The two are
+/// classified separately and their class numbers mean different things, so they are
+/// never printed as one list.
+///
+/// Empty under a mode that emits one unconditioned check per pin, where the checks
+/// were grouped under nothing at all.
+fn dump_check_conditions(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>> {
+    if r.check_classes.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(sink, "check conditions")?;
+    writeln!(
+        sink,
+        "the source `when` each pin's setup and hold groups are stated under, classified per pin\n"
+    )?;
+    for class in &r.check_classes {
+        writeln!(
+            sink,
+            "  {} {:<44} {} arc(s): {}",
+            class.pin,
+            class.condition.as_deref().unwrap_or("catch-all"),
+            class.members.len(),
+            class.members.join(", ")
+        )?;
+    }
+    writeln!(sink)?;
 
     Ok(())
 }
@@ -263,17 +384,20 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Er
     )?;
 
     // The conditions this group was merged from: the ones carrying the family's
-    // table AND routed to this input direction. Both halves of the key are needed
-    // -- a pin pair characterised under two senses contributes its `cell_rise`
-    // tables to two different groups, and measuring one against the other's
+    // table AND routed to this input direction AND filed under this scope. Every
+    // part of the key is needed -- a pin pair characterised under two senses
+    // contributes its `cell_rise` tables to two different groups, and under a
+    // per-state reference one condition's arcs are merged only with the arcs
+    // describing the same state -- and measuring one group against another's
     // conditions would report a reduction error that no reduction made.
-    for ((source, output, input_edge, family), mean) in &r.constraint_arcs {
+    for ((source, output, scope, input_edge, family), mean) in &r.constraint_arcs {
         let conditions: Vec<&ConditionedArc> = r
             .raw_arcs
             .iter()
             .filter(|a| &a.source == source && &a.output == output)
             .filter(|a| family_table(a, family).is_some())
             .filter(|a| input_transition(a.sense, family_output(family)) == Some(*input_edge))
+            .filter(|a| in_scope(a, family, scope))
             .collect();
 
         // Printed so the reduction can be checked without trusting it: for
@@ -290,10 +414,11 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Er
 
         writeln!(
             sink,
-            "{} arc {} -> {} (input {}): mean of {} condition(s)  |  mean scale {}  mean-of-condition scales {}",
+            "{} arc {} -> {}{} (input {}): mean of {} condition(s)  |  mean scale {}  mean-of-condition scales {}",
             family,
             source,
             output,
+            scope_caption(scope, r),
             input_edge.name(),
             conditions.len(),
             g(scale_of(mean)),
@@ -718,7 +843,7 @@ mod tests {
     use super::*;
     use crate::arcs::{EdgeRef, RefArc, ReferenceMode, TimingSense, WhenMerge};
     use crate::conditions::{collision_classes, Condition}; // Test-only; the fixture's class ids are minted by the real classifier rather than written down.
-    use crate::report::StateClass;
+    use crate::report::{CheckClass, StateClass};
     use std::collections::BTreeMap;
     use std::io::{self, Write};
 
@@ -788,16 +913,16 @@ mod tests {
             related_pin: "G".to_owned(),
             lut_template: "T".to_owned(),
             anchor,
-            rise: EdgeRef {
+            rise: Some(EdgeRef {
                 delay: Array1::from(vec![1.0, 2.0]),
                 transition: Array1::from(vec![0.1, 0.2]),
                 crossing: 2.0,
-            },
-            fall: EdgeRef {
+            }),
+            fall: Some(EdgeRef {
                 delay: Array1::from(vec![1.5, 2.5]),
                 transition: Array1::from(vec![0.11, 0.21]),
                 crossing: 2.5,
-            },
+            }),
         }
     }
 
@@ -861,20 +986,142 @@ mod tests {
                 (
                     "D".to_owned(),
                     "Q".to_owned(),
+                    Scope::Whole,
                     Transition::Rise,
                     "cell_rise",
                 ),
                 table(mean),
             )]),
-            ref_arcs: BTreeMap::from([("Q".to_owned(), ref_arc())]),
+            ref_arcs: BTreeMap::from([(("Q".to_owned(), Scope::Whole), ref_arc())]),
             mean_ref: ref_arc(),
-            setup_input_rise: BTreeMap::from([("D".to_owned(), Array1::from(vec![0.5, 0.6]))]),
+            setup_input_rise: BTreeMap::from([(
+                ("D".to_owned(), Scope::Whole),
+                Array1::from(vec![0.5, 0.6]),
+            )]),
             setup_input_fall: BTreeMap::new(),
+            hold_input_rise: BTreeMap::from([(
+                ("D".to_owned(), Scope::Whole),
+                Array1::from(vec![-0.5, -0.6]),
+            )]),
+            hold_input_fall: BTreeMap::new(),
             slews: None,
             loads: None,
             arcs: vec![arc_error("DUT")],
             classes,
+            // One reference for the whole output, so no state is named and no check
+            // is grouped under a condition.
+            class_conditions: BTreeMap::new(),
+            check_classes: Vec::new(),
         }
+    }
+
+    /// The same report drawn per state: one output characterised in two states, each
+    /// with its own reference, its own merged arc and its own constraint.
+    ///
+    /// The two states are an order of magnitude apart, so a section captioned with
+    /// the wrong state, or a figure measured against the wrong state's members, is
+    /// visible rather than plausible.
+    fn per_state_report() -> CellReport {
+        let table = |v: f64| Array2::from_shape_vec((1, 2), vec![v, v]).unwrap();
+
+        // Real class ids from the classifier over the fixture's own conditions:
+        // `ClassId` is opaque, and widening it so a test could write one down would
+        // be widening visibility to suit a test.
+        let whens = ["(C0)", "(C1)"];
+        let parsed: Vec<Condition> = whens
+            .iter()
+            .map(|w| Condition::parse(w).expect("a parenthesised pin name is a condition"))
+            .collect();
+        let ids = collision_classes(&parsed);
+
+        let refarc = |delay: f64| RefArc {
+            col: 1,
+            row: 0,
+            related_pin: "G".to_owned(),
+            lut_template: "T".to_owned(),
+            anchor: Anchor::Middle,
+            // Each state was characterised on the rise edge alone, which is the
+            // ordinary shape a conditioned arc comes in.
+            rise: Some(EdgeRef {
+                delay: Array1::from(vec![delay, delay + 1.0]),
+                transition: Array1::from(vec![0.1, 0.2]),
+                crossing: delay + 1.0,
+            }),
+            fall: None,
+        };
+
+        let mut report = cell_report(&[[10.0, 10.0]]);
+        report.raw_arcs = whens
+            .iter()
+            .zip(ids.iter())
+            .zip([10.0, 30.0])
+            .map(|((when, class), value)| ConditionedArc {
+                source: "D".to_owned(),
+                output: "Q".to_owned(),
+                when: Some((*when).to_owned()),
+                sense: TimingSense::Positive,
+                class_rise: Some(*class),
+                class_fall: None,
+                cell_rise: Some(table(value)),
+                cell_fall: None,
+            })
+            .collect();
+        // One member per state, so each state's merged arc IS that member's table.
+        report.constraint_arcs = BTreeMap::from([
+            (
+                (
+                    "D".to_owned(),
+                    "Q".to_owned(),
+                    Scope::State(ids[0]),
+                    Transition::Rise,
+                    "cell_rise",
+                ),
+                table(10.0),
+            ),
+            (
+                (
+                    "D".to_owned(),
+                    "Q".to_owned(),
+                    Scope::State(ids[1]),
+                    Transition::Rise,
+                    "cell_rise",
+                ),
+                table(30.0),
+            ),
+        ]);
+        report.ref_arcs = BTreeMap::from([
+            (("Q".to_owned(), Scope::State(ids[0])), refarc(1.0)),
+            (("Q".to_owned(), Scope::State(ids[1])), refarc(11.0)),
+        ]);
+        report.setup_input_rise = BTreeMap::from([
+            (
+                ("D".to_owned(), Scope::State(ids[0])),
+                Array1::from(vec![0.5, 0.6]),
+            ),
+            (
+                ("D".to_owned(), Scope::State(ids[1])),
+                Array1::from(vec![0.7, 0.8]),
+            ),
+        ]);
+        report.hold_input_rise = report
+            .setup_input_rise
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone() * -1.0))
+            .collect();
+        report.class_conditions = ids
+            .iter()
+            .zip(parsed.iter())
+            .map(|(class, condition)| (*class, condition.liberty()))
+            .collect();
+        report.check_classes = whens
+            .iter()
+            .map(|when| CheckClass {
+                pin: "D".to_owned(),
+                condition: Some((*when).to_owned()),
+                members: vec!["Q".to_owned()],
+            })
+            .collect();
+        report
     }
 
     // --- g / dump ----------------------------------------------------------
@@ -1450,6 +1697,91 @@ mod tests {
         assert!(
             !rendered(|s| dump_reduction(s, &tableless)).contains("UNREADABLE CONDITION"),
             "an arc with nothing to classify must not be reported as unreadable"
+        );
+    }
+
+    /// Every per-state table is captioned with the state it was filed under, and the
+    /// sections that only a per-state report has are the ones it gains.
+    ///
+    /// The list below is what [`per_state_report`] holds, section by section, not a
+    /// transcript of a run: two merged arcs, one per state; two references, each
+    /// carrying the rise edge alone and its own crossing; the cell-wide mean pair;
+    /// two setup constraints and their two negations; the conditions the checks were
+    /// grouped under; then the measured arc and its four tables. A caption naming the
+    /// wrong state -- or naming none, which is what a report with one reference per
+    /// output reads like -- is what this catches.
+    ///
+    /// Killed by: `is_per_state` answered `false`, which dropped the crossing lines and the whole hold section -- the two sections a per-state report gains. Observed to redden this test alone; `dump_cell_writes_a_labelled_section_for_every_table_it_holds` stays green under it, because a report with one reference per output has neither section either way. (Making `scope_caption` say nothing for `Scope::State` reddens this and the reduction test beside it, since both read the state captions.)
+    #[test]
+    fn dump_cell_names_the_state_each_per_state_table_was_filed_under() {
+        let out = rendered(|s| dump_cell(s, &per_state_report()));
+
+        // `(C0)` renders as `C0`; the check block keeps the library's own spelling.
+        let check_row = |when: &str| format!("  D {:<44} 1 arc(s): Q", when);
+        assert_eq!(
+            prose_lines(&out),
+            vec![
+                "cell DUT of library testlib",
+                "mean cell_rise arc D -> Q [C0] (input rise):",
+                "mean cell_rise arc D -> Q [C1] (input rise):",
+                // Only the edge each state was characterised on, and the constant its
+                // constraint half was offset by.
+                "ref rise arc G -> Q [C0] (row 0):",
+                "crossing: 2",
+                "ref rise arc G -> Q [C1] (row 0):",
+                "crossing: 12",
+                "mean ref rise arc (col 1, row 0):",
+                "mean ref fall arc:",
+                "setup arc D [C0] (input rise):",
+                "setup arc D [C1] (input rise):",
+                // Hold is only worth printing once there is more than one of it.
+                "hold arc D [C0] (input rise):",
+                "hold arc D [C1] (input rise):",
+                "check conditions",
+                "the source `when` each pin's setup and hold groups are stated under, classified per pin",
+                &check_row("(C0)"),
+                &check_row("(C1)"),
+                "rise arc D -> Q  when (C0)",
+                "original:",
+                "reconstructed:",
+                "error:",
+                "error % of original:",
+                ARC_ERROR_STATS,
+            ]
+        );
+    }
+
+    /// Under a per-state reference each condition is measured against its OWN state's
+    /// merged arc, not against every arc of the pin pair.
+    ///
+    /// The two states here were characterised at 10 and 30, and each was merged
+    /// alone, so each group stands for one condition and reproduces it exactly. A
+    /// group that swept in the other state's condition would report two conditions,
+    /// a mean-of-condition scale of 20 against a mean scale of 10, and a residual of
+    /// 20 -- a reduction error that no reduction made.
+    ///
+    /// Killed by: `in_scope` answered `true` for `Scope::State` as it does for `Scope::Whole`, which put both conditions in both groups and gave `mean of 2 condition(s)  |  mean scale 10  mean-of-condition scales 20`. Observed to redden this test alone; the per-class `dump_cell` test beside it stays green, because the section list does not depend on which conditions each group was measured against.
+    #[test]
+    fn dump_reduction_measures_each_state_against_its_own_members() {
+        let out = rendered(|s| dump_reduction(s, &per_state_report()));
+
+        for (state, scale) in [("C0", 10), ("C1", 30)] {
+            assert!(
+                out.contains(&format!(
+                    "cell_rise arc D -> Q [{}] (input rise): mean of 1 condition(s)  |  mean scale {}  mean-of-condition scales {}\n",
+                    state, scale, scale
+                )),
+                "state {}: {}",
+                state,
+                out
+            );
+        }
+        // Each state's merged arc IS its one member's table, so nothing was lost.
+        assert_eq!(
+            out.matches("  worst |mean - condition|: 0\n").count(),
+            2,
+            "{}",
+            out
         );
     }
 

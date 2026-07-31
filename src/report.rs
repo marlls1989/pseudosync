@@ -2,7 +2,8 @@
 //! the model, and the residual between them.
 
 use crate::arcs::{
-    input_transition, restore_arc, EdgeRef, RefArc, References, TimingSense, Transition, WhenMerge,
+    input_transition, restore_arc, EdgeRef, RefArc, References, Scope, TimingSense, Transition,
+    WhenMerge,
 };
 use crate::conditions::ClassId;
 use ndarray::prelude::*;
@@ -48,6 +49,25 @@ pub(crate) struct StateClass {
     pub(crate) condition: Option<String>,
     /// The source pin and `when` of every arc that landed here.
     pub(crate) members: Vec<(String, Option<String>)>,
+}
+
+/// One condition an input pin's setup and hold checks are grouped under.
+///
+/// Deliberately distinct from [`StateClass`]. That groups the states an arc leaves
+/// the cell in, per output and output edge, and is what the emitted clock-to-output
+/// delays are conditioned on. This groups the conditions the source library
+/// characterised one input under, and is what the emitted checks are conditioned on
+/// -- the source `when` verbatim, with no literal conjoined. The two are classified
+/// separately, number their classes independently, and are never conflated.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CheckClass {
+    pub(crate) pin: String,
+    /// The source condition in the library's own spelling. `None` marks the
+    /// catch-all, which holds the arcs that state no `when` at all.
+    pub(crate) condition: Option<String>,
+    /// The output each arc that landed here was characterised against, in the order
+    /// the library declares them.
+    pub(crate) members: Vec<String>,
 }
 
 /// How far the pseudo-flop split lands from the arc it replaced.
@@ -144,14 +164,27 @@ pub(crate) struct LibraryReport {
 }
 
 /// The merged delay tables the constraints are built from, keyed by source pin,
-/// output pin, the direction the INPUT was moving in, and the table family the
-/// values were read from.
+/// output pin, the scope the reference is drawn at, the direction the INPUT was
+/// moving in, and the table family the values were read from.
 ///
 /// The input's direction is part of the key because that is what a constraint is
 /// keyed on, and it is not the output's: a negative-unate arc's `cell_rise` values
 /// describe an input that fell. The family stays in the key beside it because the
-/// reference the values are charged against is still chosen by the family.
-pub(crate) type ConstraintArcs = BTreeMap<(String, String, Transition, &'static str), Array2<f64>>;
+/// reference the values are charged against is still chosen by the family. The scope
+/// sits between them because the two halves of the split must be referred to the
+/// same thing: a constraint drawn against a state's delay has to be filed under that
+/// state.
+pub(crate) type ConstraintArcs =
+    BTreeMap<(String, String, Scope, Transition, &'static str), Array2<f64>>;
+
+/// One input direction's constraints, keyed by the constrained pin and the scope its
+/// values were referred to.
+///
+/// The scope is in the key because a check has to be stated against the delay it was
+/// drawn from: under per-state one pin carries one constraint per state it was
+/// characterised in, and the two halves of each only sum back to the arc they came
+/// from within their own state.
+pub(crate) type Constraints = BTreeMap<(String, Scope), Array1<f64>>;
 
 /// Everything the reconstruction report shows for one processed cell.
 ///
@@ -170,14 +203,17 @@ pub(crate) struct CellReport {
     /// family the values were read from. This is what the constraints were actually
     /// derived from.
     pub(crate) constraint_arcs: ConstraintArcs,
-    /// Reference arc chosen per output.
-    pub(crate) ref_arcs: BTreeMap<String, RefArc>,
+    /// Reference arc chosen per output and scope.
+    pub(crate) ref_arcs: BTreeMap<(String, Scope), RefArc>,
     /// Reference the constraints were taken against.
     pub(crate) mean_ref: RefArc,
     /// The constraints, keyed on the constrained pin's own transition -- which is
     /// what Liberty's `rise_constraint` and `fall_constraint` are keyed on too.
-    pub(crate) setup_input_rise: BTreeMap<String, Array1<f64>>,
-    pub(crate) setup_input_fall: BTreeMap<String, Array1<f64>>,
+    pub(crate) setup_input_rise: Constraints,
+    pub(crate) setup_input_fall: Constraints,
+    /// The same again negated, which is what a hold constraint is.
+    pub(crate) hold_input_rise: Constraints,
+    pub(crate) hold_input_fall: Constraints,
     /// The slew and load points every table of this cell is indexed at, so a residual
     /// can be read against the regime it occurs in. `None` where the library declares
     /// no such axis, or where the cell's arcs disagreed about it.
@@ -189,10 +225,19 @@ pub(crate) struct CellReport {
     /// so measuring against it would report less error than is introduced.
     pub(crate) arcs: Vec<ArcError>,
     /// The post-settled states this cell's arcs describe, grouped by the function
-    /// they denote. Informational: nothing in the conversion consults them yet, so
-    /// this is what says how much of the cell a per-state model would have to
-    /// distinguish.
+    /// they denote. Under per-state these are the states the emitted delays are
+    /// conditioned on; under the other two modes nothing in the split consults them,
+    /// and they say how much of the cell a per-state model would have to distinguish.
     pub(crate) classes: Vec<StateClass>,
+    /// The condition each of those classes denotes, in Liberty's spelling, so a
+    /// reference or a constraint filed under a class can be captioned with the state
+    /// it describes rather than with a number. Empty where the mode draws one
+    /// reference per output and there is no state to name.
+    pub(crate) class_conditions: BTreeMap<ClassId, String>,
+    /// The conditions each input pin's checks were grouped under. Empty where the
+    /// mode emits one unconditioned check per pin, because then the checks were
+    /// grouped under nothing.
+    pub(crate) check_classes: Vec<CheckClass>,
 }
 
 /// One half of an arc: the direction the OUTPUT moved in, which raw table records
@@ -203,34 +248,41 @@ pub(crate) struct Edge {
     /// The output's transition, which is what a delay table family names.
     output: Transition,
     raw: fn(&ConditionedArc) -> Option<&Array2<f64>>,
-    reference: fn(&RefArc) -> &EdgeRef,
+    /// The post-settled class this edge of an arc fell into, which is what names the
+    /// reference it was measured against under a per-state model.
+    class: fn(&ConditionedArc) -> Option<ClassId>,
+    reference: fn(&RefArc) -> Option<&EdgeRef>,
 }
 
 pub(crate) const RISE: Edge = Edge {
     name: "rise",
     output: Transition::Rise,
     raw: |a| a.cell_rise.as_ref(),
-    reference: |r| &r.rise,
+    class: |a| a.class_rise,
+    reference: |r| r.rise.as_ref(),
 };
 
 pub(crate) const FALL: Edge = Edge {
     name: "fall",
     output: Transition::Fall,
     raw: |a| a.cell_fall.as_ref(),
-    reference: |r| &r.fall,
+    class: |a| a.class_fall,
+    reference: |r| r.fall.as_ref(),
 };
 
 /// Measure the reconstruction residual against every condition of every arc.
 ///
-/// The model carries one setup constraint per pin and one delay per output, so
-/// each raw condition is reconstructed from that same pair. The residual it
-/// leaves therefore contains both error sources at once: what the separable
-/// setup-plus-delay form cannot express, and what collapsing the `when`
-/// conditions into one representative arc threw away.
+/// Each raw condition is reconstructed from the pair the model actually holds for
+/// it: the setup constraint of its own pin at its own scope, plus the delay of the
+/// reference that scope was drawn at. The residual it leaves therefore contains both
+/// error sources at once: what the separable setup-plus-delay form cannot express,
+/// and what collapsing the arcs sharing that scope into one threw away. It is always
+/// taken against this arc's OWN raw table -- measuring against the merged one would
+/// report less error than the merge introduced.
 pub(crate) fn collect_arc_errors(
     arcs: &[ConditionedArc],
-    setup_input_rise: &BTreeMap<String, Array1<f64>>,
-    setup_input_fall: &BTreeMap<String, Array1<f64>>,
+    setup_input_rise: &Constraints,
+    setup_input_fall: &Constraints,
     references: &References,
     cell_name: &str,
     edge: &Edge,
@@ -239,6 +291,11 @@ pub(crate) fn collect_arc_errors(
     for arc in arcs {
         let (source, output) = (&arc.source, &arc.output);
         let Some(original) = (edge.raw)(arc) else {
+            continue;
+        };
+        // The scope this edge of this arc was filed under, which is what says which
+        // reference it was measured against and which constraint it contributed to.
+        let Some(scope) = Scope::of(references.mode, (edge.class)(arc), arc.when.is_none()) else {
             continue;
         };
         // Which constraint this arc was folded into is the arc's own property: the
@@ -250,17 +307,20 @@ pub(crate) fn collect_arc_errors(
             Some(Transition::Fall) => setup_input_fall,
             None => continue,
         };
-        let Some(slew_dependent) = setup.get(source) else {
+        let Some(slew_dependent) = setup.get(&(source.clone(), scope)) else {
             continue;
         };
         // Reconstruct with the delay this mode actually emits, so the residual
         // describes the library that ships rather than an idealised split. The
         // original report predated pooling and always used the per-output arc.
-        let Some(delay_ref) = references.delay_for(output) else {
+        let Some(delay_ref) = references.delay_for(output, &scope) else {
+            continue;
+        };
+        let Some(delay_ref) = (edge.reference)(delay_ref) else {
             continue;
         };
 
-        let reconstructed = restore_arc(slew_dependent, &(edge.reference)(delay_ref).delay);
+        let reconstructed = restore_arc(slew_dependent, &delay_ref.delay);
         if reconstructed.raw_dim() != original.raw_dim() {
             continue;
         }
@@ -612,14 +672,15 @@ library(bundle_test) {{
             // The fixture is positive unate throughout, so the input's direction is
             // the output's and the edge names both.
             let setup = match arc.edge {
-                "rise" => &report.setup_input_rise[&arc.source],
-                _ => &report.setup_input_fall[&arc.source],
+                "rise" => &report.setup_input_rise[&(arc.source.clone(), Scope::Whole)],
+                _ => &report.setup_input_fall[&(arc.source.clone(), Scope::Whole)],
             };
-            let refarc = &report.ref_arcs[&arc.output];
-            let delay = match arc.edge {
-                "rise" => &refarc.rise.delay,
-                _ => &refarc.fall.delay,
+            let refarc = &report.ref_arcs[&(arc.output.clone(), Scope::Whole)];
+            let edge = match arc.edge {
+                "rise" => refarc.rise.as_ref(),
+                _ => refarc.fall.as_ref(),
             };
+            let delay = &edge.expect("the fixture draws both edges").delay;
 
             assert_eq!(arc.reconstructed, restore_arc(setup, delay), "{:?}", arc);
             assert_eq!(

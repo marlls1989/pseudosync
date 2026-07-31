@@ -1,6 +1,7 @@
 //! Timing arcs: how they are averaged, merged across `when` conditions,
 //! reduced to a reference, and restored from the pseudo-flop split.
 
+use crate::conditions::ClassId;
 use crate::templates::{axis_values, Axes};
 use liberty_parser::{ast::Value, liberty::Group};
 use ndarray::prelude::*;
@@ -55,12 +56,22 @@ pub(crate) enum ReferenceMode {
     /// Both the emitted delays and the constraints use it, so every output is
     /// given the same clock-to-output delay. This was the original behaviour.
     Pooled,
-    /// The default. Each output keeps its own reference for its emitted delay, and each input
+    /// Each output keeps its own reference for its emitted delay, and each input
     /// is constrained against the mean reference of only the outputs it actually
     /// drives. For a dual-rail bundle this reduces to running the algorithm
     /// independently per rail, while a control input shared by both rails is
     /// still referenced against both.
     PerOutput,
+    /// The default. Each post-settled state of each output keeps its own reference, and the
+    /// emitted delays and checks are conditioned on it.
+    ///
+    /// The three modes are one ladder, differing only in how finely the reference is
+    /// keyed: pooled keys it on the cell, per-output on (output, edge), per-state on
+    /// (output, edge, post-settled end state). Arcs that collide on one key share a
+    /// reference, which is why the finest of the three is per-*state* and not
+    /// per-arc: two arcs describing the same end state describe one clock-to-output
+    /// delay, however many `when` conditions the library spelled it under.
+    PerState,
 }
 
 impl std::str::FromStr for ReferenceMode {
@@ -70,10 +81,63 @@ impl std::str::FromStr for ReferenceMode {
         match s {
             "pooled" => Ok(ReferenceMode::Pooled),
             "per-output" => Ok(ReferenceMode::PerOutput),
+            "per-state" => Ok(ReferenceMode::PerState),
             other => Err(format!(
-                "unknown reference mode {:?}, expected \"pooled\" or \"per-output\"",
+                "unknown reference mode {:?}, expected \"pooled\", \"per-output\" or \"per-state\"",
                 other
             )),
+        }
+    }
+}
+
+/// How widely one reference is drawn, and so which arcs share it.
+///
+/// This is the key [`ReferenceMode`] selects: pooled and per-output draw one
+/// reference for a whole output, so every arc of it is [`Scope::Whole`]; per-state
+/// draws one per post-settled state, so an arc is filed under the state it leaves
+/// the cell in and a `when`-less arc under the catch-all it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Scope {
+    /// One reference for the whole output, covering every state of it.
+    Whole,
+    /// One post-settled state, named by the class its condition falls in.
+    State(ClassId),
+    /// Whatever the conditioned states do not cover: the `when`-less arcs.
+    ///
+    /// Ordered last so that a catch-all group is emitted after the conditioned ones,
+    /// which is the order Liberty's `default_timing` is read in.
+    CatchAll,
+}
+
+impl Scope {
+    /// The scope one edge of one arc is filed under, or `None` where per-state can
+    /// name no state for that edge.
+    ///
+    /// Only per-state distinguishes: under the other two every arc of an output
+    /// shares one reference, which is what keeps those modes exactly what they were.
+    pub(crate) fn of(mode: ReferenceMode, class: Option<ClassId>, whenless: bool) -> Option<Self> {
+        match mode {
+            ReferenceMode::Pooled | ReferenceMode::PerOutput => Some(Scope::Whole),
+            // A `when`-less arc covers whatever the conditioned ones do not, so
+            // putting it through the state construction would claim it holds only
+            // while its own source pin is at one value.
+            ReferenceMode::PerState if whenless => Some(Scope::CatchAll),
+            ReferenceMode::PerState => class.map(Scope::State),
+        }
+    }
+
+    /// Whether the two edge halves drawn from a merged arc are a complete reference
+    /// at this scope.
+    ///
+    /// A whole-output reference must describe both directions, because it stands for
+    /// every state the output is ever in. A per-state one need not: a
+    /// `combinational_rise` group carries the rise families alone, and that is the
+    /// ordinary shape a conditioned arc is characterised in -- requiring both edges
+    /// there would refuse the majority of them.
+    fn accepts(&self, rise: &Option<EdgeRef>, fall: &Option<EdgeRef>) -> bool {
+        match self {
+            Scope::Whole => rise.is_some() && fall.is_some(),
+            Scope::State(_) | Scope::CatchAll => rise.is_some() || fall.is_some(),
         }
     }
 }
@@ -274,35 +338,37 @@ pub(crate) struct RefArc {
     /// How the profiles below were read off the 2-D tables, so a report never
     /// captions an averaged reference with a row index it did not use.
     pub(crate) anchor: Anchor,
-    pub(crate) rise: EdgeRef,
-    pub(crate) fall: EdgeRef,
+    /// The two output edges, each present only where the arcs this was drawn from
+    /// carried both of that edge's tables. A whole-output reference always holds
+    /// both; a per-state one holds whichever edges its state was characterised on.
+    pub(crate) rise: Option<EdgeRef>,
+    pub(crate) fall: Option<EdgeRef>,
 }
 
-/// The references a cell's constraints and delays were drawn against.
+/// The references a cell's constraints and delays were drawn against, keyed by the
+/// output and the scope each was drawn at.
 pub(crate) struct References<'a> {
-    pub(crate) per_output: &'a BTreeMap<String, RefArc>,
+    pub(crate) per_output: &'a BTreeMap<(String, Scope), RefArc>,
     pub(crate) mean: &'a RefArc,
     pub(crate) mode: ReferenceMode,
 }
 
 impl References<'_> {
-    /// The clock-to-output delay this mode actually emits for `output`, or `None` if
-    /// that output was skipped.
+    /// The clock-to-output delay this mode actually emits for `output` at `scope`, or
+    /// `None` if nothing there was converted.
     ///
     /// Skipped-ness is mode-independent, and `per_output` holds exactly the converted
-    /// outputs, so presence there is the one place convertedness is decided. Pooled
-    /// then yields the cell-wide mean for a *converted* output -- which is the mode's
-    /// whole point -- and nothing for a skipped one. Handing the mean to a skipped
-    /// output would charge it a delay drawn from outputs it has nothing to do with,
-    /// describing a path nothing characterised.
-    pub(crate) fn delay_for(&self, output: &str) -> Option<&RefArc> {
-        if !self.per_output.contains_key(output) {
-            return None;
-        }
+    /// (output, scope) pairs, so presence there is the one place convertedness is
+    /// decided. Pooled then yields the cell-wide mean for a *converted* output --
+    /// which is the mode's whole point -- and nothing for a skipped one. Handing the
+    /// mean to a skipped output would charge it a delay drawn from outputs it has
+    /// nothing to do with, describing a path nothing characterised.
+    pub(crate) fn delay_for(&self, output: &str, scope: &Scope) -> Option<&RefArc> {
+        let own = self.per_output.get(&(output.to_owned(), *scope))?;
 
         match self.mode {
             ReferenceMode::Pooled => Some(self.mean),
-            ReferenceMode::PerOutput => self.per_output.get(output),
+            ReferenceMode::PerOutput | ReferenceMode::PerState => Some(own),
         }
     }
 }
@@ -504,58 +570,74 @@ where
         .map(|x| x / n)
 }
 
+/// Add one edge into a running sum, counting the arcs that carried it.
+///
+/// The crossing is summed alongside the arrays it was read from, so the mean
+/// reference's offset is the mean of the offsets rather than a value re-read off a
+/// table that no longer exists.
+fn accumulate_edge(sum: &mut Option<EdgeRef>, n: &mut f64, edge: Option<EdgeRef>) {
+    let Some(edge) = edge else { return };
+    *n += 1.0;
+    match sum {
+        None => *sum = Some(edge),
+        Some(sum) => {
+            sum.delay += &edge.delay;
+            sum.transition += &edge.transition;
+            sum.crossing += edge.crossing;
+        }
+    }
+}
+
 /// Calculate the mean reference arc from multiple RefArc instances
+///
+/// Each edge is counted separately, because a per-state reference carries only the
+/// edges its state was characterised on: dividing an edge by the number of *arcs*
+/// would scale it down by the ones that never described it. Where every arc holds
+/// both edges -- which is what a whole-output reference requires -- both counts are
+/// the arc count, and this is the mean it has always been.
 pub(crate) fn mean_reference_arc<I>(ref_arcs: I) -> Option<RefArc>
 where
     I: IntoIterator<Item = RefArc>,
 {
-    let mut n = 0.0;
-    ref_arcs
-        .into_iter()
-        .inspect(|_x| {
-            n += 1.0;
-        })
-        .reduce(|a, b| {
-            // Guaranteed by the caller: a cell whose outputs draw references from
-            // different lookup templates is refused at cell scope before the mean is
-            // taken. These therefore fail as a defect in pseudosync -- a guarantee
-            // relaxed somewhere upstream -- and never as a complaint about the input.
-            const CHECKED: &str = "internal: every arc this cell transforms was checked \
-                                   for a common domain before the mean was taken";
-            assert_eq!(a.col, b.col, "{}", CHECKED);
-            assert_eq!(a.row, b.row, "{}", CHECKED);
-            assert_eq!(a.anchor, b.anchor, "{}", CHECKED);
-            assert_eq!(&a.lut_template, &b.lut_template, "{}", CHECKED);
-            // The crossing is reduced alongside the arrays it was read from, so the
-            // mean reference's offset is the mean of the offsets rather than a value
-            // re-read off a table that no longer exists.
-            RefArc {
-                col: a.col,
-                row: a.row,
-                related_pin: a.related_pin,
-                lut_template: a.lut_template,
-                anchor: a.anchor,
-                rise: EdgeRef {
-                    delay: a.rise.delay + b.rise.delay,
-                    transition: a.rise.transition + b.rise.transition,
-                    crossing: a.rise.crossing + b.rise.crossing,
-                },
-                fall: EdgeRef {
-                    delay: a.fall.delay + b.fall.delay,
-                    transition: a.fall.transition + b.fall.transition,
-                    crossing: a.fall.crossing + b.fall.crossing,
-                },
-            }
-        })
-        .map(|mut x| {
-            x.rise.transition /= n;
-            x.fall.transition /= n;
-            x.fall.delay /= n;
-            x.rise.delay /= n;
-            x.rise.crossing /= n;
-            x.fall.crossing /= n;
-            x
-        })
+    // Guaranteed by the caller: a cell whose outputs draw references from different
+    // lookup templates is refused at cell scope before the mean is taken. These
+    // therefore fail as a defect in pseudosync -- a guarantee relaxed somewhere
+    // upstream -- and never as a complaint about the input.
+    const CHECKED: &str = "internal: every arc this cell transforms was checked \
+                           for a common domain before the mean was taken";
+
+    let mut arcs = ref_arcs.into_iter();
+    let mut first = arcs.next()?;
+
+    let (mut rise, mut rises) = (None, 0.0);
+    let (mut fall, mut falls) = (None, 0.0);
+    accumulate_edge(&mut rise, &mut rises, first.rise.take());
+    accumulate_edge(&mut fall, &mut falls, first.fall.take());
+
+    for arc in arcs {
+        assert_eq!(first.col, arc.col, "{}", CHECKED);
+        assert_eq!(first.row, arc.row, "{}", CHECKED);
+        assert_eq!(first.anchor, arc.anchor, "{}", CHECKED);
+        assert_eq!(first.lut_template, arc.lut_template, "{}", CHECKED);
+        accumulate_edge(&mut rise, &mut rises, arc.rise);
+        accumulate_edge(&mut fall, &mut falls, arc.fall);
+    }
+
+    let scaled = |edge: EdgeRef, n: f64| EdgeRef {
+        delay: edge.delay / n,
+        transition: edge.transition / n,
+        crossing: edge.crossing / n,
+    };
+
+    Some(RefArc {
+        col: first.col,
+        row: first.row,
+        related_pin: first.related_pin,
+        lut_template: first.lut_template,
+        anchor: first.anchor,
+        rise: rise.map(|e| scaled(e, rises)),
+        fall: fall.map(|e| scaled(e, falls)),
+    })
 }
 
 /// Restore a 2D timing arc from 1D slew and capacitance dependent arrays
@@ -667,31 +749,28 @@ pub(crate) fn extract_timing_tables_from_arc(timing_group: &Group) -> Option<Tim
 }
 
 /// Select a reference arc from timing tables, collapsing each family at `anchor`.
-/// Returns None if the timing tables don't have all required data
+///
+/// An edge is drawn only where both of its tables are present -- a delay with no
+/// transition beside it describes half a path -- and the `scope` then decides
+/// whether the edges drawn are enough of a reference. Returns None where they are
+/// not.
 pub(crate) fn select_reference_arc(
     related_pin: &str,
     timing_tables: &TimingTables,
     anchor: Anchor,
     placement: OffsetPlacement,
+    scope: Scope,
 ) -> Option<RefArc> {
-    // Require all four timing tables for the reference arc
-    let cell_rise = timing_tables.cell_rise.as_ref()?;
-    let cell_fall = timing_tables.cell_fall.as_ref()?;
-    let rise_trans = timing_tables.rise_trans.as_ref()?;
-    let fall_trans = timing_tables.fall_trans.as_ref()?;
-
-    let col = cell_rise.len_of(Axis(1)) / 2;
-    let row = cell_rise.len_of(Axis(0)) / 2;
-
     // Placement is applied once, here, so that everything downstream reads one
     // already-decided pair: the delay this edge emits and the constant the
     // constraint half still owes. `Prop` folds the constant into the delay and
     // leaves nothing to subtract; the sum of the two halves is the same either way.
-    let edge = |delays: &Array2<f64>, transitions: &Array2<f64>| {
+    let edge = |delays: Option<&Array2<f64>>, transitions: Option<&Array2<f64>>| {
+        let (delays, transitions) = (delays?, transitions?);
         let delay = prop_profile(delays, anchor);
         let crossing = crossing(delays, anchor);
         let transition = prop_profile(transitions, anchor);
-        match placement {
+        Some(match placement {
             OffsetPlacement::Setup => EdgeRef {
                 delay,
                 transition,
@@ -702,17 +781,38 @@ pub(crate) fn select_reference_arc(
                 transition,
                 crossing: 0.0,
             },
-        }
+        })
     };
 
+    let rise = edge(
+        timing_tables.cell_rise.as_ref(),
+        timing_tables.rise_trans.as_ref(),
+    );
+    let fall = edge(
+        timing_tables.cell_fall.as_ref(),
+        timing_tables.fall_trans.as_ref(),
+    );
+    if !scope.accepts(&rise, &fall) {
+        return None;
+    }
+
+    // The reference element is located on whichever delay family this scope
+    // accepted. Both name the same domain -- a cell whose arcs sit on more than one
+    // is refused before any reference is drawn -- so which of the two is read from
+    // decides nothing but which one is present.
+    let sized = timing_tables
+        .cell_rise
+        .as_ref()
+        .or(timing_tables.cell_fall.as_ref())?;
+
     Some(RefArc {
-        col,
-        row,
+        col: sized.len_of(Axis(1)) / 2,
+        row: sized.len_of(Axis(0)) / 2,
         anchor,
         lut_template: timing_tables.lut_template.clone(),
         related_pin: related_pin.to_owned(),
-        rise: edge(cell_rise, rise_trans),
-        fall: edge(cell_fall, fall_trans),
+        rise,
+        fall,
     })
 }
 
@@ -722,6 +822,7 @@ mod tests {
     //! selection and `when` merging.
 
     use super::*;
+    use crate::conditions::{collision_classes, Condition}; // Test-only; a scope's class ids are minted by the real classifier rather than written down.
     use indexmap::IndexMap;
     use liberty_parser::{
         ast::Value,
@@ -775,16 +876,16 @@ mod tests {
             related_pin: "A".to_owned(),
             lut_template: "template".to_owned(),
             anchor: Anchor::Middle,
-            rise: EdgeRef {
+            rise: Some(EdgeRef {
                 delay: Array1::from(vec![1.0, 2.0, 3.0]) * scale,
                 transition: Array1::from(vec![0.1, 0.2, 0.3]) * scale,
                 crossing: 2.0 * scale,
-            },
-            fall: EdgeRef {
+            }),
+            fall: Some(EdgeRef {
                 delay: Array1::from(vec![1.5, 2.5, 3.5]) * scale,
                 transition: Array1::from(vec![0.15, 0.25, 0.35]) * scale,
                 crossing: 2.5 * scale,
-            },
+            }),
         };
 
         let mean = mean_reference_arc(vec![arc(1.0), arc(2.0)]).expect("two arcs to average");
@@ -808,14 +909,14 @@ mod tests {
                 );
             }
         };
-        close(&mean.rise.transition, [0.15, 0.3, 0.45], "rise transition");
-        close(
-            &mean.fall.transition,
-            [0.225, 0.375, 0.525],
-            "fall transition",
+        let (rise, fall) = (
+            mean.rise.as_ref().expect("both arcs carry a rise edge"),
+            mean.fall.as_ref().expect("both arcs carry a fall edge"),
         );
-        close(&mean.rise.delay, [1.5, 3.0, 4.5], "rise delay");
-        close(&mean.fall.delay, [2.25, 3.75, 5.25], "fall delay");
+        close(&rise.transition, [0.15, 0.3, 0.45], "rise transition");
+        close(&fall.transition, [0.225, 0.375, 0.525], "fall transition");
+        close(&rise.delay, [1.5, 3.0, 4.5], "rise delay");
+        close(&fall.delay, [2.25, 3.75, 5.25], "fall delay");
     }
 
     /// The crossing is a scalar, so it is not covered by the array assertions
@@ -838,61 +939,76 @@ mod tests {
             related_pin: "A".to_owned(),
             lut_template: "template".to_owned(),
             anchor: Anchor::Middle,
-            rise: EdgeRef {
+            rise: Some(EdgeRef {
                 delay: Array1::from(vec![1.0, 2.0, 3.0]),
                 transition: Array1::from(vec![0.1, 0.2, 0.3]),
                 crossing: 2.0 * scale,
-            },
-            fall: EdgeRef {
+            }),
+            fall: Some(EdgeRef {
                 delay: Array1::from(vec![1.5, 2.5, 3.5]),
                 transition: Array1::from(vec![0.15, 0.25, 0.35]),
                 crossing: 2.5 * scale,
-            },
+            }),
         };
 
         let mean = mean_reference_arc(vec![arc(1.0), arc(2.0)]).expect("two arcs to average");
 
-        assert!((mean.rise.crossing - 3.0).abs() < 1e-10, "{:?}", mean.rise);
-        assert!((mean.fall.crossing - 3.75).abs() < 1e-10, "{:?}", mean.fall);
+        let (rise, fall) = (
+            mean.rise.as_ref().expect("both arcs carry a rise edge"),
+            mean.fall.as_ref().expect("both arcs carry a fall edge"),
+        );
+        assert!((rise.crossing - 3.0).abs() < 1e-10, "{:?}", rise);
+        assert!((fall.crossing - 3.75).abs() < 1e-10, "{:?}", fall);
     }
 
     // --- References::delay_for ---------------------------------------------
 
-    /// A skipped output has no clock-to-output delay, under either mode.
-    ///
-    /// `per_output` holds exactly the converted outputs, so presence there is the one
-    /// place convertedness is decided -- and that decision does not depend on the
-    /// mode. Pooling settles which reference a *converted* output is given; it is not
-    /// a licence to invent one for an output that supplies none. Handing a skipped
-    /// output the cell-wide mean would charge it a delay drawn from outputs it has
-    /// nothing to do with, describing a path nothing characterised.
-    ///
-    /// Killed by: `delay_for` restored to answering `Pooled` with `Some(self.mean)`
-    /// unconditionally, so the skipped output was handed the cell-wide mean.
-    #[test]
-    fn a_skipped_output_has_no_delay_under_either_mode() {
-        let refarc = |delay: f64| RefArc {
+    /// A reference arc whose rise delay is the one number under test.
+    fn scoped_refarc(delay: f64) -> RefArc {
+        RefArc {
             col: 0,
             row: 0,
             related_pin: "A".to_owned(),
             lut_template: "T".to_owned(),
             anchor: Anchor::Middle,
-            rise: EdgeRef {
+            rise: Some(EdgeRef {
                 delay: Array1::from(vec![delay]),
                 transition: Array1::from(vec![0.0]),
                 crossing: delay,
-            },
-            fall: EdgeRef {
+            }),
+            fall: Some(EdgeRef {
                 delay: Array1::from(vec![0.0]),
                 transition: Array1::from(vec![0.0]),
                 crossing: 0.0,
-            },
-        };
+            }),
+        }
+    }
 
+    /// The rise delay `delay_for` answered with, for the assertions below.
+    fn answered(references: &References, output: &str, scope: Scope) -> Option<f64> {
+        references
+            .delay_for(output, &scope)
+            .map(|r| r.rise.as_ref().expect("the fixture draws both edges").delay[0])
+    }
+
+    /// A skipped output has no clock-to-output delay, under either mode.
+    ///
+    /// `per_output` holds exactly the converted (output, scope) pairs, so presence
+    /// there is the one place convertedness is decided -- and that decision does not
+    /// depend on the mode. Pooling settles which reference a *converted* output is
+    /// given; it is not a licence to invent one for an output that supplies none.
+    /// Handing a skipped output the cell-wide mean would charge it a delay drawn from
+    /// outputs it has nothing to do with, describing a path nothing characterised.
+    ///
+    /// Killed by: `delay_for` restored to answering `Pooled` with `Some(self.mean)`
+    /// unconditionally, so the skipped output was handed the cell-wide mean.
+    #[test]
+    fn a_skipped_output_has_no_delay_under_either_mode() {
         // One converted output, and a cell-wide mean distinguishable from it so that
         // handing the mean out where it should not be is visible.
-        let per_output: BTreeMap<String, RefArc> = BTreeMap::from([("Q".to_owned(), refarc(3.0))]);
-        let mean = refarc(13.0);
+        let per_output: BTreeMap<(String, Scope), RefArc> =
+            BTreeMap::from([(("Q".to_owned(), Scope::Whole), scoped_refarc(3.0))]);
+        let mean = scoped_refarc(13.0);
 
         for mode in [ReferenceMode::Pooled, ReferenceMode::PerOutput] {
             let references = References {
@@ -905,26 +1021,77 @@ mod tests {
             // its own under per-output, the cell-wide mean under pooled.
             let expected = match mode {
                 ReferenceMode::Pooled => 13.0,
-                ReferenceMode::PerOutput => 3.0,
+                _ => 3.0,
             };
             assert_eq!(
-                references
-                    .delay_for("Q")
-                    .expect("a converted output")
-                    .rise
-                    .delay[0],
-                expected,
+                answered(&references, "Q", Scope::Whole),
+                Some(expected),
                 "{:?}",
                 mode
             );
 
             // The skipped output is answered with nothing, in both modes.
-            assert!(
-                references.delay_for("QN").is_none(),
+            assert_eq!(
+                answered(&references, "QN", Scope::Whole),
+                None,
                 "a skipped output has no delay under {:?}",
                 mode
             );
         }
+    }
+
+    /// Per-state answers each state with the reference drawn for that state, and a
+    /// state nothing was drawn for with nothing.
+    ///
+    /// The scope is part of what was converted, not a filter over it: two states of
+    /// one output are two references, and an output converted in one state has
+    /// nothing to say about a state it was never characterised in.
+    ///
+    /// Killed by: `delay_for` looked its key up as `(output, Scope::Whole)` instead of
+    /// at the scope asked for, so both states were answered with the first one's
+    /// reference and the uncharacterised state was answered at all.
+    /// `a_skipped_output_has_no_delay_under_either_mode` stays green under it,
+    /// because every key there is `Scope::Whole` already.
+    #[test]
+    fn per_state_answers_each_state_with_its_own_reference() {
+        // Real class ids, minted by the classifier over three distinct conditions:
+        // `ClassId` is opaque, and widening it so a test could write one down would
+        // be widening visibility to suit a test.
+        let conditions: Vec<Condition> = ["A", "B", "C"]
+            .iter()
+            .map(|t| Condition::parse(t).expect("a pin name is a condition"))
+            .collect();
+        let classes = collision_classes(&conditions);
+
+        // Two states of one output, an order of magnitude apart, and a third that
+        // was never drawn.
+        let per_output: BTreeMap<(String, Scope), RefArc> = BTreeMap::from([
+            (
+                ("Q".to_owned(), Scope::State(classes[0])),
+                scoped_refarc(3.0),
+            ),
+            (
+                ("Q".to_owned(), Scope::State(classes[1])),
+                scoped_refarc(30.0),
+            ),
+        ]);
+        let mean = scoped_refarc(13.0);
+        let references = References {
+            per_output: &per_output,
+            mean: &mean,
+            mode: ReferenceMode::PerState,
+        };
+
+        assert_eq!(
+            answered(&references, "Q", Scope::State(classes[0])),
+            Some(3.0)
+        );
+        assert_eq!(
+            answered(&references, "Q", Scope::State(classes[1])),
+            Some(30.0)
+        );
+        assert_eq!(answered(&references, "Q", Scope::State(classes[2])), None);
+        assert_eq!(answered(&references, "Q", Scope::CatchAll), None);
     }
 
     // --- restore_arc -------------------------------------------------------
@@ -961,19 +1128,34 @@ mod tests {
         }
     }
 
-    /// Killed by: `select_reference_arc` took `col` as `cell_rise.len_of(Axis(1)) * 0` instead of `/ 2`.
+    /// The rise and fall halves of a reference the fixture draws both of.
+    fn both_edges(arc: &RefArc) -> (&EdgeRef, &EdgeRef) {
+        (
+            arc.rise.as_ref().expect("a rise edge"),
+            arc.fall.as_ref().expect("a fall edge"),
+        )
+    }
+
+    /// Killed by: `select_reference_arc` took `col` as `sized.len_of(Axis(1)) * 0` instead of `/ 2`.
     #[test]
     fn select_reference_arc_picks_the_middle_row_and_column() {
-        let arc = select_reference_arc("CK", &all_nine(), Anchor::Middle, OffsetPlacement::Setup)
-            .expect("all four tables present");
+        let arc = select_reference_arc(
+            "CK",
+            &all_nine(),
+            Anchor::Middle,
+            OffsetPlacement::Setup,
+            Scope::Whole,
+        )
+        .expect("all four tables present");
         assert_eq!(arc.row, 1);
         assert_eq!(arc.col, 1);
         assert_eq!(arc.related_pin, "CK");
         assert_eq!(arc.lut_template, "T");
         assert_eq!(arc.anchor, Anchor::Middle);
+        let (rise, fall) = both_edges(&arc);
         // middle row of cell_rise == [3,4,5]
-        assert_eq!(arc.rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
-        assert_eq!(arc.fall.delay, Array1::from(vec![103.0, 104.0, 105.0]));
+        assert_eq!(rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
+        assert_eq!(fall.delay, Array1::from(vec![103.0, 104.0, 105.0]));
     }
 
     /// `Prop` moves the constant out of the constraint and into the delay, and does
@@ -993,39 +1175,101 @@ mod tests {
     /// redden this test alone -- no other test asks for `Prop`.
     #[test]
     fn prop_placement_moves_the_crossing_into_the_delay_and_leaves_none_to_subtract() {
-        let setup = select_reference_arc("CK", &all_nine(), Anchor::Middle, OffsetPlacement::Setup)
-            .expect("all four tables present");
-        let prop = select_reference_arc("CK", &all_nine(), Anchor::Middle, OffsetPlacement::Prop)
-            .expect("all four tables present");
+        let at = |placement| {
+            select_reference_arc("CK", &all_nine(), Anchor::Middle, placement, Scope::Whole)
+                .expect("all four tables present")
+        };
+        let setup = at(OffsetPlacement::Setup);
+        let prop = at(OffsetPlacement::Prop);
+        let (setup_rise, setup_fall) = both_edges(&setup);
+        let (prop_rise, prop_fall) = both_edges(&prop);
 
-        assert_eq!(setup.rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
-        assert_eq!(setup.rise.crossing, 4.0);
+        assert_eq!(setup_rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
+        assert_eq!(setup_rise.crossing, 4.0);
 
-        assert_eq!(prop.rise.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
-        assert_eq!(prop.rise.crossing, 0.0);
+        assert_eq!(prop_rise.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
+        assert_eq!(prop_rise.crossing, 0.0);
         // cell_fall's middle row is [103,104,105] and its crossing 104.
-        assert_eq!(prop.fall.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
-        assert_eq!(prop.fall.crossing, 0.0);
+        assert_eq!(prop_fall.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
+        assert_eq!(prop_fall.crossing, 0.0);
 
         // The output's slew is not a delay and moves with neither placement.
-        assert_eq!(prop.rise.transition, setup.rise.transition);
-        assert_eq!(prop.fall.transition, setup.fall.transition);
+        assert_eq!(prop_rise.transition, setup_rise.transition);
+        assert_eq!(prop_fall.transition, setup_fall.transition);
     }
 
-    /// Killed by: `select_reference_arc` read `cell_fall` as `.unwrap_or(cell_rise)` instead of `?`, so a missing table no longer refused the arc.
+    /// One edge's tables, for the completeness assertions below: a delay family and
+    /// the transition that pairs with it, and nothing of the other edge.
+    fn one_edge(edge: Transition) -> TimingTables {
+        let mut tables = all_nine();
+        match edge {
+            Transition::Rise => {
+                tables.cell_fall = None;
+                tables.fall_trans = None;
+            }
+            Transition::Fall => {
+                tables.cell_rise = None;
+                tables.rise_trans = None;
+            }
+        }
+        tables
+    }
+
+    /// A whole-output reference requires all four families; a per-state one requires
+    /// one complete edge pair.
+    ///
+    /// Derivation from the model. A whole-output reference stands for every state the
+    /// output is ever in, so it has to describe both directions of it. A per-state
+    /// reference describes one state, and a state characterised as a
+    /// `combinational_rise` group carries the rise families alone -- so requiring both
+    /// edges there would refuse the ordinary shape a conditioned arc comes in. What
+    /// neither accepts is half an edge: a delay with no transition beside it, or a
+    /// transition with no delay, describes half a path under any scope.
+    ///
+    /// Killed by: `Scope::accepts` answered `rise.is_some() || fall.is_some()` for `Scope::Whole` too, so a whole-output reference was drawn from one edge alone. That also reddens the two engine tests about a skipped output, which is the same rule seen through the whole conversion; `per_state_emits_one_conditioned_clock_arc_per_state_and_a_catch_all_last` stays green under it, which is what shows this test pins the whole-output arm rather than the per-state one.
     #[test]
-    fn select_reference_arc_requires_all_four_tables() {
-        let tt = TimingTables {
-            slews: None,
-            loads: None,
-            lut_template: "T".to_owned(),
-            sense: Some(TimingSense::Positive),
-            cell_rise: Some(nine(0.0)),
-            cell_fall: None, // missing -> no reference arc
-            rise_trans: Some(nine(200.0)),
-            fall_trans: Some(nine(300.0)),
+    fn a_scope_decides_how_complete_a_reference_has_to_be() {
+        let drawn = |tables: &TimingTables, scope| {
+            select_reference_arc("CK", tables, Anchor::Middle, OffsetPlacement::Setup, scope)
         };
-        assert!(select_reference_arc("CK", &tt, Anchor::Middle, OffsetPlacement::Setup).is_none());
+        let class = collision_classes(&[Condition::parse("A").expect("parse")])[0];
+
+        for scope in [Scope::Whole, Scope::State(class), Scope::CatchAll] {
+            assert!(
+                drawn(&all_nine(), scope).is_some(),
+                "all four families are a reference at {:?}",
+                scope
+            );
+        }
+
+        for edge in [Transition::Rise, Transition::Fall] {
+            let tables = one_edge(edge);
+            assert!(
+                drawn(&tables, Scope::Whole).is_none(),
+                "a whole-output reference needs both edges, {:?} alone is not one",
+                edge
+            );
+            for scope in [Scope::State(class), Scope::CatchAll] {
+                let arc = drawn(&tables, scope)
+                    .unwrap_or_else(|| panic!("{:?} alone is a reference at {:?}", edge, scope));
+                assert_eq!(arc.rise.is_some(), edge == Transition::Rise, "{:?}", scope);
+                assert_eq!(arc.fall.is_some(), edge == Transition::Fall, "{:?}", scope);
+            }
+        }
+
+        // Half an edge is no edge under any scope: a delay with no transition beside
+        // it describes half a path.
+        let mut half = all_nine();
+        half.rise_trans = None;
+        half.cell_fall = None;
+        half.fall_trans = None;
+        for scope in [Scope::Whole, Scope::State(class), Scope::CatchAll] {
+            assert!(
+                drawn(&half, scope).is_none(),
+                "a delay with no transition is not an edge at {:?}",
+                scope
+            );
+        }
     }
 
     // --- anchor helpers ----------------------------------------------------
@@ -1317,6 +1561,10 @@ mod tests {
         assert_eq!(
             "per-output".parse::<ReferenceMode>(),
             Ok(ReferenceMode::PerOutput)
+        );
+        assert_eq!(
+            "per-state".parse::<ReferenceMode>(),
+            Ok(ReferenceMode::PerState)
         );
 
         let err = "bogus".parse::<ReferenceMode>().unwrap_err();

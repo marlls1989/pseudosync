@@ -65,8 +65,8 @@ library block.
 | `-l`, `--latch` | off | Emit the latch model rather than the flop model: keep the `latch` group and every original arc, and add the pseudo-synchronous timing alongside them. This is the library to use when generating SDF for delay-annotated simulation, which needs the real input-to-output delays rather than the fictitious clock's |
 | `-c`, `--clock-pin <name>` | `G` | The pin the conversion treats as the clock. It is expected to exist in the `.lib` and nowhere else |
 | `-r`, `--reset-pin <regex>` | `(R\|S)N?` | Arcs whose `related_pin` matches are treated as asynchronous set/reset: excluded from the conversion and retained unchanged |
-| `-m`, `--reference-mode <mode>` | `per-output` | `per-output` gives each output its own clock-to-output reference and constrains each input against the outputs it actually drives; `pooled` gives every output the cell-wide mean |
-| `-w`, `--when-merge <mode>` | `mean` | How several `when`-conditioned arcs of one pin pair are merged: `mean` is representative, `max` the pessimistic envelope, `min` the optimistic one. Merging is elementwise, per slew/load point |
+| `-m`, `--reference-mode <mode>` | `per-state` | `per-state` gives each post-settled state of each output its own clock-to-output reference and conditions the emitted delays and checks on it; `per-output` coarsens that to one reference per output, constraining each input against only the outputs it actually drives; `pooled` coarsens further still, to the cell-wide mean — a deliberately kept regression, not a designed alternative, retained only so its cost can be measured |
+| `-w`, `--when-merge <mode>` | `mean` | How several arcs sharing one key are merged into the one table emitted for it: `mean` is representative, `max` the pessimistic envelope, `min` the optimistic one. Merging is elementwise, per slew/load point. Under `pooled`/`per-output` the key is the whole output, so this merges every `when`-conditioned arc of a pin pair; under `per-state` the key is one post-settled state, so this instead resolves a collision between conditions denoting the same state |
 | `--anchor <mode>` | `middle` | Where in each characterised table the value standing for the collapsed axis is read: `middle` takes the middle row, column and element, so every number emitted is one the library measured; `average` takes the mean over that axis instead |
 | `--offset-placement <mode>` | `setup` | Which half of the split carries the constant the two are separated around: `setup` leaves it in the setup constraint, `prop` folds it into the clock-to-output delay. The two halves sum to the same arc either way |
 | `-R`, `--report <path>` | none | Write the reconstruction report here. `-` writes it to standard error |
@@ -77,10 +77,15 @@ for `<input>`, standard output for `--output`, standard error for `--report`. Th
 output artefacts may not share a destination, and a run that would have them do so is
 refused before either is written.
 
-`per-output` is the default and the behaviour to use. `pooled` hands every output the
-cell-wide mean instead, which on a cell whose outputs are independent rails averages
-measurements that describe different elements. On a single-output cell the two coincide by
-construction.
+`per-state` is the default and the behaviour to use. `per-output` and `pooled` are coarser
+rungs of the same ladder — one reference per output, then one for the whole cell — kept
+because a mode this new needs a fallback, not because either is a designed alternative to
+it. `pooled` in particular is a deliberately kept regression: on a cell whose outputs are
+independent rails it averages measurements that describe different elements, and it is
+retained only so that cost can be measured before any decision to remove it. All three
+coincide on a single-output cell characterised under no `when` condition at all — pooled's
+cell-wide mean of one output is that output's own reference, and per-state's one state is
+the whole output — and can differ the moment either does not hold.
 
 ## What it changes in the library
 
@@ -162,6 +167,9 @@ skips.
 ```
 cargo build --release
 ```
+
+`espresso-logic` builds a small C component as part of this, so clang-devel must be
+installed.
 
 Contributor rules are in `GUIDELINES.md`. What the tool does, and what it refuses to do,
 is in `docs/conversion-policy.md`.

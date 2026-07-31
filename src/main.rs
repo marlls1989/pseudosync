@@ -31,8 +31,10 @@ struct ProgramOptions {
 
     /// How the clock-to-output reference is drawn on a multi-output cell:
     /// "pooled" gives every output the cell-wide mean, "per-output" gives each
-    /// output its own and references each input against the outputs it drives.
-    #[structopt(short = "m", long, default_value = "per-output")]
+    /// output its own and references each input against the outputs it drives,
+    /// "per-state" gives each post-settled state of each output its own and
+    /// conditions the emitted delays and checks on it.
+    #[structopt(short = "m", long, default_value = "per-state")]
     reference_mode: ReferenceMode,
 
     /// How the several `when`-conditioned arcs of a pin pair are merged into the
