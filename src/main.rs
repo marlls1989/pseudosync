@@ -8,7 +8,7 @@ mod render;
 mod report;
 mod templates;
 
-use crate::arcs::{Anchor, OffsetPlacement, ReferenceMode, WhenMerge};
+use crate::arcs::{Anchor, ReferenceMode, WhenMerge};
 use crate::engine::{process_library, CellOptions};
 use crate::liberty_io::{parse_liberty_file, write_liberty_file, Destination};
 use crate::render::write_report;
@@ -50,16 +50,6 @@ struct ProgramOptions {
     /// that axis instead.
     #[structopt(long, default_value = "middle")]
     anchor: Anchor,
-
-    /// Which half of the split carries the constant the two are separated
-    /// around: "setup" leaves it in the setup constraint, "prop" folds it into
-    /// the clock-to-output delay. The two halves sum to the same arc either way,
-    /// but the residual does not: "setup" is exact at the anchor point for every
-    /// arc, "prop" adds a constant bias on any pin driving two or more outputs,
-    /// because the per-arc crossing folded in here is later averaged per source
-    /// pin over the outputs it drives.
-    #[structopt(long, default_value = "setup")]
-    offset_placement: OffsetPlacement,
 
     /// Write the reconstruction report here. It dumps each original arc, the
     /// reference and setup arcs it was split into, the arc rebuilt from that
@@ -141,7 +131,6 @@ fn run(opts: &ProgramOptions) -> Result<(), Box<dyn Error>> {
         mode: opts.reference_mode,
         when_merge: opts.when_merge,
         anchor: opts.anchor,
-        placement: opts.offset_placement,
     };
 
     let mut reports: Vec<CellReport> = Vec::new();
@@ -163,7 +152,6 @@ fn run(opts: &ProgramOptions) -> Result<(), Box<dyn Error>> {
             &refusals,
             opts.reference_mode,
             opts.anchor,
-            opts.offset_placement,
             opts.report_summary_only,
         )?;
         // The flush is not optional. A buffered sink writes nothing to its backing
@@ -229,7 +217,6 @@ library(ordering_test) {
             reference_mode: ReferenceMode::PerOutput,
             when_merge: WhenMerge::Mean,
             anchor: Anchor::Middle,
-            offset_placement: OffsetPlacement::Setup,
             report,
             report_summary_only: false,
             input,

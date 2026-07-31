@@ -246,41 +246,6 @@ impl std::str::FromStr for Anchor {
     }
 }
 
-/// Which half of the split carries the constant the two are separated around.
-///
-/// `delay(A→Z) = propagation(G→Z) + setup(A→G)` fixes the sum, not how the constant
-/// at the anchor point is divided between the halves. The residual is a different
-/// matter: each arc's own crossing is folded in where its reference is drawn
-/// (`select_reference_arc`), but a source pin's constraint is then averaged over
-/// every output that pin drives (`constraints_from_arcs`, grouped on `(src, scope)`),
-/// and the two operations do not commute. `Setup` is exact at the anchor point for
-/// every arc; `Prop` adds a constant bias — that arc's crossing minus the mean
-/// crossing across the group — on any pin driving two or more outputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OffsetPlacement {
-    /// The constant stays in the setup constraint, which is therefore referred to the
-    /// anchor point of the propagation delay. The original behaviour.
-    Setup,
-    /// The constant is folded into the propagation delay instead, leaving the setup
-    /// constraint the arc's own slew profile.
-    Prop,
-}
-
-impl std::str::FromStr for OffsetPlacement {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "setup" => Ok(OffsetPlacement::Setup),
-            "prop" => Ok(OffsetPlacement::Prop),
-            other => Err(format!(
-                "unknown offset placement {:?}, expected \"setup\" or \"prop\"",
-                other
-            )),
-        }
-    }
-}
-
 /// The load-indexed profile a table is collapsed to: the row the [`Anchor`] selects.
 ///
 /// `Middle` takes the row at `len_of(Axis(0)) / 2`, the same integer division the
@@ -763,34 +728,20 @@ pub(crate) fn select_reference_arc(
     related_pin: &str,
     timing_tables: &TimingTables,
     anchor: Anchor,
-    placement: OffsetPlacement,
     scope: Scope,
 ) -> Option<RefArc> {
-    // Placement is applied once, here, so that everything downstream reads one
-    // already-decided pair: the delay this edge emits and the constant the
-    // constraint half still owes. `Prop` folds the constant into the delay and
-    // leaves nothing to subtract; the sum of the two halves is the same either way.
-    // The residual is not: this folds in the arc's own crossing, but
-    // `constraints_from_arcs` averages a source pin's reference over every output it
-    // drives, so the two do not commute. `Setup` lands exactly on the anchor point
-    // for every arc; `Prop` shifts the residual by that arc's crossing minus the
-    // group's mean crossing wherever a pin drives more than one output.
+    // Each edge is decided once, here, so that everything downstream reads one
+    // already-settled pair: the delay this edge emits, whole, and the constant the
+    // constraint half still owes against it.
     let edge = |delays: Option<&Array2<f64>>, transitions: Option<&Array2<f64>>| {
         let (delays, transitions) = (delays?, transitions?);
         let delay = prop_profile(delays, anchor);
         let crossing = crossing(delays, anchor);
         let transition = prop_profile(transitions, anchor);
-        Some(match placement {
-            OffsetPlacement::Setup => EdgeRef {
-                delay,
-                transition,
-                crossing,
-            },
-            OffsetPlacement::Prop => EdgeRef {
-                delay: delay - crossing,
-                transition,
-                crossing: 0.0,
-            },
+        Some(EdgeRef {
+            delay,
+            transition,
+            crossing,
         })
     };
 
@@ -1151,14 +1102,8 @@ mod tests {
     /// Killed by: `select_reference_arc` took `col` as `sized.len_of(Axis(1)) * 0` instead of `/ 2`.
     #[test]
     fn select_reference_arc_picks_the_middle_row_and_column() {
-        let arc = select_reference_arc(
-            "CK",
-            &all_nine(),
-            Anchor::Middle,
-            OffsetPlacement::Setup,
-            Scope::Whole,
-        )
-        .expect("all four tables present");
+        let arc = select_reference_arc("CK", &all_nine(), Anchor::Middle, Scope::Whole)
+            .expect("all four tables present");
         assert_eq!(arc.row, 1);
         assert_eq!(arc.col, 1);
         assert_eq!(arc.related_pin, "CK");
@@ -1168,46 +1113,6 @@ mod tests {
         // middle row of cell_rise == [3,4,5]
         assert_eq!(rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
         assert_eq!(fall.delay, Array1::from(vec![103.0, 104.0, 105.0]));
-    }
-
-    /// `Prop` moves the constant out of the constraint and into the delay, and does
-    /// nothing else: the two halves still sum to the same arc.
-    ///
-    /// Derivation from the model. `nine(0)` is `[[0,1,2],[3,4,5],[6,7,8]]`, so under
-    /// `Middle` the rise profile is row 1, `[3,4,5]`, and the crossing is the middle
-    /// element, `4`. `Setup` emits that profile whole and leaves `4` for the
-    /// constraint to subtract; `Prop` emits `[3,4,5] - 4 = [-1,0,1]` and leaves
-    /// nothing. `setup + delay` is `x - 4 + [3,4,5]` either way.
-    ///
-    /// A transition is the output's own slew, not a delay referred to anything, so it
-    /// is the same profile under both placements.
-    ///
-    /// Killed by: `select_reference_arc`'s `Prop` arm kept `crossing` rather than
-    /// zeroing it, so the constant was charged to both halves at once. Observed to
-    /// redden this test alone -- no other test asks for `Prop`.
-    #[test]
-    fn prop_placement_moves_the_crossing_into_the_delay_and_leaves_none_to_subtract() {
-        let at = |placement| {
-            select_reference_arc("CK", &all_nine(), Anchor::Middle, placement, Scope::Whole)
-                .expect("all four tables present")
-        };
-        let setup = at(OffsetPlacement::Setup);
-        let prop = at(OffsetPlacement::Prop);
-        let (setup_rise, setup_fall) = both_edges(&setup);
-        let (prop_rise, prop_fall) = both_edges(&prop);
-
-        assert_eq!(setup_rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
-        assert_eq!(setup_rise.crossing, 4.0);
-
-        assert_eq!(prop_rise.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
-        assert_eq!(prop_rise.crossing, 0.0);
-        // cell_fall's middle row is [103,104,105] and its crossing 104.
-        assert_eq!(prop_fall.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
-        assert_eq!(prop_fall.crossing, 0.0);
-
-        // The output's slew is not a delay and moves with neither placement.
-        assert_eq!(prop_rise.transition, setup_rise.transition);
-        assert_eq!(prop_fall.transition, setup_fall.transition);
     }
 
     /// One edge's tables, for the completeness assertions below: a delay family and
@@ -1242,7 +1147,7 @@ mod tests {
     #[test]
     fn a_scope_decides_how_complete_a_reference_has_to_be() {
         let drawn = |tables: &TimingTables, scope| {
-            select_reference_arc("CK", tables, Anchor::Middle, OffsetPlacement::Setup, scope)
+            select_reference_arc("CK", tables, Anchor::Middle, scope)
         };
         let class = collision_classes(&[Condition::parse("A").expect("parse")])[0];
 
@@ -1416,7 +1321,7 @@ mod tests {
         assert_eq!(input_transition(NonUnate, Transition::Fall), None);
     }
 
-    // --- Anchor::from_str / OffsetPlacement::from_str -----------------------
+    // --- Anchor::from_str ---------------------------------------------------
 
     /// Killed by: `Anchor::from_str` mapped `"middle"` to `Anchor::Average`.
     #[test]
@@ -1427,23 +1332,6 @@ mod tests {
         let err = "bogus".parse::<Anchor>().unwrap_err();
         assert!(
             err.contains("unknown anchor"),
-            "error message was {:?}",
-            err
-        );
-    }
-
-    /// Killed by: `OffsetPlacement::from_str` mapped `"setup"` to `OffsetPlacement::Prop`.
-    #[test]
-    fn offset_placement_from_str_maps_each_spelling() {
-        assert_eq!(
-            "setup".parse::<OffsetPlacement>(),
-            Ok(OffsetPlacement::Setup)
-        );
-        assert_eq!("prop".parse::<OffsetPlacement>(), Ok(OffsetPlacement::Prop));
-
-        let err = "bogus".parse::<OffsetPlacement>().unwrap_err();
-        assert!(
-            err.contains("unknown offset placement"),
             "error message was {:?}",
             err
         );

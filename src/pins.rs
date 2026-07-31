@@ -133,14 +133,14 @@ mod tests {
     //! and which pins constraints are written to.
 
     use super::*;
-    use crate::arcs::{Anchor, OffsetPlacement, ReferenceMode, WhenMerge};
+    use crate::arcs::{Anchor, ReferenceMode, WhenMerge};
     use crate::engine::{process_library, CellOptions}; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use liberty_parser::liberty::{Group, Liberty};
     use regex::Regex;
 
-    /// The conversion knobs, with the anchor and offset placement at the defaults
-    /// the command line supplies. Those two are exercised where they are decided,
-    /// in `arcs`; here they only have to stay out of the way.
+    /// The conversion knobs, with the anchor at the default the command line
+    /// supplies. The anchor is exercised where it is decided, in `arcs`; here it
+    /// only has to stay out of the way.
     fn opts<'a>(
         clock_name: &'a str,
         reset_name: &'a Regex,
@@ -155,7 +155,6 @@ mod tests {
             mode,
             when_merge,
             anchor: Anchor::Middle,
-            placement: OffsetPlacement::Setup,
         }
     }
 

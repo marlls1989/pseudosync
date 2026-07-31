@@ -120,30 +120,18 @@ are summed, and together they do not describe the delay as an explicit function 
 and load. The difference is the **residual**, which the reconstruction report measures. That
 is the method's declared cost, reported rather than hidden.
 
-### Where the split is anchored, and which half keeps the constant
+### Where the split is anchored
 
-Two knobs decide the arithmetic of the split above, and both are orthogonal to
+One knob decides the arithmetic of the split above, and it is orthogonal to
 `--reference-mode`: that setting chooses *which output's* reference an input is charged
-against, these two choose *how* a reference is read off a table and *where* the constant
-between the two halves is written. Both default to the behaviour the tool has always had,
-so a run that names neither is unchanged.
+against, this one chooses *how* a reference is read off a table. It defaults to the
+behaviour the tool has always had, so a run that does not name it is unchanged.
 
 **`--anchor`** — the 2-D arc is slew x load and the split collapses one axis at a time, so
 something has to stand for the axis being collapsed. `middle` (the default) takes the
 middle row, the middle column and the middle element, so every number emitted is one the
 library actually measured. `average` takes the mean over that axis instead: it uses every
 measurement, at the cost of standing for no single characterised point.
-
-**`--offset-placement`** — `delay(A→Z) = propagation(G→Z) + setup(A→G)` fixes the *sum* of
-the two halves, not how the constant at the anchor point is divided between them. `setup`
-(the default) leaves it in the setup constraint; `prop` folds it into the clock-to-output
-delay and leaves the constraint the arc's own slew profile. The two halves still sum to the
-same arc either way, but the residual does not: each arc's own crossing is folded in where
-its reference is drawn (`select_reference_arc`), while a source pin's constraint is averaged
-over every output that pin drives (`constraints_from_arcs`, grouped on `(src, scope)`), and
-the two operations do not commute. `setup` is exact at the anchor point for every arc;
-`prop` adds a constant bias — that arc's crossing minus the mean crossing across the
-group — on any pin driving two or more outputs.
 
 ## 5. Reference mode: the ladder, and how widely one reference is drawn
 
@@ -219,6 +207,18 @@ function. The five cases are pinned in `src/conditions.rs` by
 `two_overlapping_conditions_are_one_class`, `disjoint_conditions_are_two_classes` and
 `a_bridging_condition_closes_two_disjoint_ones_into_one_class`.
 
+A collision is looked for **within one output pin** and never across two, and that same
+requirement is why. It is about the state-dependent timing arcs of one pin pair: after the
+split every propagation arc of an output is `G -> Q`, so two arcs of one output are told
+apart by their `when` alone — including two arcs from different sources, whose `related_pin`
+no longer separates them once converted. `G -> Q1` and `G -> Q2` are two different pin pairs,
+so two outputs' conditions were never required to exclude one another and their overlapping
+is not a state to resolve; emitting one output's arc under a condition drawn from another
+output's characterisation would claim that output's numbers over a state it holds no table
+for. `two_outputs_whose_conditions_overlap_are_not_one_state` in `src/engine.rs` pins that,
+and `a_collision_is_sought_within_a_group_and_never_across_two` in `src/conditions.rs` the
+classifier alone.
+
 `--when-merge` decides how the several arcs an accumulator collects for one key are combined
 into the single table the model emits for it: `mean` (representative), `max` (the
 pessimistic envelope) or `min` (the optimistic one), elementwise per slew/load point. Under
@@ -232,8 +232,9 @@ are filed apart and never merged into each other.
 
 Under `per-state`, an input pin's checks are grouped by a second classification: the source
 `when`s the library characterised that pin's arcs under, independent of the post-settled
-classification above and numbered per pin rather than per cell. The conditioned groups come
-first, the catch-all last — the order Liberty reads a `default_timing` group in.
+classification above and drawn within one input pin, as that one is drawn within one output
+pin. The conditioned groups come first, the catch-all last — the order Liberty reads a
+`default_timing` group in.
 
 Each group's `when` and `sdf_cond` state its class's condition **with nothing conjoined**:
 what the check constrains is said by `timing_type` (`setup_rising`/`hold_rising`), never by

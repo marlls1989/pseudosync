@@ -20,7 +20,7 @@
 //! refused rather than silently misread. A bus-indexed pin name such as `A[0]` does
 //! not lex either, because `[` is not a token at all.
 
-use espresso_logic::{bdd_builder, Anonymous, BoolExpr, Cover, ExprNode, Symbol};
+use espresso_logic::{bdd_builder, BoolExpr, ExprNode};
 
 /// How one rendering spells the operators, and how it writes a pin held at a value.
 ///
@@ -338,61 +338,32 @@ pub(crate) fn collision_classes(conditions: &[Condition]) -> Vec<ClassId> {
     classes
 }
 
-/// Lower a cover to a sum of products over the pins its input labels name.
+/// The same over conditions already partitioned into groups: a class is drawn within
+/// one group and never across two.
 ///
-/// Espresso's own cube order is its own; the cubes are sorted on their input-field
-/// vector first, so one function is spelled one way from run to run. The labels are
-/// carried by value from each cube's own header, so a pin keeps its name — a
-/// positional alignment would rename the pins of any cover whose header differed.
+/// A group is a set whose members Liberty requires to exclude one another. UG
+/// p.7-49–50's requirement is about the state-dependent timing arcs of one pin pair,
+/// so two conditions characterised on different pin pairs were never required to be
+/// mutually exclusive, and an overlap between them is not a state to resolve — it is
+/// two states that happen to share an assignment, on paths that are never compared.
 ///
-/// A cube fixing no pin holds everywhere and a cover with no cube holds nowhere, so
-/// each degenerate case is the constant it denotes rather than an identity term
-/// spelled out: `BoolExpr` is syntactic, and `1 * A` would be emitted as written.
-fn sum_of_products(cover: &Cover<Symbol, Anonymous>) -> BoolExpr {
-    /// One cube on its way to a product term: the positional input-field vector the
-    /// cubes are ordered on, and the pins that cube fixes, at the value it fixes them
-    /// to.
-    struct Term {
-        fields: Vec<Option<bool>>,
-        literals: Vec<(String, bool)>,
-    }
-
-    let mut terms: Vec<Term> = cover
-        .cubes()
-        .map(|cube| {
-            let inputs = cube.inputs();
-            let fields: Vec<Option<bool>> = inputs.iter().collect();
-            let literals = inputs
-                .vars()
-                .iter()
-                .zip(fields.iter())
-                .filter_map(|(pin, field)| field.map(|value| (pin.as_str().to_owned(), value)))
-                .collect();
-            Term { fields, literals }
+/// Ids run in first-appearance order over the groups as given and stay unique across
+/// the whole call, because a class is filed under keys that do not all carry the
+/// group it was drawn within: two groups' classes sharing a number would be read as
+/// one state wherever they meet in such a key.
+pub(crate) fn collision_classes_within(groups: &[Vec<Condition>]) -> Vec<Vec<ClassId>> {
+    let mut issued = 0usize;
+    groups
+        .iter()
+        .map(|group| {
+            let ids = collision_classes(group);
+            let shifted = ids.iter().map(|id| ClassId(id.0 + issued)).collect();
+            // The ids of one call run `0..n`, so the greatest of them numbers the
+            // classes this group opened.
+            issued += ids.iter().map(|id| id.0 + 1).max().unwrap_or(0);
+            shifted
         })
-        .collect();
-    terms.sort_by(|left, right| left.fields.cmp(&right.fields));
-
-    BoolExpr::build(|b| {
-        terms
-            .iter()
-            .map(|Term { literals, .. }| {
-                literals
-                    .iter()
-                    .map(|(pin, value)| {
-                        let var = b.var(pin);
-                        if *value {
-                            var
-                        } else {
-                            !var
-                        }
-                    })
-                    .reduce(|left, right| left & right)
-                    .unwrap_or_else(|| b.constant(true))
-            })
-            .reduce(|left, right| left | right)
-            .unwrap_or_else(|| b.constant(false))
-    })
+        .collect()
 }
 
 /// The one condition a whole collision class is stated under: the least restrictive
@@ -412,12 +383,16 @@ fn sum_of_products(cover: &Cover<Symbol, Anonymous>) -> BoolExpr {
 ///
 /// A minimised label was written by no library, so it carries no source spelling and
 /// is stated in Liberty's own rendering, its `sdf_cond` coming from the same
-/// expression as for any condition this tool built. It need not be a single product
-/// term: `A * B + B * C` is an ordinary Liberty condition, and it is exactly what the
-/// union of those two members is.
+/// expression as for any condition this tool built. The minimised cover is turned
+/// back into an expression by Espresso's own `Cover::to_expr_by_index` — by index and
+/// not by name because the cover a BDD minimises to has an anonymous output, which
+/// the crate's documentation names as the case for the indexed form. Its shape is the
+/// crate's to choose and this tool does not second-guess it: it need not be a single
+/// product term, and it need not be flat.
 ///
-/// A minimisation error costs the spelling and not the function: the plain
-/// disjunction of the members denotes the same condition, unminimised.
+/// A failure to minimise, or to rebuild the expression from the cover, costs the
+/// spelling and not the function: the plain disjunction of the members denotes the
+/// same condition, unminimised.
 pub(crate) fn merge_conditions(members: &[&Condition]) -> Condition {
     // Taken before any Boolean work, so a class of one keeps the very condition it
     // was built from rather than a rebuilt copy of it.
@@ -438,16 +413,19 @@ pub(crate) fn merge_conditions(members: &[&Condition]) -> Condition {
         return members[covering].clone();
     }
 
-    let expr = match union.minimize() {
-        Ok(cover) => sum_of_products(&cover),
-        Err(_) => BoolExpr::build(|b| {
-            members
-                .iter()
-                .map(|member| b.graft(&member.expr))
-                .reduce(|left, right| left | right)
-                .unwrap_or_else(|| b.constant(false))
-        }),
-    };
+    let expr = union
+        .minimize()
+        .ok()
+        .and_then(|cover| cover.to_expr_by_index(0).ok())
+        .unwrap_or_else(|| {
+            BoolExpr::build(|b| {
+                members
+                    .iter()
+                    .map(|member| b.graft(&member.expr))
+                    .reduce(|left, right| left | right)
+                    .unwrap_or_else(|| b.constant(false))
+            })
+        });
 
     Condition {
         expr,
@@ -755,18 +733,21 @@ mod tests {
     }
 
     /// A class that overlaps without containment is stated under the minimised union
-    /// of its own members, which is a sum of product terms rather than one term.
+    /// of its own members: that function, over exactly the pins its members name.
     ///
     /// Derived from the domain, not from the minimiser. The class's members are
     /// `A * B` and `B * C`; neither covers the other, so the least restrictive
-    /// condition covering both is their union. That union's prime implicants are
-    /// `A * B` and `B * C` and both are essential -- `A * B * !C` is covered only by
-    /// the first and `!A * B * C` only by the second -- so a minimal cover has
-    /// exactly those two cubes, each fixing two pins. Which of them Espresso lists
-    /// first is the cover's own header order, so the shape is pinned and the order
-    /// is not.
+    /// condition covering both is their union, `A * B + B * C`. How Espresso spells
+    /// that function -- flat, or factored as `B * (A + C)` -- is the crate's to
+    /// choose and no part of what this tool decides, so the function is pinned
+    /// semantically and the text only for the pins it names. Those are `A`, `B` and
+    /// `C`, whichever spelling comes back: the union depends on all three (at
+    /// `B * !C` it is `A`, at `!A * B` it is `C`, at `A * !C` it is `B`) and its
+    /// members name no fourth pin for it to depend on. A `when` naming a pin the cell
+    /// does not have is malformed Liberty, and an equivalence check cannot see one --
+    /// a spurious `D + !D` conjoined in would leave the function untouched.
     ///
-    /// Killed by: `merge_conditions` returned its first member unconditionally, which stated the class as `A * B` -- a condition the second member can hold outside, so the merged arc would have been labelled with a state narrower than the one its values were computed over. Observed to redden this test alone.
+    /// Killed by: `merge_conditions` returned its first member unconditionally, which stated the class as `A * B` -- a condition the second member can hold outside, so the merged arc would have been labelled with a state narrower than the one its values were computed over. Observed to redden this test and the two engine tests that merge overlapping conditions through the whole path, which is the same fault seen a layer up; the containment test beside this one stays green, so the discrimination within this module holds.
     #[test]
     fn an_overlapping_class_is_stated_under_the_minimised_union_of_its_members() {
         let left = Condition::parse("A * B").expect("parse");
@@ -780,20 +761,16 @@ mod tests {
             .equivalent_to(&builder.parse("A * B + B * C").expect("parse")));
 
         // No library wrote it, so it is stated in the tool's own rendering.
-        let text = merged.as_written();
-        assert_eq!(text, merged.liberty());
+        assert_eq!(merged.as_written(), merged.liberty());
 
-        // Two cubes of two literals each.
-        let terms: Vec<&str> = text.split(" + ").collect();
-        assert_eq!(terms.len(), 2, "expected a two-cube sum, got {:?}", text);
-        for term in terms {
-            assert_eq!(
-                term.split(" * ").count(),
-                2,
-                "expected a two-literal product, got {:?}",
-                term
-            );
-        }
+        // The three pins its members name, and no other.
+        let mut pins: Vec<String> = merged
+            .expr
+            .variables()
+            .map(|pin| pin.as_str().to_owned())
+            .collect();
+        pins.sort();
+        assert_eq!(pins, ["A", "B", "C"]);
     }
 
     /// The construction the engine performs, checked where it is decided: a
@@ -812,6 +789,37 @@ mod tests {
         assert_eq!(
             collision_classes(&[settled_high, settled_low]),
             vec![ClassId(0), ClassId(1)]
+        );
+    }
+
+    /// A group bounds the search: a condition in another group closes nothing, not
+    /// even two members its own group holds apart, and the numbering runs on across
+    /// the partition rather than restarting inside it.
+    ///
+    /// `A * !C` and `!A * C` disagree on both pins, so they are two classes wherever
+    /// they are asked about together. `A + C` holds beside either of them, so the
+    /// bridge test above would close all three into one -- but it sits in the second
+    /// group, and a bridge is only a bridge between conditions that had to exclude
+    /// each other in the first place. `!A * !C` is the complement of `A + C` and
+    /// shares an assignment with neither of the first two, so the second group is two
+    /// classes as well: `[[0, 1], [2, 3]]`.
+    ///
+    /// Ids continuing across the groups is what keeps a class identifiable where it is
+    /// filed under a key that does not carry the group it was drawn in.
+    ///
+    /// Killed by: `collision_classes_within` classified the concatenation of the groups and sliced the answer back apart, which is the cell-wide reading this replaced: `A + C` closed the first group's two disjoint conditions into one and the answer was `[[0, 0], [1, 2]]`. Observed to redden this test alone; no other fixture in the module hands the classifier more than one group. (Dropping the `issued` shift so each group restarts at zero was applied separately, giving `[[0, 1], [0, 1]]` -- the other half of the rule, and it fails independently. That one also reddens the engine's `two_outputs_whose_conditions_overlap_are_not_one_state`, which two groups' classes sharing a number reaches through the report's class-to-condition map.)
+    #[test]
+    fn a_collision_is_sought_within_a_group_and_never_across_two() {
+        let group = |texts: &[&str]| -> Vec<Condition> {
+            texts
+                .iter()
+                .map(|t| Condition::parse(t).expect("parse"))
+                .collect()
+        };
+
+        assert_eq!(
+            collision_classes_within(&[group(&["A * !C", "!A * C"]), group(&["A + C", "!A * !C"])]),
+            vec![vec![ClassId(0), ClassId(1)], vec![ClassId(2), ClassId(3)]]
         );
     }
 }

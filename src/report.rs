@@ -26,10 +26,16 @@ pub(crate) struct ConditionedArc {
     /// determines no input direction is skipped before it can be recorded here.
     pub(crate) sense: TimingSense,
     /// The post-settled state each delay family of this arc describes, as a class
-    /// within its cell. `None` where the arc carries no such family, where it has
+    /// within its output. `None` where the arc carries no such family, where it has
     /// no `when` at all -- the catch-all -- or where its `when` could not be read.
     pub(crate) class_rise: Option<ClassId>,
     pub(crate) class_fall: Option<ClassId>,
+    /// The condition this arc's checks are grouped under, as a class within its
+    /// SOURCE pin. One per arc and not one per edge: a check is stated under the
+    /// source `when` alone, which both edges of an arc share. `None` where the arc
+    /// states no `when` -- the catch-all -- and under every mode that groups the
+    /// checks under nothing at all.
+    pub(crate) check_class: Option<ClassId>,
     pub(crate) cell_rise: Option<Array2<f64>>,
     pub(crate) cell_fall: Option<Array2<f64>>,
 }
@@ -163,27 +169,52 @@ pub(crate) struct LibraryReport {
     pub(crate) refusals: Vec<Refusal>,
 }
 
-/// The merged delay tables the constraints are built from, keyed by source pin,
-/// output pin, the scope the reference is drawn at, the direction the INPUT was
-/// moving in, and the table family the values were read from.
+/// Where one merged delay table belongs: the check it is summed into, the reference
+/// it is charged against, and which values of the arc it holds.
+///
+/// The two scopes are two different partitions and are named rather than positioned,
+/// because a key carrying both of them is exactly where they have been confused
+/// before. `check` is the class of the SOURCE pin's own `when`, which is what says
+/// which emitted check group these values are averaged into; `delay` is the state the
+/// OUTPUT settles in, which is what says which clock-to-output delay they are
+/// measured from. One source pin driving two outputs under one condition has two
+/// entries at one `check` and two different `delay`s, which is the whole reason the
+/// two cannot be one field.
 ///
 /// The input's direction is part of the key because that is what a constraint is
 /// keyed on, and it is not the output's: a negative-unate arc's `cell_rise` values
 /// describe an input that fell. The family stays in the key beside it because the
-/// reference the values are charged against is still chosen by the family. The scope
-/// sits between them because the two halves of the split must be referred to the
-/// same thing: a constraint drawn against a state's delay has to be filed under that
-/// state.
-pub(crate) type ConstraintArcs =
-    BTreeMap<(String, String, Scope, Transition, &'static str), Array2<f64>>;
-
-/// One input direction's constraints, keyed by the constrained pin and the scope its
-/// values were referred to.
+/// reference the values are charged against is still chosen by the family.
 ///
-/// The scope is in the key because a check has to be stated against the delay it was
-/// drawn from: under per-state one pin carries one constraint per state it was
-/// characterised in, and the two halves of each only sum back to the arc they came
-/// from within their own state.
+/// The fields are declared in the order the map is sorted by, which is the order the
+/// constraint arithmetic sums them in. `check` sits after `delay` so that it is a
+/// tiebreaker alone: an entry that splits in two because its arcs are checked under
+/// different conditions sorts where the single entry did, and every other entry keeps
+/// the position it always had.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ConstraintKey {
+    pub(crate) src: String,
+    pub(crate) outpin: String,
+    /// The scope the reference these values are charged against is drawn at.
+    pub(crate) delay: Scope,
+    /// The scope of the check group these values are summed into.
+    pub(crate) check: Scope,
+    pub(crate) input_edge: Transition,
+    pub(crate) family: &'static str,
+}
+
+/// The merged delay tables the constraints are built from.
+pub(crate) type ConstraintArcs = BTreeMap<ConstraintKey, Array2<f64>>;
+
+/// One input direction's constraints, keyed by the constrained pin and the scope of
+/// the condition its checks are grouped under.
+///
+/// That scope is the pin's OWN, not the driven output's: a check sits on the pin pair
+/// `D -> G` and is stated under the condition the library characterised `D` under, so
+/// one value per check group is what a group can carry. Under per-state a pin has one
+/// constraint per condition it was characterised under, averaged over the outputs it
+/// drives under that condition; under the other two modes there is one group per pin,
+/// at [`Scope::Whole`].
 pub(crate) type Constraints = BTreeMap<(String, Scope), Array1<f64>>;
 
 /// Everything the reconstruction report shows for one processed cell.
@@ -230,14 +261,20 @@ pub(crate) struct CellReport {
     /// and they say how much of the cell a per-state model would have to distinguish.
     pub(crate) classes: Vec<StateClass>,
     /// The condition each of those classes denotes, in Liberty's spelling, so a
-    /// reference or a constraint filed under a class can be captioned with the state
-    /// it describes rather than with a number. Empty where the mode draws one
-    /// reference per output and there is no state to name.
+    /// reference filed under a class can be captioned with the state it describes
+    /// rather than with a number. Empty where the mode draws one reference per output
+    /// and there is no state to name.
     pub(crate) class_conditions: BTreeMap<ClassId, String>,
     /// The conditions each input pin's checks were grouped under. Empty where the
     /// mode emits one unconditioned check per pin, because then the checks were
     /// grouped under nothing.
     pub(crate) check_classes: Vec<CheckClass>,
+    /// The condition each of those check classes denotes, keyed by the pin as well as
+    /// by the class because the checks are classified per pin and their numbers
+    /// restart with each. This is what captions a constraint, which is filed under
+    /// its own pin's condition and not under any output's state -- the two are
+    /// different partitions, so one map could not caption both.
+    pub(crate) check_conditions: BTreeMap<(String, ClassId), String>,
 }
 
 /// One half of an arc: the direction the OUTPUT moved in, which raw table records
@@ -273,12 +310,14 @@ pub(crate) const FALL: Edge = Edge {
 /// Measure the reconstruction residual against every condition of every arc.
 ///
 /// Each raw condition is reconstructed from the pair the model actually holds for
-/// it: the setup constraint of its own pin at its own scope, plus the delay of the
-/// reference that scope was drawn at. The residual it leaves therefore contains both
-/// error sources at once: what the separable setup-plus-delay form cannot express,
-/// and what collapsing the arcs sharing that scope into one threw away. It is always
-/// taken against this arc's OWN raw table -- measuring against the merged one would
-/// report less error than the merge introduced.
+/// it: the setup constraint its own pin carries under its own condition, plus the
+/// delay of the reference its output's state was drawn at. That is the pair a
+/// consumer adds up, so the residual it leaves contains every error source at once:
+/// what the separable setup-plus-delay form cannot express, what collapsing the arcs
+/// sharing a state into one threw away, and what averaging a check over the several
+/// outputs its pin drives threw away with it. It is always taken against this arc's
+/// OWN raw table -- measuring against the merged one would report less error than the
+/// merge introduced.
 pub(crate) fn collect_arc_errors(
     arcs: &[ConditionedArc],
     setup_input_rise: &Constraints,
@@ -294,8 +333,17 @@ pub(crate) fn collect_arc_errors(
             continue;
         };
         // The scope this edge of this arc was filed under, which is what says which
-        // reference it was measured against and which constraint it contributed to.
+        // reference it was measured against.
         let Some(scope) = Scope::of(references.mode, (edge.class)(arc), arc.when.is_none()) else {
+            continue;
+        };
+        // And the scope its own pin's checks were grouped under, which is what says
+        // which constraint it contributed to. The two are different partitions: this
+        // arc's values were averaged with every other arc the pin drives under the
+        // same condition, whatever states those left their own outputs in, so reading
+        // the constraint at the delay-side scope would measure the arc against a value
+        // no check on this pin carries.
+        let Some(check) = Scope::of(references.mode, arc.check_class, arc.when.is_none()) else {
             continue;
         };
         // Which constraint this arc was folded into is the arc's own property: the
@@ -307,7 +355,7 @@ pub(crate) fn collect_arc_errors(
             Some(Transition::Fall) => setup_input_fall,
             None => continue,
         };
-        let Some(slew_dependent) = setup.get(&(source.clone(), scope)) else {
+        let Some(slew_dependent) = setup.get(&(source.clone(), check)) else {
             continue;
         };
         // Reconstruct with the delay this mode actually emits, so the residual
@@ -343,14 +391,14 @@ mod tests {
     //! Behaviour of the `report` module: reconstruction reports and residual measurement.
 
     use super::*;
-    use crate::arcs::{restore_arc, Anchor, OffsetPlacement, ReferenceMode, WhenMerge};
+    use crate::arcs::{restore_arc, Anchor, ReferenceMode, WhenMerge};
     use crate::engine::{process_library, CellOptions}; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use liberty_parser::liberty::Liberty;
     use regex::Regex;
 
-    /// The conversion knobs, with the anchor and offset placement at the defaults
-    /// the command line supplies. Those two are exercised where they are decided,
-    /// in `arcs`; here they only have to stay out of the way.
+    /// The conversion knobs, with the anchor at the default the command line
+    /// supplies. The anchor is exercised where it is decided, in `arcs`; here it
+    /// only has to stay out of the way.
     fn opts<'a>(
         clock_name: &'a str,
         reset_name: &'a Regex,
@@ -365,7 +413,6 @@ mod tests {
             mode,
             when_merge,
             anchor: Anchor::Middle,
-            placement: OffsetPlacement::Setup,
         }
     }
 

@@ -3,11 +3,12 @@
 
 use crate::arcs::{
     arc_domains, extract_timing_tables_from_arc, input_transition, mean_reference_arc,
-    select_reference_arc, slew_profile, Anchor, ArcAccumulator, EdgeRef, OffsetPlacement, RefArc,
-    ReferenceMode, References, Scope, TableAccumulator, TimingSense, TimingTables, Transition,
-    WhenMerge,
+    select_reference_arc, slew_profile, Anchor, ArcAccumulator, EdgeRef, RefArc, ReferenceMode,
+    References, Scope, TableAccumulator, TimingSense, TimingTables, Transition, WhenMerge,
 };
-use crate::conditions::{collision_classes, merge_conditions, ClassId, Condition};
+use crate::conditions::{
+    collision_classes, collision_classes_within, merge_conditions, ClassId, Condition,
+};
 use crate::emit::{
     convert_latch_to_flipflop, create_hold_timing_group, create_pseudo_output_timing_arc,
     create_setup_timing_group, generate_pseudo_lut_templates, Guard,
@@ -17,7 +18,7 @@ use crate::pins::{
 };
 use crate::report::{
     collect_arc_errors, ArcError, CellReport, CheckClass, ConditionedArc, ConstraintArcs,
-    Constraints, LibraryReport, Refusal, StateClass, FALL, RISE,
+    ConstraintKey, Constraints, LibraryReport, Refusal, StateClass, FALL, RISE,
 };
 use crate::templates::{Axes, Templates};
 use itertools::Itertools;
@@ -66,36 +67,55 @@ enum ArcPost {
 /// Group one cell's arcs by the post-settled state they describe, writing each
 /// class back onto the arc's own edge field and returning the report's view of them.
 ///
-/// One call per cell over every condition at once, so equivalence is decided across
-/// the whole cell rather than within a pin pair: two sources whose conditions denote
-/// the same function collide there, and that collision is exactly what a per-state
-/// model would have to resolve.
+/// Classes are drawn within one OUTPUT and never across two. After the split every
+/// propagation arc of an output is `G -> Q`, so on one output nothing but the `when`
+/// tells two arcs apart -- two sources' conditions that can hold at once are one
+/// state there, `related_pin` no longer separating them, and that collision is
+/// exactly what a per-state model must resolve. `G -> Q1` and `G -> Q2` are different
+/// pin pairs, and Liberty UG p.7-49–50's mutual-exclusivity requirement is about one
+/// pin's state-dependent timing arcs: two outputs' conditions were never required to
+/// exclude one another, so an overlap between them is not a collision at all.
 ///
 /// A whenless arc is the catch-all of its output and edge -- it covers whatever the
 /// conditioned arcs do not -- and takes a row of its own rather than a class. An arc
 /// whose `when` could not be read takes neither: it was warned about where it was
 /// read, and nothing can be said about the state it describes.
 fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<StateClass> {
-    // Flattened in collection order, with the way back to the arc and edge each
-    // came from, because `collision_classes` numbers by first appearance.
-    let mut conditions: Vec<Condition> = Vec::new();
-    let mut origins: Vec<(usize, Transition)> = Vec::new();
+    // Flattened per output, in the collection order of each, with the way back to the
+    // arc and edge every condition came from -- because the classes are numbered by
+    // first appearance within the group they are drawn in. The outputs themselves are
+    // held in first-appearance order for the same reason.
+    let mut outputs: Vec<String> = Vec::new();
+    let mut conditions: Vec<Vec<Condition>> = Vec::new();
+    let mut origins: Vec<Vec<(usize, Transition)>> = Vec::new();
     for (index, entry) in post.iter().enumerate() {
-        if let ArcPost::Settled { rise, fall, .. } = entry {
-            for (edge, condition) in [(Transition::Rise, rise), (Transition::Fall, fall)] {
-                if let Some(condition) = condition {
-                    conditions.push(condition.clone());
-                    origins.push((index, edge));
-                }
+        let ArcPost::Settled { rise, fall, .. } = entry else {
+            continue;
+        };
+        let output = &raw_arcs[index].output;
+        let group = match outputs.iter().position(|held| held == output) {
+            Some(group) => group,
+            None => {
+                outputs.push(output.clone());
+                conditions.push(Vec::new());
+                origins.push(Vec::new());
+                outputs.len() - 1
+            }
+        };
+        for (edge, condition) in [(Transition::Rise, rise), (Transition::Fall, fall)] {
+            if let Some(condition) = condition {
+                conditions[group].push(condition.clone());
+                origins[group].push((index, edge));
             }
         }
     }
 
-    let ids = collision_classes(&conditions);
-    for ((index, edge), id) in origins.iter().zip(ids.iter()) {
-        match edge {
-            Transition::Rise => raw_arcs[*index].class_rise = Some(*id),
-            Transition::Fall => raw_arcs[*index].class_fall = Some(*id),
+    for (group, ids) in origins.iter().zip(collision_classes_within(&conditions)) {
+        for ((index, edge), id) in group.iter().zip(ids) {
+            match edge {
+                Transition::Rise => raw_arcs[*index].class_rise = Some(id),
+                Transition::Fall => raw_arcs[*index].class_fall = Some(id),
+            }
         }
     }
 
@@ -171,6 +191,10 @@ fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<Sta
 /// The members are collected in appearance order, so a class whose union equals one
 /// of them is stated in the first such member's spelling — which is every class that
 /// was an equality class before conditions began colliding on overlap.
+///
+/// Keyed on the class alone, which is enough because a class is drawn within one
+/// output: its members are all conditions that output was characterised under, so the
+/// union cannot state a condition that output holds no tables over.
 fn merged_class_conditions(
     raw_arcs: &[ConditionedArc],
     post: &[ArcPost],
@@ -192,26 +216,31 @@ fn merged_class_conditions(
 }
 
 /// One emitted pair of checks on one input pin: the condition they are stated under,
-/// and the scope each input direction's values are filed at.
+/// and the scope their values are filed at.
 ///
-/// The two scopes differ by construction. A check's condition is the source `when`
-/// alone, but the values under it were filed by the state the arc *settled* in --
-/// that `when` conjoined with the pin's own direction -- so an input rise and an
-/// input fall under one condition are two different states.
+/// One scope, because a group's values are keyed by the very class that made it a
+/// group: both input directions of one condition are looked up there, and the pin
+/// carries at most one value per direction under it. What separates the two
+/// directions is the map they are read from, not the key they are read at.
 struct CheckGroup {
     /// `None` for the catch-all, which states no condition.
     condition: Option<Condition>,
-    rise: Option<Scope>,
-    fall: Option<Scope>,
+    scope: Scope,
 }
 
 /// Group each input pin's arcs by the condition the library characterised them
-/// under, and work out where each group's values were filed.
+/// under, writing each class back onto the arc it came from and returning the groups
+/// the pin's checks are emitted as.
 ///
 /// A second classification, independent of the post-settled one: this is per pin and
 /// numbers its classes per pin, so nothing here can be confused for a state of the
 /// cell. Grouping on the BDD rather than on the text is what makes two spellings of
 /// one condition impossible to emit as two overlapping check groups.
+///
+/// The class written back is what the constraints are then summed by, so a group has
+/// exactly one value per direction by construction: every arc the pin drives under
+/// this condition lands in this group's average, whichever output it drives and
+/// whatever state that output settles in.
 ///
 /// A group states its whole class's merged condition and not the condition of the
 /// arc that opened it. Liberty UG p.7-49–50's mutual-exclusivity requirement is
@@ -225,24 +254,25 @@ struct CheckGroup {
 /// The conditioned groups come out in first-appearance order and the catch-all last,
 /// which is the order Liberty reads a `default_timing` group in.
 fn check_groups(
-    raw_arcs: &[ConditionedArc],
+    raw_arcs: &mut [ConditionedArc],
     post: &[ArcPost],
 ) -> (BTreeMap<String, Vec<CheckGroup>>, Vec<CheckClass>) {
     // Pins in the order the library declares their arcs, so the report's rows follow
-    // the library rather than an alphabetical order the library never chose.
-    let mut pins: Vec<&str> = Vec::new();
-    for arc in raw_arcs {
-        if !pins.contains(&arc.source.as_str()) {
-            pins.push(&arc.source);
+    // the library rather than an alphabetical order the library never chose. Owned,
+    // so the classes below can be written back onto the arcs they were drawn from.
+    let mut pins: Vec<String> = Vec::new();
+    for arc in raw_arcs.iter() {
+        if !pins.contains(&arc.source) {
+            pins.push(arc.source.clone());
         }
     }
 
     let mut groups: BTreeMap<String, Vec<CheckGroup>> = BTreeMap::new();
     let mut rows: Vec<CheckClass> = Vec::new();
 
-    for pin in pins {
+    for pin in &pins {
         let members: Vec<usize> = (0..raw_arcs.len())
-            .filter(|i| raw_arcs[*i].source == pin)
+            .filter(|i| &raw_arcs[*i].source == pin)
             .collect();
         let conditions: Vec<Condition> = members
             .iter()
@@ -274,7 +304,6 @@ fn check_groups(
         let mut settled = 0usize;
 
         for &index in &members {
-            let arc = &raw_arcs[index];
             let (class, condition) = match &post[index] {
                 ArcPost::Settled { .. } => {
                     let class = ids[settled];
@@ -295,13 +324,29 @@ fn check_groups(
                 ArcPost::Unreadable => continue,
             };
 
+            // Back onto the arc, because it is the key the arc's values are summed
+            // by: the constraints of a pin are grouped by the condition its own
+            // checks are stated under, so an arc contributes to the group its `when`
+            // put it in whichever output it drives.
+            raw_arcs[index].check_class = class;
+
             let slot = *slot_of.entry(class).or_insert_with(|| {
                 order.push(class);
+                // The scope this group's values are filed at. Total for both arms --
+                // a class names a state and a catch-all names the catch-all -- and
+                // taken from the same construction the arcs' own scopes are, so the
+                // group and its values cannot be keyed apart.
+                let scope = Scope::of(ReferenceMode::PerState, class, class.is_none())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "internal: check class {:?} of pin {} names no scope",
+                            class, pin
+                        )
+                    });
                 built.push((
                     CheckGroup {
                         condition: condition.clone(),
-                        rise: None,
-                        fall: None,
+                        scope,
                     },
                     CheckClass {
                         pin: pin.to_owned(),
@@ -311,26 +356,7 @@ fn check_groups(
                 ));
                 built.len() - 1
             });
-            built[slot].1.members.push(arc.output.clone());
-
-            // Where this arc's values went: the state its own edge settled in, or
-            // the catch-all for an arc that states no condition at all.
-            for (output_edge, edge_class) in [
-                (Transition::Rise, arc.class_rise),
-                (Transition::Fall, arc.class_fall),
-            ] {
-                let Some(scope) = Scope::of(ReferenceMode::PerState, edge_class, class.is_none())
-                else {
-                    continue;
-                };
-                let Some(input_edge) = input_transition(arc.sense, output_edge) else {
-                    continue;
-                };
-                match input_edge {
-                    Transition::Rise => built[slot].0.rise = Some(scope),
-                    Transition::Fall => built[slot].0.fall = Some(scope),
-                }
-            }
+            built[slot].1.members.push(raw_arcs[index].output.clone());
         }
 
         // The catch-all last, because it covers whatever the conditioned groups do
@@ -348,8 +374,7 @@ fn check_groups(
                 (
                     CheckGroup {
                         condition: group.condition.clone(),
-                        rise: group.rise,
-                        fall: group.fall,
+                        scope: group.scope,
                     },
                     row.clone(),
                 )
@@ -443,8 +468,17 @@ fn charged_reference<'a>(r: &'a RefArc, family: &str, what: &str) -> &'a EdgeRef
 /// makes the mixed-source rule hold: a source driving both a converted and a skipped
 /// output is averaged over the converted ones alone. It is grouped by the direction
 /// the INPUT was moving in, so `input_edge` selects the entries this constraint is
-/// built from, and by the scope its values were referred to, so a constraint drawn
-/// against one state's delay is never charged another state's.
+/// built from, and by the condition the SOURCE's own checks are grouped under, so
+/// every check group carries exactly one value.
+///
+/// That is one averaging rule and not two. Per-output averages a pin over every
+/// output it drives, because it emits one unconditioned check per pin; per-state
+/// specialises the same average to the outputs the pin drives UNDER THIS CONDITION,
+/// because that is what its check group states. Per-output is the degenerate case
+/// where the condition is "always", and both are keyed by the check the values are
+/// emitted in. Each entry is still charged the reference of ITS OWN output and state,
+/// which is the delay the model emits for that path, so the average is of the several
+/// crossings the one check has to stand in for.
 fn constraints_from_arcs(
     arcs: &ConstraintArcs,
     input_edge: Transition,
@@ -465,11 +499,12 @@ fn constraints_from_arcs(
 
     let mut groups: BTreeMap<(String, Scope), Running> = BTreeMap::new();
 
-    for ((src, outpin, scope, edge, family), table) in arcs {
-        if *edge != input_edge {
+    for (key, table) in arcs {
+        if key.input_edge != input_edge {
             continue;
         }
-        let group = groups.entry((src.clone(), *scope)).or_default();
+        let (outpin, family) = (&key.outpin, key.family);
+        let group = groups.entry((key.src.clone(), key.check)).or_default();
         group.n += 1.0;
         group.families.insert(family);
         group.arc_sum = Some(match group.arc_sum.take() {
@@ -479,8 +514,8 @@ fn constraints_from_arcs(
         group.ref_sum += match mode {
             // Only the outputs this source actually drives contribute, so a
             // rail-private input is referenced against its own rail alone -- and
-            // under per-state only the state this entry describes, so a check is
-            // referred to the very delay the model emits beside it.
+            // under per-state only the state this entry describes, so each term of
+            // the average is a delay the model really does emit for that path.
             //
             // Substituting the cell-wide mean here would charge this input a delay
             // measured on a *different* output, for a path nothing characterised.
@@ -489,7 +524,7 @@ fn constraints_from_arcs(
             // failure is unambiguous rather than a plausible number in the emitted
             // library.
             ReferenceMode::PerOutput | ReferenceMode::PerState => ref_arcs
-                .get(&(outpin.clone(), *scope))
+                .get(&(outpin.clone(), key.delay))
                 .map(|r| charged_reference(r, family, outpin).crossing)
                 .unwrap_or_else(|| {
                     panic!(
@@ -676,7 +711,6 @@ pub(crate) struct CellOptions<'a> {
     pub(crate) mode: ReferenceMode,
     pub(crate) when_merge: WhenMerge,
     pub(crate) anchor: Anchor,
-    pub(crate) placement: OffsetPlacement,
 }
 
 /// Process a single cell to add pseudo-synchronous timing.
@@ -698,26 +732,24 @@ fn process_cell(
         mode,
         when_merge,
         anchor,
-        placement,
     } = *opts;
     let cell_name = cell.name.clone();
     eprintln!("Processing cell {}", cell_name);
 
     let mut ref_arcs: BTreeMap<(String, Scope), RefArc> = BTreeMap::new();
-    // The delay tables the constraints are derived from, keyed by source pin, output
-    // pin, the scope the reference is drawn at, the direction the INPUT was moving in,
-    // and the family the values were read from.
+    // The delay tables the constraints are derived from; see [`ConstraintKey`] for
+    // what each part of the key decides.
     //
     // The input's edge is part of the key because it is what a constraint is keyed on,
     // and it is not the output's: a negative-unate arc's `cell_rise` values describe an
     // input that fell. Merging by output family instead would blend two opposite input
     // directions inside one accumulator wherever a pin pair carries arcs of both senses
     // -- the shape an XOR is characterised in. Routing per arc, before the `when`
-    // merge, is what keeps them apart.
-    let mut constraint_arcs: BTreeMap<
-        (String, String, Scope, Transition, &'static str),
-        TableAccumulator,
-    > = BTreeMap::new();
+    // merge, is what keeps them apart. The check scope is in the key for the same
+    // reason: two arcs of one pin pair whose `when`s put them in different check
+    // groups belong to two different emitted checks, and merging them here would
+    // charge each group the other's arc.
+    let mut constraint_arcs: BTreeMap<ConstraintKey, TableAccumulator> = BTreeMap::new();
 
     // Phase 1: Collect every arc, folding the arcs that share a scope into one
     // representative arc
@@ -729,15 +761,15 @@ fn process_cell(
     // condition, not just against the average it was built from.
     let mut raw_arcs: Vec<ConditionedArc> = Vec::new();
     // Indexed to `raw_arcs`: the state each arc leaves the cell in once its input
-    // has settled. Classified once per cell after the walk, so the ids run in the
-    // order the library declares the arcs.
+    // has settled. Classified after the walk, within each output, so the ids run in
+    // the order the library declares the arcs.
     let mut post_conditions: Vec<ArcPost> = Vec::new();
     // Also indexed to `raw_arcs`: the tables each arc carries, held until the
-    // classification has run. A per-state scope is a class, a class is numbered over
-    // the whole cell, and so nothing can be filed under one until every arc has been
-    // read -- which is why the accumulation is a second pass rather than part of this
-    // walk. It runs in the same order, so what each accumulator sums, and in what
-    // order, is unchanged.
+    // classification has run. A per-state scope is a class, a class is drawn over
+    // every arc of its output at once, and so nothing can be filed under one until
+    // every arc has been read -- which is why the accumulation is a second pass rather
+    // than part of this walk. It runs in the same order, so what each accumulator
+    // sums, and in what order, is unchanged.
     let mut arc_tables: Vec<TimingTables> = Vec::new();
     // Outputs an arc of which was skipped for a `when` this tool could not read, one
     // entry per skipped arc. Recorded rather than reported here, because a cell that
@@ -938,6 +970,7 @@ fn process_cell(
                     sense,
                     class_rise: None,
                     class_fall: None,
+                    check_class: None,
                     cell_rise: timing_tables.cell_rise.clone(),
                     cell_fall: timing_tables.cell_fall.clone(),
                 });
@@ -970,11 +1003,25 @@ fn process_cell(
         ));
     }
 
-    // One classification per cell, over every post-settled condition in collection
-    // order, so two arcs describing the same state share an id however they were
-    // spelled -- and the ids run in the order the library declares the arcs.
+    // One classification per output, over its own post-settled conditions in
+    // collection order, so two arcs describing the same state of one output share an
+    // id however they were spelled -- and the ids run in the order the library
+    // declares the arcs.
     let classes = classify_states(&mut raw_arcs, &post_conditions);
     let class_conditions = merged_class_conditions(&raw_arcs, &post_conditions);
+
+    // The conditions the checks are grouped under: a second classification, per pin
+    // and over the source `when`s alone, numbered independently of the post-settled
+    // classes above. Only per-state emits more than one check per pin, so the other
+    // modes group under nothing and report nothing -- and leave every arc's check
+    // class unset, which is the whole-output scope those modes file everything at.
+    //
+    // Drawn before the arcs are filed, because the class it puts on each arc is what
+    // the constraints below are grouped by.
+    let (check_groups, check_classes) = match mode {
+        ReferenceMode::PerState => check_groups(&mut raw_arcs, &post_conditions),
+        _ => (BTreeMap::new(), Vec::new()),
+    };
 
     // Phase 1b: file each arc's two edge halves under the scope this mode draws its
     // references at. The walk order is preserved, so each accumulator sums the same
@@ -983,6 +1030,13 @@ fn process_cell(
     for (index, tables) in arc_tables.iter().enumerate() {
         let arc = &raw_arcs[index];
         let whenless = arc.when.is_none();
+        // The check group this arc's values are summed into, which is its own pin's
+        // condition and not its output's state. Drawn through the same construction
+        // as the scope below, so a group and the values it reads cannot be keyed
+        // apart.
+        let Some(check) = Scope::of(mode, arc.check_class, whenless) else {
+            continue;
+        };
 
         for (output_edge, class, family, delays) in [
             (
@@ -1023,13 +1077,14 @@ fn process_cell(
             let Some(table) = delays else { continue };
             let input_edge = derived_input_edge(arc.sense, output_edge, &arc.source, &arc.output);
             constraint_arcs
-                .entry((
-                    arc.source.clone(),
-                    arc.output.clone(),
-                    scope,
+                .entry(ConstraintKey {
+                    src: arc.source.clone(),
+                    outpin: arc.output.clone(),
+                    delay: scope,
+                    check,
                     input_edge,
                     family,
-                ))
+                })
                 .or_insert_with(|| TableAccumulator::new(when_merge))
                 .add(table.clone(), family, &arc.source, &arc.output);
         }
@@ -1049,9 +1104,7 @@ fn process_cell(
                 continue;
             };
 
-            if let Some(ref_arc) =
-                select_reference_arc(related_pin, &tables, anchor, placement, *scope)
-            {
+            if let Some(ref_arc) = select_reference_arc(related_pin, &tables, anchor, *scope) {
                 eprintln!(
                     "  Pin {} selected as reference arc for output {}",
                     related_pin, outpin_name
@@ -1191,10 +1244,10 @@ fn process_cell(
     // alone, and a check referred to a delay the model never states would describe a
     // path with no propagation half. A whole-output reference always carries both, so
     // this is exactly the output test it has always been there.
-    constraint_arcs.retain(|(_, output, scope, _, family), _| {
+    constraint_arcs.retain(|key, _| {
         ref_arcs
-            .get(&(output.clone(), *scope))
-            .and_then(|r| family_reference(r, family))
+            .get(&(key.outpin.clone(), key.delay))
+            .and_then(|r| family_reference(r, key.family))
             .is_some()
     });
 
@@ -1232,14 +1285,23 @@ fn process_cell(
         );
     }
 
-    // The conditions the checks are grouped under: a second classification, per pin
-    // and over the source `when`s alone, numbered independently of the post-settled
-    // classes above. Only per-state emits more than one check per pin, so the other
-    // modes group under nothing and report nothing.
-    let (check_groups, check_classes) = match mode {
-        ReferenceMode::PerState => check_groups(&raw_arcs, &post_conditions),
-        _ => (BTreeMap::new(), Vec::new()),
-    };
+    // The condition each check class denotes, so a constraint filed under one can be
+    // captioned with the condition its checks are stated under. Read off the groups
+    // themselves rather than classified a second time, and keyed by the pin as well
+    // as the class because the classes are numbered per pin.
+    let check_conditions: BTreeMap<(String, ClassId), String> = check_groups
+        .iter()
+        .flat_map(|(pin, pin_groups)| {
+            pin_groups.iter().filter_map(move |group| {
+                match (group.scope, group.condition.as_ref()) {
+                    (Scope::State(class), Some(condition)) => {
+                        Some(((pin.clone(), class), condition.liberty()))
+                    }
+                    _ => None,
+                }
+            })
+        })
+        .collect();
 
     reports.cells.push(CellReport {
         library: lib_name.to_owned(),
@@ -1265,6 +1327,7 @@ fn process_cell(
             _ => BTreeMap::new(),
         },
         check_classes,
+        check_conditions,
     });
 
     // Phase 5: Add constraints to every input the library characterised against
@@ -1290,10 +1353,11 @@ fn process_cell(
     for inpin in constraint_targets_mut(cell, &has_constraints) {
         let inpin_name = inpin.name.clone();
         // One entry per condition the library characterised this pin under, or one
-        // unconditioned entry where the mode draws a single reference per output. An
-        // entry's two directions are looked up at their own scopes, because a
-        // condition holding while the pin rises and while it falls describes two
-        // different post-settled states.
+        // unconditioned entry where the mode draws a single reference per output.
+        // Both of an entry's directions are looked up at the group's own scope,
+        // because that is what the values were summed by: a check on the pin pair
+        // `D -> G` is stated under `D`'s condition, so one condition is one value per
+        // direction however many outputs `D` drives under it.
         let entries: Vec<CheckEntry> = match check_groups.get(&inpin_name) {
             None => vec![CheckEntry {
                 guard: Guard::Unguarded,
@@ -1312,18 +1376,10 @@ fn process_cell(
                         Some(condition) => Guard::Conditioned(condition),
                         None => Guard::CatchAll,
                     },
-                    setup_rise: group
-                        .rise
-                        .and_then(|scope| setup_input_rise.get(&(inpin_name.clone(), scope))),
-                    setup_fall: group
-                        .fall
-                        .and_then(|scope| setup_input_fall.get(&(inpin_name.clone(), scope))),
-                    hold_rise: group
-                        .rise
-                        .and_then(|scope| hold_input_rise.get(&(inpin_name.clone(), scope))),
-                    hold_fall: group
-                        .fall
-                        .and_then(|scope| hold_input_fall.get(&(inpin_name.clone(), scope))),
+                    setup_rise: setup_input_rise.get(&(inpin_name.clone(), group.scope)),
+                    setup_fall: setup_input_fall.get(&(inpin_name.clone(), group.scope)),
+                    hold_rise: hold_input_rise.get(&(inpin_name.clone(), group.scope)),
+                    hold_fall: hold_input_fall.get(&(inpin_name.clone(), group.scope)),
                 })
                 // A group whose every arc was dropped for want of a reference has no
                 // constraint table to carry, and UG p.7-56 asks each one for at least
@@ -1404,9 +1460,7 @@ mod tests {
     //! Behaviour of the `engine` module: constraint calculation and bundle traversal.
 
     use super::*;
-    use crate::arcs::{
-        mean_reference_arc, Anchor, EdgeRef, OffsetPlacement, RefArc, ReferenceMode, WhenMerge,
-    };
+    use crate::arcs::{mean_reference_arc, Anchor, EdgeRef, RefArc, ReferenceMode, WhenMerge};
     use crate::liberty_io::parse_liberty_file;
     use crate::pins::{cell_qualifies, is_output_pin};
     use liberty_parser::{
@@ -1417,9 +1471,9 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    /// The conversion knobs, with the anchor and offset placement at the defaults
-    /// the command line supplies. Those two are exercised where they are decided,
-    /// in `arcs`; here they only have to stay out of the way.
+    /// The conversion knobs, with the anchor at the default the command line
+    /// supplies. The anchor is exercised where it is decided, in `arcs`; here it
+    /// only has to stay out of the way.
     fn opts<'a>(
         clock_name: &'a str,
         reset_name: &'a Regex,
@@ -1434,7 +1488,6 @@ mod tests {
             mode,
             when_merge,
             anchor: Anchor::Middle,
-            placement: OffsetPlacement::Setup,
         }
     }
 
@@ -1453,13 +1506,14 @@ mod tests {
         // Positive unate, so a `cell_rise` table is what an input rise contributed.
         let mut constraint_arcs: ConstraintArcs = BTreeMap::new();
         constraint_arcs.insert(
-            (
-                "D".to_owned(),
-                "Q".to_owned(),
-                Scope::Whole,
-                Transition::Rise,
-                "cell_rise",
-            ),
+            ConstraintKey {
+                src: "D".to_owned(),
+                outpin: "Q".to_owned(),
+                delay: Scope::Whole,
+                check: Scope::Whole,
+                input_edge: Transition::Rise,
+                family: "cell_rise",
+            },
             arc,
         );
 
@@ -1553,14 +1607,14 @@ mod tests {
         let mean_ref = mean_reference_arc(ref_arcs.values().cloned()).unwrap();
         assert_eq!(mean_ref.rise.as_ref().expect("a rise edge").crossing, 20.0);
 
-        let rise = |src: &str, out: &str| {
-            (
-                src.to_owned(),
-                out.to_owned(),
-                Scope::Whole,
-                Transition::Rise,
-                "cell_rise",
-            )
+        // Both scopes whole, which is every entry either of these modes files.
+        let rise = |src: &str, out: &str| ConstraintKey {
+            src: src.to_owned(),
+            outpin: out.to_owned(),
+            delay: Scope::Whole,
+            check: Scope::Whole,
+            input_edge: Transition::Rise,
+            family: "cell_rise",
         };
         let constraint_arcs: ConstraintArcs = BTreeMap::from([
             // D1 is rail-private: it drives Q1 only.
@@ -3303,10 +3357,7 @@ library(sense_test) {{
                 report.raw_arcs
             );
             assert!(
-                report
-                    .constraint_arcs
-                    .keys()
-                    .all(|(_, output, _, _, _)| output != "QN"),
+                report.constraint_arcs.keys().all(|key| key.outpin != "QN"),
                 "sense {:?}",
                 sense
             );
@@ -4170,9 +4221,17 @@ library(sense_test) {{
     /// them as two check groups, and neither covers the other, so the group can be
     /// stated under neither member. Their union is `A * B + B * C`, whose prime
     /// implicants are exactly those two products and both are essential -- `A * B` is
-    /// the only cover of `A * B * !C` and `B * C` the only cover of `!A * B * C` --
-    /// so the minimised label is that two-term sum. A `when` need not be one product
-    /// term.
+    /// the only cover of `A * B * !C` and `B * C` the only cover of `!A * B * C`.
+    ///
+    /// How espresso spells that function -- flat, or factored as `B * (A + C)` -- is
+    /// the crate's to choose, and this layer cannot put a text back to a BDD to ask
+    /// which function it denotes without naming an espresso type, which `conditions`
+    /// reserves to itself; that the merge yields the union is pinned there, by
+    /// equivalence. What is pinned here is what this layer decides: that the group's
+    /// condition comes from both arcs rather than from the one that opened the slot.
+    /// So both halves must state the literals of both arcs -- `A`, `B` and `C`, and no
+    /// fourth -- and both must state an OR, since a minimal cover of the union needs
+    /// two cubes and no single product term spells a two-cube function.
     ///
     /// Killed by: `check_groups` took its group's condition from the arc that opened the slot, as it did before the classes began merging, which stated the group under `A * B` alone -- a condition the second arc's values were not confined to. Observed to redden this test alone; every other fixture's class has a member equal to its union, so the arc that opened the slot happens to state it and no other test can tell the two rules apart.
     #[test]
@@ -4211,30 +4270,33 @@ library(sense_test) {{
             "two colliding conditions are one check group"
         );
 
-        // A minimised label is spelled from the cover espresso returns, whose term
-        // and column order are its own, so the products are compared as a set of
-        // sets. `guard_of` is what asserts the `when` and its `sdf_cond` are both
-        // there.
+        // A minimised label is spelled from the cover espresso returns, and how it
+        // arranges the operators is its own, so each half is compared as the set of
+        // literals it states. `guard_of` is what asserts the `when` and its
+        // `sdf_cond` are both there.
         let guard = guard_of(checks[0]);
         let (when, sdf) = guard
             .split_once(" | sdf ")
             .unwrap_or_else(|| panic!("a conditioned group states both halves: {}", guard));
-        fn products<'a>(text: &'a str, or: &str, and: &str) -> BTreeSet<BTreeSet<&'a str>> {
-            text.split(or)
-                .map(|term| term.split(and).collect())
+        fn literals<'a>(text: &'a str, operators: &[char]) -> BTreeSet<&'a str> {
+            text.split(operators)
+                .map(str::trim)
+                .filter(|literal| !literal.is_empty())
                 .collect()
         }
+        let when = when.trim_start_matches("when ");
         assert_eq!(
-            products(when.trim_start_matches("when "), " + ", " * "),
-            BTreeSet::from([BTreeSet::from(["A", "B"]), BTreeSet::from(["B", "C"])])
+            literals(when, &['*', '+', '(', ')']),
+            BTreeSet::from(["A", "B", "C"])
         );
         assert_eq!(
-            products(sdf, " || ", " && "),
-            BTreeSet::from([
-                BTreeSet::from(["A == 1'B1", "B == 1'B1"]),
-                BTreeSet::from(["B == 1'B1", "C == 1'B1"])
-            ])
+            literals(sdf, &['&', '|', '(', ')']),
+            BTreeSet::from(["A == 1'B1", "B == 1'B1", "C == 1'B1"])
         );
+
+        // Two cubes cannot be spelled without one.
+        assert!(when.contains('+'), "the union disjoins: {}", when);
+        assert!(sdf.contains("||"), "the union disjoins: {}", sdf);
 
         // The two arcs describe one state per edge, so the output carries two clock
         // arcs and not four.
@@ -4314,6 +4376,242 @@ library(sense_test) {{
                 "when A * !B | sdf A == 1'B1 && B == 1'B0".to_owned(),
             ]
         );
+    }
+
+    /// A candidate latch with two outputs on one shared 2x2 template, each carrying
+    /// exactly the timing groups the caller supplies.
+    fn two_output_lib(inputs: &[&str], q1_arcs: &str, q2_arcs: &str) -> Liberty {
+        let pins: String = inputs
+            .iter()
+            .map(|p| format!("    pin({}) {{ direction: input; }}\n", p))
+            .collect();
+        liberty_parser::parse_lib(&format!(
+            r#"
+library(two_output_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }}
+  cell(TWOOUT) {{
+    latch(IQ, IQN) {{ enable: "G"; data_in: "D"; }}
+    pin(G) {{ direction: input; clock: true; }}
+{}
+    pin(Q1) {{
+      direction: output;
+      function: "IQ1";
+      {}
+    }}
+    pin(Q2) {{
+      direction: output;
+      function: "IQ2";
+      {}
+    }}
+  }}
+}}"#,
+            pins, q1_arcs, q2_arcs
+        ))
+        .expect("parse two-output fixture")
+    }
+
+    /// Two outputs whose conditions overlap are not one state: a class is drawn
+    /// within one output, so each output's arcs are stated over conditions that
+    /// output was actually characterised under.
+    ///
+    /// Derivation from the model. `D` drives `Q1`, characterised under `A * B`
+    /// alone, and `Q2`, characterised under `B * C` alone, both `positive_unate`.
+    /// Conjoining the direction the input settled in gives `A * B * D` and
+    /// `A * B * !D` on `Q1`, and `B * C * D` and `B * C * !D` on `Q2`. The two rise
+    /// conditions can hold at once -- with `A`, `B`, `C` and `D` all high -- and so
+    /// can the two fall ones.
+    ///
+    /// That overlap is not a collision. Liberty UG p.7-49–50 requires mutually
+    /// exclusive conditions for the state-dependent timing arcs of one pin pair, and
+    /// after the split `G -> Q1` and `G -> Q2` are two different pin pairs: nothing
+    /// ever required `Q1`'s conditions to exclude `Q2`'s, and no consumer reads the
+    /// two as alternatives to each other. Only the arcs of one output, all of them
+    /// `G -> Q` once converted and separated by their `when` alone, have to be
+    /// resolved against one another.
+    ///
+    /// So four states, two per output, each a class of one and therefore stated under
+    /// its own condition -- the union of a singleton being that member. Neither of
+    /// `Q1`'s states names `C` nor either of `Q2`'s names `A`: a class drawn across
+    /// the cell would hold both rise conditions and state both outputs' arcs under
+    /// their union `A * B * D + B * C * D`, which holds over `!A * B * C * D`, a state
+    /// `Q1` carries no table for and `Q1`'s numbers would then claim.
+    ///
+    /// Each state carries its own output's numbers, read at row 1 of that output's
+    /// own 2x2 tables under a middle anchor: `[3, 4]` and `[30, 40]` for `Q1`,
+    /// `[7, 8]` and `[70, 80]` for `Q2`.
+    ///
+    /// Killed by: `classify_states` collected every output's conditions into one group -- the per-output partition replaced by pushing all of them at index 0 -- which is the cell-wide classification this replaced. Observed to redden this test alone: it is the only fixture with two outputs whose conditions overlap. It stated all four arcs under two unions, `Q1`'s rise arc reading `when B * C * D + A * B * D` and `Q2`'s the same, so each output claimed its own numbers over the other's characterisation.
+    #[test]
+    fn two_outputs_whose_conditions_overlap_are_not_one_state() {
+        let mut lib = two_output_lib(
+            &["D", "A", "B", "C"],
+            &full_sense_arc_when(
+                "D",
+                "positive_unate",
+                Some("A * B"),
+                r#""1.0, 2.0", "3.0, 4.0""#,
+                r#""10.0, 20.0", "30.0, 40.0""#,
+            ),
+            &full_sense_arc_when(
+                "D",
+                "positive_unate",
+                Some("B * C"),
+                r#""5.0, 6.0", "7.0, 8.0""#,
+                r#""50.0, 60.0", "70.0, 80.0""#,
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let cell = lib[0].get_cell("TWOOUT").expect("TWOOUT");
+        for (outpin, states, delays) in [
+            (
+                "Q1",
+                vec![
+                    "when A * B * D | sdf A == 1'B1 && B == 1'B1 && D == 1'B1".to_owned(),
+                    "when A * B * !D | sdf A == 1'B1 && B == 1'B1 && D == 1'B0".to_owned(),
+                ],
+                vec![vec![3.0, 4.0], vec![30.0, 40.0]],
+            ),
+            (
+                "Q2",
+                vec![
+                    "when B * C * D | sdf B == 1'B1 && C == 1'B1 && D == 1'B1".to_owned(),
+                    "when B * C * !D | sdf B == 1'B1 && C == 1'B1 && D == 1'B0".to_owned(),
+                ],
+                vec![vec![7.0, 8.0], vec![70.0, 80.0]],
+            ),
+        ] {
+            let pin = cell.get_pin(outpin).expect(outpin);
+            let groups: Vec<&Group> = pin.iter_subgroups_of_type("timing").collect();
+            assert_eq!(
+                groups.iter().map(|g| guard_of(g)).collect::<Vec<String>>(),
+                states,
+                "the states {} was emitted in",
+                outpin
+            );
+
+            // Each state was characterised in one direction, so it emits that
+            // direction's transition and delay alone -- the delay second.
+            for (group, want) in groups.iter().zip(delays) {
+                assert_eq!(group.subgroups.len(), 2, "one edge's two tables");
+                assert_eq!(
+                    table_values(&group.subgroups[1]),
+                    want,
+                    "the delay {} carries under {}",
+                    outpin,
+                    guard_of(group)
+                );
+            }
+        }
+    }
+
+    /// A pin driving two outputs under one check condition carries ONE constraint,
+    /// averaged over both of them -- however differently their states are referred.
+    ///
+    /// Derivation from the model. `D` drives `Q1` under `A * B` and `Q2` under
+    /// `B * C`, both `positive_unate`. The two `when`s can both hold -- with `A`, `B`
+    /// and `C` high -- and a check sits on the pin pair `D -> G`, so Liberty UG
+    /// p.7-49–50 forbids stating them as two checks on `D`: they are one group, under
+    /// their union. Their post-settled conditions, `A * B * D` on `Q1` and
+    /// `B * C * D` on `Q2`, are conditions of two DIFFERENT pin pairs once split, so
+    /// they stay two states with two references of their own. One check group and two
+    /// references is exactly the shape a single value has to stand in for.
+    ///
+    /// What that value is follows from what the group states. The check holds over
+    /// both paths, so it must be the mean of them -- the same average per-output
+    /// takes over every output a pin drives, specialised to the outputs it drives
+    /// under this condition. `T` is 2 slews x 2 loads, so a middle anchor reads
+    /// column 1 for a constraint and row 1 for a reference, whose crossing is its
+    /// column 1. Rising:
+    ///
+    ///     ([2, 4] + [200, 400]) / 2 - (4 + 400) / 2 = [101, 202] - 202 = [-101, 0]
+    ///
+    /// and falling, on the ten-times tables of each,
+    ///
+    ///     ([20, 40] + [2000, 4000]) / 2 - (40 + 4000) / 2 = [-1010, 0].
+    ///
+    /// The two outputs are two orders of magnitude apart, so no other reading lands
+    /// nearby: `Q1`'s own arc gives `[-2, 0]`, `Q2`'s `[-200, 0]`, and the mean arc
+    /// charged one output's crossing alone gives `[97, 198]` or `[-299, -198]`.
+    ///
+    /// Killed by: the whole of this keying reverted -- `CheckGroup` carrying a delay-side scope per input direction again, each written by every member arc in turn, the constraint entries keyed `check: scope`, and the checks read back at those two scopes. That is the grouping this replaced, and under it the group carried whatever the last member wrote: `setup_rising` came out `[-200, 0]`, `Q2`'s arc against `Q2`'s crossing, with `Q1`'s value computed and never emitted. Observed to redden this test alone -- 146 passed, 1 failed -- because it is the only fixture whose pin drives two outputs under conditions that merge into one check, so in every other fixture the two partitions agree and no test can tell the two groupings apart.
+    #[test]
+    fn one_check_condition_over_two_outputs_carries_their_mean() {
+        let mut lib = two_output_lib(
+            &["D", "A", "B", "C"],
+            &full_sense_arc_when(
+                "D",
+                "positive_unate",
+                Some("A * B"),
+                r#""1.0, 2.0", "3.0, 4.0""#,
+                r#""10.0, 20.0", "30.0, 40.0""#,
+            ),
+            &full_sense_arc_when(
+                "D",
+                "positive_unate",
+                Some("B * C"),
+                r#""100.0, 200.0", "300.0, 400.0""#,
+                r#""1000.0, 2000.0", "3000.0, 4000.0""#,
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let cell = lib[0].get_cell("TWOOUT").expect("TWOOUT");
+        let d = cell.get_pin("D").expect("D");
+
+        for (timing_type, sign) in [("setup_rising", 1.0), ("hold_rising", -1.0)] {
+            let groups = arcs_of_type(d, timing_type);
+            assert_eq!(
+                groups.len(),
+                1,
+                "two outputs under one condition are one {}",
+                timing_type
+            );
+
+            // Under the merged condition and not under either member: a group stated
+            // under one of them alone would name that member's own literal and not
+            // the other's. How the union is spelled is settled where it is derived.
+            let guard = guard_of(groups[0]);
+            for literal in ["A", "C"] {
+                assert!(
+                    guard.contains(literal),
+                    "{} states both members: {}",
+                    timing_type,
+                    guard
+                );
+            }
+
+            assert_eq!(
+                table_types(groups[0]),
+                vec!["rise_constraint", "fall_constraint"],
+                "{}",
+                timing_type
+            );
+            let want = |v: f64| vec![sign * v, 0.0];
+            assert_eq!(
+                table_values(&groups[0].subgroups[0]),
+                want(-101.0),
+                "{}",
+                timing_type
+            );
+            assert_eq!(
+                table_values(&groups[0].subgroups[1]),
+                want(-1010.0),
+                "{}",
+                timing_type
+            );
+        }
     }
 
     /// Under a per-state reference an arc whose `when` cannot be read is skipped and
@@ -4590,168 +4888,6 @@ library(large_table_test) {{
         }
     }
 
-    // --- offset placement: where the anchor's constant lands ----------------
-
-    /// A 3x3 table's `values(...)` text, filled row-major from `base`: row 1 (the
-    /// middle row) is `[base+3, base+4, base+5]` and the middle element `base+4` --
-    /// the same shape `arcs::tests::nine` samples the crossing from.
-    fn nine_values(base: f64) -> String {
-        let row = |r: f64| format!("\"{}, {}, {}\"", base + r, base + r + 1.0, base + r + 2.0);
-        format!("{}, {}, {}", row(0.0), row(3.0), row(6.0))
-    }
-
-    /// One `positive_unate` arc on all four families, each a 3x3 table built from
-    /// `base` so its own middle-element crossing is `base + 4`. The three families
-    /// besides `cell_rise` are offset well clear of it and of each other so that a
-    /// value read from the wrong family cannot be mistaken for the right one.
-    fn nine_arc(related_pin: &str, base: f64) -> String {
-        format!(
-            r#"
-      timing() {{
-        related_pin: "{}";
-        timing_sense : positive_unate;
-        timing_type: combinational;
-        cell_rise(T) {{ values({}); }}
-        cell_fall(T) {{ values({}); }}
-        rise_transition(T) {{ values({}); }}
-        fall_transition(T) {{ values({}); }}
-      }}"#,
-            related_pin,
-            nine_values(base),
-            nine_values(base + 1000.0),
-            nine_values(base + 2000.0),
-            nine_values(base + 3000.0),
-        )
-    }
-
-    /// One input `D` fanning out to two outputs `Q1`, `Q2`, each carrying its own
-    /// `positive_unate` arc from `D` on a 3x3 template -- `Q1`'s middle-element
-    /// crossing `c1 = 4.0`, `Q2`'s `c2 = 104.0`, well separated so a mix-up between
-    /// them cannot read as rounding.
-    fn fanout_lib() -> Liberty {
-        liberty_parser::parse_lib(&format!(
-            r#"
-library(offset_placement_test) {{
-  lu_table_template(T) {{
-    variable_1: input_net_transition;
-    variable_2: total_output_net_capacitance;
-    index_1("0.01, 0.1, 1.0");
-    index_2("0.005, 0.05, 0.5");
-  }}
-  cell(FANOUT) {{
-    latch(IQ, IQN) {{ enable: "G"; data_in: "D"; }}
-    pin(G) {{ direction: input; clock: true; }}
-    pin(D) {{ direction: input; }}
-    pin(Q1) {{
-      direction: output;
-      function: "IQ1";
-      {}
-    }}
-    pin(Q2) {{
-      direction: output;
-      function: "IQ2";
-      {}
-    }}
-  }}
-}}"#,
-            nine_arc("D", 0.0),
-            nine_arc("D", 100.0),
-        ))
-        .expect("parse fanout fixture")
-    }
-
-    /// `--offset-placement` decides only where the anchor's constant is charged, not
-    /// its size, on a source driving more than one output.
-    ///
-    /// Derivation from the model, on `fanout_lib`. `D` drives `Q1` (base 0) and `Q2`
-    /// (base 100), both `positive_unate` on a 3x3 template, so a rise arc's raw
-    /// `cell_rise` middle row is `[3, 4, 5]` for `Q1` and `[103, 104, 105]` for `Q2`,
-    /// crossing `c1 = 4.0` and `c2 = 104.0`.
-    ///
-    /// `select_reference_arc` (arcs.rs:779-784) applies placement once, per output,
-    /// before anything downstream reads it:
-    /// - `Setup` keeps the middle row whole and leaves the crossing owing to the
-    ///   constraint: `G->Q1.cell_rise = [3, 4, 5]`, `G->Q2.cell_rise = [103, 104, 105]`.
-    /// - `Prop` folds the crossing into the delay and zeroes it:
-    ///   `G->Q1.cell_rise = [3, 4, 5] - 4 = [-1, 0, 1]`,
-    ///   `G->Q2.cell_rise = [103, 104, 105] - 104 = [-1, 0, 1]`.
-    ///
-    /// `D`'s `rise_constraint` is `constraints_from_arcs` (engine.rs:446-491): the
-    /// mean of `Q1` and `Q2`'s own RAW `cell_rise` tables -- unaffected by placement,
-    /// which only touches the reference -- minus the mean of what each output's
-    /// reference still owes. Elementwise, `(nine(0) + nine(100)) / 2 = nine(50)`,
-    /// whose middle column is `[51, 54, 57]` -- anchor element `54 = mean(c1, c2)`.
-    /// - `Setup` leaves both crossings owing: mean owed `= (4 + 104) / 2 = 54`, so
-    ///   `rise_constraint = [51, 54, 57] - 54 = [-3, 0, 3]` -- anchor element `0`.
-    /// - `Prop` has already paid both, out of the delay half: mean owed `= 0`, so
-    ///   `rise_constraint = [51, 54, 57] - 0 = [51, 54, 57]` -- anchor element
-    ///   `54 = mean(c1, c2)`, unsubtracted.
-    ///
-    /// Killed by: dropping the mean-crossing subtraction in `constraints_from_arcs`
-    /// (`group.ref_sum / group.n` replaced by `0.0`) reddened this test alone, with
-    /// `arcs.rs`'s `prop_placement_moves_the_crossing_into_the_delay_and_leaves_none_to_subtract`
-    /// observed GREEN under the same mutation -- that test never reaches the
-    /// constraint arithmetic this one does. Restored afterwards.
-    #[test]
-    fn offset_placement_moves_the_anchor_constant_between_delay_and_constraint() {
-        let reset_name = Regex::new("(R|S)N?").unwrap();
-
-        for (placement, want_q1_rise, want_q2_rise, want_rise_constraint) in [
-            (
-                OffsetPlacement::Setup,
-                vec![3.0, 4.0, 5.0],
-                vec![103.0, 104.0, 105.0],
-                vec![-3.0, 0.0, 3.0],
-            ),
-            (
-                OffsetPlacement::Prop,
-                vec![-1.0, 0.0, 1.0],
-                vec![-1.0, 0.0, 1.0],
-                vec![51.0, 54.0, 57.0],
-            ),
-        ] {
-            let mut lib = fanout_lib();
-            process_library(
-                &mut lib[0],
-                &CellOptions {
-                    clock_name: "G",
-                    reset_name: &reset_name,
-                    latch: false,
-                    mode: ReferenceMode::PerOutput,
-                    when_merge: WhenMerge::Mean,
-                    anchor: Anchor::Middle,
-                    placement,
-                },
-            );
-
-            let cell = lib[0].get_cell("FANOUT").expect("FANOUT");
-
-            for (outpin, want) in [("Q1", &want_q1_rise), ("Q2", &want_q2_rise)] {
-                let pin = cell.get_pin(outpin).expect(outpin);
-                let arc = pseudo_output_arc(pin, "G");
-                let cell_rise = arc
-                    .iter_subgroups_of_type("cell_rise")
-                    .next()
-                    .unwrap_or_else(|| panic!("{} carries no cell_rise", outpin));
-                assert_eq!(
-                    table_values(cell_rise),
-                    *want,
-                    "{}.cell_rise under {:?}",
-                    outpin,
-                    placement
-                );
-            }
-
-            let d = cell.get_pin("D").expect("D");
-            assert_eq!(
-                constraint_values(d, "setup_rising", "rise_constraint"),
-                Some(want_rise_constraint),
-                "D.rise_constraint under {:?}",
-                placement
-            );
-        }
-    }
-
     // --- constraint placement across data expression shapes -----------------
 
     /// Every input the library characterised against the output is given one setup
@@ -5000,7 +5136,7 @@ library({}_test) {{
         // the delays and constraints are drawn against, not as a constraint of its
         // own. Were the reset skip dropped, RN's 34 arcs would sit in every one of
         // these.
-        for (source, ..) in report.constraint_arcs.keys() {
+        for source in report.constraint_arcs.keys().map(|key| &key.src) {
             assert!(
                 !reset_name.is_match(source),
                 "reset pin {} was folded into the model",
