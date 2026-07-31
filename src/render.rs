@@ -1,7 +1,7 @@
 //! Rendering of the reconstruction report: the tables, the per-arc statistics
 //! and the sections they are laid out in.
 
-use crate::arcs::ReferenceMode;
+use crate::arcs::{input_transition, Anchor, OffsetPlacement, ReferenceMode, Transition};
 use crate::report::{ArcError, CellReport, ConditionedArc, Refusal};
 use gpoint::GPoint;
 use itertools::Itertools;
@@ -12,23 +12,107 @@ fn g(v: f64) -> String {
     format!("{}", GPoint(v))
 }
 
+/// Which axes a table is indexed on, for captioning its rows and columns.
+///
+/// A residual read against a row number says nothing; read against the slew and load
+/// it occurs at, it says which regime the conversion is failing in. An axis is `None`
+/// where the library declares none, or where its length does not match the table it
+/// would caption — a mismatched axis would misattribute every value in the table, so
+/// it is not used at all.
+#[derive(Default, Clone, Copy)]
+struct Labels<'a> {
+    rows: Option<&'a [f64]>,
+    columns: Option<&'a [f64]>,
+}
+
+impl<'a> Labels<'a> {
+    fn rows(v: Option<&'a Vec<f64>>) -> Self {
+        Labels {
+            rows: v.map(|x| x.as_slice()),
+            columns: None,
+        }
+    }
+
+    fn columns(v: Option<&'a Vec<f64>>) -> Self {
+        Labels {
+            rows: None,
+            columns: v.map(|x| x.as_slice()),
+        }
+    }
+
+    fn grid(rows: Option<&'a Vec<f64>>, columns: Option<&'a Vec<f64>>) -> Self {
+        Labels {
+            rows: rows.map(|x| x.as_slice()),
+            columns: columns.map(|x| x.as_slice()),
+        }
+    }
+
+    /// The axes that match the shape actually being drawn; a mismatch drops that axis.
+    fn fitted(self, rows: usize, columns: usize) -> Self {
+        Labels {
+            rows: self.rows.filter(|a| a.len() == rows),
+            columns: self.columns.filter(|a| a.len() == columns),
+        }
+    }
+}
+
 /// Render a table the way the original report did: one prettytable row per row
 /// of the array, values in %g. A 1-D arc renders as the single row it is.
+///
+/// Where the axes are known the grid is captioned with them: the column header
+/// carries the load each column was measured at, and the leading cell of each row the
+/// input slew. The corner names which is which.
 fn dump<D: Dimension>(
     sink: &mut dyn Write,
     label: &str,
     a: &ArrayBase<ndarray::OwnedRepr<f64>, D>,
+    labels: Labels,
 ) -> Result<(), Box<dyn Error>> {
     writeln!(sink, "{}", label)?;
+
+    let shape: Vec<usize> = a.rows().into_iter().map(|r| r.len()).collect();
+    let labels = labels.fitted(shape.len(), shape.first().copied().unwrap_or(0));
+
     let mut table = prettytable::Table::new();
-    for row in a.rows() {
-        table.add_row(prettytable::Row::new(
-            row.iter().map(|v| prettytable::Cell::new(&g(*v))).collect(),
-        ));
+    if let Some(columns) = labels.columns {
+        let mut header = Vec::new();
+        if labels.rows.is_some() {
+            header.push(prettytable::Cell::new("slew \\ load"));
+        }
+        header.extend(columns.iter().map(|v| prettytable::Cell::new(&g(*v))));
+        table.add_row(prettytable::Row::new(header));
+    }
+    for (i, row) in a.rows().into_iter().enumerate() {
+        let mut cells = Vec::new();
+        if let Some(rows) = labels.rows {
+            cells.push(prettytable::Cell::new(&g(rows[i])));
+        }
+        cells.extend(row.iter().map(|v| prettytable::Cell::new(&g(*v))));
+        table.add_row(prettytable::Row::new(cells));
     }
     writeln!(sink, "{}", table)?;
 
     Ok(())
+}
+
+/// How a reference profile was read off its table, for the caption above it.
+///
+/// An averaged reference is never captioned with a row index: it was not taken at
+/// one, and printing the number the middle anchor would have used would name a
+/// measurement the profile is not.
+fn anchor_caption(anchor: Anchor, row: usize) -> String {
+    match anchor {
+        Anchor::Middle => format!("(row {})", row),
+        Anchor::Average => "(average row)".to_owned(),
+    }
+}
+
+/// The same for the cell-wide mean reference, which names both indices.
+fn mean_anchor_caption(anchor: Anchor, col: usize, row: usize) -> String {
+    match anchor {
+        Anchor::Middle => format!("(col {}, row {})", col, row),
+        Anchor::Average => "(average col, average row)".to_owned(),
+    }
 }
 
 fn dump_cell(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>> {
@@ -36,55 +120,82 @@ fn dump_cell(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>>
 
     // The reduced arcs the constraints were derived from. The per-condition
     // originals are printed with their comparisons below.
-    for ((src, dst), v) in &r.cell_rise_arcs {
-        dump(sink, &format!("mean rise arc {} -> {}:", src, dst), v)?;
-    }
-    for ((src, dst), v) in &r.cell_fall_arcs {
-        dump(sink, &format!("mean fall arc {} -> {}:", src, dst), v)?;
+    let grid = Labels::grid(r.slews.as_ref(), r.loads.as_ref());
+    let by_slew = Labels::rows(r.slews.as_ref());
+    let by_load = Labels::columns(r.loads.as_ref());
+
+    // Captioned with both keys the values are filed under: the family they were
+    // characterised in, which names the OUTPUT's direction, and the input's own
+    // direction, which is what the constraint built from them is keyed on. Naming
+    // only one of the two would read as a claim that they agree.
+    for ((src, dst, input_edge, family), v) in &r.constraint_arcs {
+        dump(
+            sink,
+            &format!(
+                "mean {} arc {} -> {} (input {}):",
+                family,
+                src,
+                dst,
+                input_edge.name()
+            ),
+            v,
+            grid,
+        )?;
     }
 
     for (out, v) in &r.ref_arcs {
+        let at = anchor_caption(v.anchor, v.row);
         dump(
             sink,
-            &format!("ref rise arc {} -> {} (row {}):", v.related_pin, out, v.row),
-            &v.cell_rise,
+            &format!("ref rise arc {} -> {} {}:", v.related_pin, out, at),
+            &v.rise.delay,
+            by_load,
         )?;
         dump(
             sink,
-            &format!("ref fall arc {} -> {} (row {}):", v.related_pin, out, v.row),
-            &v.cell_fall,
+            &format!("ref fall arc {} -> {} {}:", v.related_pin, out, at),
+            &v.fall.delay,
+            by_load,
         )?;
     }
 
     dump(
         sink,
         &format!(
-            "mean ref rise arc (col {}, row {}):",
-            r.mean_ref.col, r.mean_ref.row
+            "mean ref rise arc {}:",
+            mean_anchor_caption(r.mean_ref.anchor, r.mean_ref.col, r.mean_ref.row)
         ),
-        &r.mean_ref.cell_rise,
+        &r.mean_ref.rise.delay,
+        by_load,
     )?;
-    dump(sink, "mean ref fall arc:", &r.mean_ref.cell_fall)?;
+    dump(sink, "mean ref fall arc:", &r.mean_ref.fall.delay, by_load)?;
 
-    for (k, v) in &r.setup_rise {
-        dump(sink, &format!("setup rise arc {}:", k), v)?;
+    for (k, v) in &r.setup_input_rise {
+        dump(sink, &format!("setup arc {} (input rise):", k), v, by_slew)?;
     }
-    for (k, v) in &r.setup_fall {
-        dump(sink, &format!("setup fall arc {}:", k), v)?;
+    for (k, v) in &r.setup_input_fall {
+        dump(sink, &format!("setup arc {} (input fall):", k), v, by_slew)?;
     }
 
+    // How much error the conversion introduces over the characterised arcs it
+    // aims to replace, and in which regions and regimes that error is most
+    // prominent. So the baseline is the arc as the source library characterised
+    // it, never the `when`-merged one: the merge is itself a source of error, and
+    // measuring against it would report less error than the conversion introduces.
+    // The tables are slew x load, in the shape the arc was characterised in, so
+    // the region can be seen rather than inferred from a statistic; the normalised
+    // one makes regions of different magnitude comparable.
     for a in &r.arcs {
-        let condition = match (&a.timing_type, &a.when) {
-            (Some(t), Some(w)) => format!("  [{}] when {}", t, w),
-            (Some(t), None) => format!("  [{}] unconditioned", t),
-            (None, Some(w)) => format!("  when {}", w),
-            (None, None) => "  unconditioned".to_owned(),
+        let condition = match &a.when {
+            Some(w) => format!("  when {}", w),
+            None => "  unconditioned".to_owned(),
         };
         let head = format!("{} arc {} -> {}{}", a.edge, a.source, a.output, condition);
 
-        dump(sink, &format!("{}\noriginal:", head), &a.original)?;
-        dump(sink, "reconstructed:", &a.reconstructed)?;
-        dump(sink, "error:", &a.error)?;
+        dump(sink, &format!("{}\noriginal:", head), &a.original, grid)?;
+        dump(sink, "reconstructed:", &a.reconstructed, grid)?;
+        dump(sink, "error:", &a.error, grid)?;
+        dump(sink, "error % of original:", &a.relative_error(), grid)?;
         writeln!(sink, "{}\n", stat_line(a))?;
     }
 
@@ -118,6 +229,22 @@ fn stats_of(err: &Array2<f64>, reference: &Array2<f64>) -> String {
     )
 }
 
+/// The raw table a delay family names, on one characterised arc.
+fn family_table<'a>(arc: &'a ConditionedArc, family: &str) -> Option<&'a Array2<f64>> {
+    match family {
+        "cell_rise" => arc.cell_rise.as_ref(),
+        _ => arc.cell_fall.as_ref(),
+    }
+}
+
+/// The direction a delay family says the OUTPUT moved in.
+fn family_output(family: &str) -> Transition {
+    match family {
+        "cell_rise" => Transition::Rise,
+        _ => Transition::Fall,
+    }
+}
+
 /// What the `when` reduction alone costs, before the pseudo-flop split.
 ///
 /// Each pin pair is characterised once per operating state and the engine keeps
@@ -135,127 +262,130 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Er
         "mean arc measured against each condition it replaces, no split involved\n"
     )?;
 
-    for (edge, means) in [("rise", &r.cell_rise_arcs), ("fall", &r.cell_fall_arcs)] {
-        for ((source, output), mean) in means.iter() {
-            let conditions: Vec<&ConditionedArc> = r
-                .raw_arcs
-                .iter()
-                .filter(|a| &a.source == source && &a.output == output)
-                .filter(|a| {
-                    if edge == "rise" {
-                        a.cell_rise.is_some()
-                    } else {
-                        a.cell_fall.is_some()
-                    }
-                })
-                .collect();
+    // The conditions this group was merged from: the ones carrying the family's
+    // table AND routed to this input direction. Both halves of the key are needed
+    // -- a pin pair characterised under two senses contributes its `cell_rise`
+    // tables to two different groups, and measuring one against the other's
+    // conditions would report a reduction error that no reduction made.
+    for ((source, output, input_edge, family), mean) in &r.constraint_arcs {
+        let conditions: Vec<&ConditionedArc> = r
+            .raw_arcs
+            .iter()
+            .filter(|a| &a.source == source && &a.output == output)
+            .filter(|a| family_table(a, family).is_some())
+            .filter(|a| input_transition(a.sense, family_output(family)) == Some(*input_edge))
+            .collect();
 
-            // Printed so the reduction can be checked without trusting it: for
-            // all-positive delay tables the mean's own magnitude must equal the
-            // mean of the conditions' magnitudes. If those two disagree, the
-            // reduction is not averaging what it claims to be averaging.
-            let scale_of =
-                |t: &Array2<f64>| t.iter().map(|v| v.abs()).sum::<f64>() / t.len() as f64;
-            let condition_scales: Vec<f64> = conditions
-                .iter()
-                .map(|c| {
-                    scale_of(if edge == "rise" {
-                        c.cell_rise.as_ref().unwrap()
-                    } else {
-                        c.cell_fall.as_ref().unwrap()
-                    })
-                })
-                .collect();
-            let mean_of_scales =
-                condition_scales.iter().sum::<f64>() / condition_scales.len().max(1) as f64;
+        // Printed so the reduction can be checked without trusting it: for
+        // all-positive delay tables the mean's own magnitude must equal the
+        // mean of the conditions' magnitudes. If those two disagree, the
+        // reduction is not averaging what it claims to be averaging.
+        let scale_of = |t: &Array2<f64>| t.iter().map(|v| v.abs()).sum::<f64>() / t.len() as f64;
+        let condition_scales: Vec<f64> = conditions
+            .iter()
+            .map(|c| scale_of(family_table(c, family).unwrap()))
+            .collect();
+        let mean_of_scales =
+            condition_scales.iter().sum::<f64>() / condition_scales.len().max(1) as f64;
 
+        writeln!(
+            sink,
+            "{} arc {} -> {} (input {}): mean of {} condition(s)  |  mean scale {}  mean-of-condition scales {}",
+            family,
+            source,
+            output,
+            input_edge.name(),
+            conditions.len(),
+            g(scale_of(mean)),
+            g(mean_of_scales)
+        )?;
+
+        let mut worst: f64 = 0.0;
+        for c in &conditions {
+            let raw = family_table(c, family).unwrap();
+            if raw.raw_dim() != mean.raw_dim() {
+                continue;
+            }
+            let err = mean - raw;
+            worst = worst.max(err.iter().fold(0.0_f64, |m, v| m.max(v.abs())));
             writeln!(
                 sink,
-                "{} arc {} -> {}: mean of {} condition(s)  |  mean scale {}  mean-of-condition scales {}",
-                edge,
-                source,
-                output,
-                conditions.len(),
-                g(scale_of(mean)),
-                g(mean_of_scales)
+                "  {:<44} {}",
+                c.when.clone().unwrap_or("unconditioned".to_owned()),
+                stats_of(&err, raw)
             )?;
-
-            let mut worst: f64 = 0.0;
-            for c in &conditions {
-                let raw = if edge == "rise" {
-                    c.cell_rise.as_ref().unwrap()
-                } else {
-                    c.cell_fall.as_ref().unwrap()
-                };
-                if raw.raw_dim() != mean.raw_dim() {
-                    continue;
-                }
-                let err = mean - raw;
-                worst = worst.max(err.iter().fold(0.0_f64, |m, v| m.max(v.abs())));
-                writeln!(
-                    sink,
-                    "  {:<44} {}",
-                    match (&c.timing_type, &c.when) {
-                        (Some(t), Some(w)) => format!("[{}] {}", t, w),
-                        (Some(t), None) => format!("[{}] unconditioned", t),
-                        (None, Some(w)) => w.clone(),
-                        (None, None) => "unconditioned".to_owned(),
-                    },
-                    stats_of(&err, raw)
-                )?;
-            }
-            // What is actually being pooled under this one key. Two arcs on the
-            // same edge between the same pins are still different arcs if their
-            // sense or type differ, and the mean of those describes neither.
-            let mut kinds: std::collections::BTreeMap<String, (usize, f64, f64)> =
-                std::collections::BTreeMap::new();
-            for c in &conditions {
-                let raw = if edge == "rise" {
-                    c.cell_rise.as_ref().unwrap()
-                } else {
-                    c.cell_fall.as_ref().unwrap()
-                };
-                let key = format!(
-                    "{} / {}",
-                    c.timing_sense.as_deref().unwrap_or("-"),
-                    c.timing_type.as_deref().unwrap_or("-")
-                );
-                let mag = raw.iter().map(|v| v.abs()).sum::<f64>() / raw.len() as f64;
-                let neg = raw.iter().filter(|v| **v < 0.0).count() as f64;
-                let e = kinds.entry(key).or_insert((0, 0.0, 0.0));
-                e.0 += 1;
-                e.1 += mag;
-                e.2 += neg;
-            }
-            let spread = condition_scales
-                .iter()
-                .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-            if spread.0 > 0.0 && spread.1 / spread.0 > 2.0 {
-                writeln!(
-                    sink,
-                    "  WIDE SPREAD: conditions range {} .. {} ({:.1}x) -- the merged arc \n               represents no single operating state",
-                    g(spread.0),
-                    g(spread.1),
-                    spread.1 / spread.0
-                )?;
-            }
-            // Liberty's combinational / combinational_dir split is a grouping
-            // artefact; the arcs it contains are what matter. Listed only so the
-            // spread above can be traced back to states.
-            writeln!(sink, "  conditions by declared kind:")?;
-            for (kind, (n, mag, neg)) in &kinds {
-                writeln!(
-                    sink,
-                    "    {:<42} x{:<3} |mean| {:>10}  neg/table {:.0}",
-                    kind,
-                    n,
-                    g(mag / *n as f64),
-                    neg / *n as f64
-                )?;
-            }
-            writeln!(sink, "  worst |mean - condition|: {}\n", g(worst))?;
         }
+        let spread = condition_scales
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        if spread.0 > 0.0 && spread.1 / spread.0 > 2.0 {
+            writeln!(
+                sink,
+                "  WIDE SPREAD: conditions range {} .. {} ({:.1}x) -- the merged arc \n               represents no single operating state",
+                g(spread.0),
+                g(spread.1),
+                spread.1 / spread.0
+            )?;
+        }
+        writeln!(sink, "  worst |mean - condition|: {}\n", g(worst))?;
     }
+
+    dump_collision_classes(sink, r)
+}
+
+/// The states one cell's arcs describe, grouped by the function they denote.
+///
+/// Informational under every mode: nothing in the split consults a condition, so
+/// this changes no emitted byte. What it says is how much of the cell a per-state
+/// model would have to distinguish, and where two arcs already claim one state.
+fn dump_collision_classes(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Error>> {
+    writeln!(sink, "collision classes")?;
+    writeln!(
+        sink,
+        "each arc's `when` conjoined with the literal for the direction its input settled in\n"
+    )?;
+
+    for class in &r.classes {
+        let members: Vec<String> = class
+            .members
+            .iter()
+            .map(|(pin, when)| match when {
+                Some(when) => format!("{}({})", pin, when),
+                None => pin.clone(),
+            })
+            .collect();
+        writeln!(
+            sink,
+            "  {} {}  {:<44} {} arc(s): {}",
+            class.output,
+            class.edge.name(),
+            // A whenless arc states no condition; it covers whatever the
+            // conditioned arcs of its output and edge do not.
+            class.condition.as_deref().unwrap_or("catch-all"),
+            class.members.len(),
+            members.join(", ")
+        )?;
+    }
+
+    // An arc whose `when` could not be read describes a state that cannot be
+    // named, so it belongs to no class and to no catch-all either. It is
+    // recognisable exactly there: a conditioned arc that carries a delay family --
+    // so it would have been classified -- and yet holds no class for either edge.
+    for arc in r.raw_arcs.iter().filter(|a| {
+        a.when.is_some()
+            && a.class_rise.is_none()
+            && a.class_fall.is_none()
+            && (a.cell_rise.is_some() || a.cell_fall.is_some())
+    }) {
+        writeln!(
+            sink,
+            "  UNREADABLE CONDITION: arc {} -> {} when {}",
+            arc.source,
+            arc.output,
+            arc.when.as_deref().unwrap_or("")
+        )?;
+    }
+    writeln!(sink)?;
 
     Ok(())
 }
@@ -350,14 +480,185 @@ fn write_summary(sink: &mut dyn Write, arcs: &[&ArcError]) -> Result<(), Box<dyn
     Ok(())
 }
 
+/// The relative error over a chosen set of arcs, extremes and robust band alike.
+///
+/// The extremes alone are misleading here. A characterised delay legitimately passes
+/// through zero and goes negative — the output arrives before the input has finished
+/// switching — and a point-by-point ratio taken next to that crossing is arbitrarily
+/// large however small the residual is. So the percentiles are reported beside the
+/// extremes: they say what the error is away from those few points, which is what the
+/// conversion's accuracy actually turns on.
+///
+/// A point characterised as exactly zero has no ratio at all and is counted as
+/// `undef` rather than folded in as a substituted number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Band {
+    min: f64,
+    p5: f64,
+    p50: f64,
+    p95: f64,
+    max: f64,
+    mean: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RelativeStats {
+    points: usize,
+    undef: usize,
+    /// `None` when no point of the group could be measured at all.
+    band: Option<Band>,
+}
+
+/// Nearest-rank percentile of an ascending slice: no interpolation, so every figure
+/// reported is a residual that was actually measured somewhere.
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+    let last = sorted.len() - 1;
+    let rank = (q * last as f64).round() as usize;
+    sorted[rank.min(last)]
+}
+
+fn relative_stats(arcs: &[&ArcError], keep: impl Fn(&ArcError) -> bool) -> RelativeStats {
+    let mut values: Vec<f64> = Vec::new();
+    let mut undef = 0_usize;
+
+    for a in arcs.iter().filter(|a| keep(a)) {
+        for v in a.relative_error().iter() {
+            if v.is_finite() {
+                values.push(*v);
+            } else {
+                undef += 1;
+            }
+        }
+    }
+
+    if values.is_empty() {
+        return RelativeStats {
+            points: 0,
+            undef,
+            band: None,
+        };
+    }
+
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    values.sort_by(f64::total_cmp);
+
+    RelativeStats {
+        points: values.len(),
+        undef,
+        band: Some(Band {
+            min: values[0],
+            p5: percentile(&values, 0.05),
+            p50: percentile(&values, 0.50),
+            p95: percentile(&values, 0.95),
+            max: values[values.len() - 1],
+            mean,
+        }),
+    }
+}
+
+/// Where the conversion's error is worst, written before any of the detail.
+///
+/// The per-arc statistics measure a residual against one magnitude, which cannot
+/// say which output or which edge carries the error. This groups the relative
+/// error three ways — by cell, then by output, then by direction — so the tables
+/// below can be read starting from the worst group rather than in order.
+fn write_relative_error_summary(
+    sink: &mut dyn Write,
+    arcs: &[&ArcError],
+) -> Result<(), Box<dyn Error>> {
+    if arcs.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(sink, "relative error summary")?;
+    writeln!(
+        sink,
+        "100 * (reconstructed - original) / original, over every characterised point"
+    )?;
+    writeln!(
+        sink,
+        "p5 to p95 is the error away from the few points where the arc crosses zero\n"
+    )?;
+
+    let mut table = prettytable::Table::new();
+    table.add_row(prettytable::row![
+        "scope", "points", "undef", "min %", "p5 %", "p50 %", "p95 %", "max %", "avg %"
+    ]);
+
+    let add = |scope: String, stats: RelativeStats, t: &mut prettytable::Table| {
+        // Nothing measurable is said as such, never as a zero that would read as a
+        // perfect reconstruction.
+        let cells = match stats.band {
+            Some(b) => [b.min, b.p5, b.p50, b.p95, b.max, b.mean].map(g),
+            None => std::array::from_fn(|_| "-".to_owned()),
+        };
+        t.add_row(prettytable::Row::new(
+            [scope, stats.points.to_string(), stats.undef.to_string()]
+                .into_iter()
+                .chain(cells)
+                .map(|c| prettytable::Cell::new(&c))
+                .collect(),
+        ));
+    };
+
+    // First appearance rather than sorted, so the grouping follows the order the
+    // arcs were collected in and the rows can be compared between runs.
+    let cells: Vec<&str> = arcs.iter().map(|a| a.cell.as_str()).unique().collect();
+    for cell in cells {
+        add(
+            format!("cell {}", cell),
+            relative_stats(arcs, |a| a.cell == cell),
+            &mut table,
+        );
+
+        let outputs: Vec<&str> = arcs
+            .iter()
+            .filter(|a| a.cell == cell)
+            .map(|a| a.output.as_str())
+            .unique()
+            .collect();
+        for output in outputs {
+            add(
+                format!("  output {}", output),
+                relative_stats(arcs, |a| a.cell == cell && a.output == output),
+                &mut table,
+            );
+
+            let directions: Vec<&str> = arcs
+                .iter()
+                .filter(|a| a.cell == cell && a.output == output)
+                .map(|a| a.edge)
+                .unique()
+                .collect();
+            for direction in directions {
+                add(
+                    format!("    {}", direction),
+                    relative_stats(arcs, |a| {
+                        a.cell == cell && a.output == output && a.edge == direction
+                    }),
+                    &mut table,
+                );
+            }
+        }
+    }
+    add("ALL".to_owned(), relative_stats(arcs, |_| true), &mut table);
+
+    writeln!(sink, "{}", table)?;
+    Ok(())
+}
+
 pub(crate) fn write_report(
     sink: &mut dyn Write,
     reports: &[CellReport],
     refusals: &[Refusal],
     mode: ReferenceMode,
+    anchor: Anchor,
+    offset_placement: OffsetPlacement,
     summary_only: bool,
 ) -> Result<(), Box<dyn Error>> {
     writeln!(sink, "reference mode: {:?}", mode)?;
+    writeln!(sink, "anchor: {:?}", anchor)?;
+    writeln!(sink, "offset placement: {:?}", offset_placement)?;
     if let Some(r) = reports.first() {
         writeln!(sink, "when-arc merge: {:?}", r.when_merge)?;
     }
@@ -365,6 +666,12 @@ pub(crate) fn write_report(
         sink,
         "residual of reconstructing each arc as setup + clock-to-output delay\n"
     )?;
+
+    // The opening summary: which cell, which output and which edge the error sits
+    // on, so the reader knows where to look before meeting any of the tables. Under
+    // `--report-summary-only` too -- it is the summary that flag keeps.
+    let all: Vec<&ArcError> = reports.iter().flat_map(|r| r.arcs.iter()).collect();
+    write_relative_error_summary(sink, &all)?;
 
     // Before the tables, and under `--report-summary-only` as well. That flag limits
     // the tables; a refusal is not a table. A run with skips exits 0, so the report
@@ -409,7 +716,9 @@ mod tests {
     //! Behaviour of the report renderers: formatting, statistics and section layout.
 
     use super::*;
-    use crate::arcs::{RefArc, ReferenceMode, WhenMerge};
+    use crate::arcs::{EdgeRef, RefArc, ReferenceMode, TimingSense, WhenMerge};
+    use crate::conditions::{collision_classes, Condition}; // Test-only; the fixture's class ids are minted by the real classifier rather than written down.
+    use crate::report::StateClass;
     use std::collections::BTreeMap;
     use std::io::{self, Write};
 
@@ -462,7 +771,6 @@ mod tests {
             output: "Q".to_owned(),
             edge: "rise",
             when: Some("(C0)".to_owned()),
-            timing_type: Some("combinational".to_owned()),
             reconstructed: &original + &error,
             original,
             error,
@@ -470,15 +778,26 @@ mod tests {
     }
 
     fn ref_arc() -> RefArc {
+        ref_arc_at(Anchor::Middle)
+    }
+
+    fn ref_arc_at(anchor: Anchor) -> RefArc {
         RefArc {
             col: 1,
             row: 0,
             related_pin: "G".to_owned(),
             lut_template: "T".to_owned(),
-            rise_trans: Array1::from(vec![0.1, 0.2]),
-            fall_trans: Array1::from(vec![0.11, 0.21]),
-            cell_rise: Array1::from(vec![1.0, 2.0]),
-            cell_fall: Array1::from(vec![1.5, 2.5]),
+            anchor,
+            rise: EdgeRef {
+                delay: Array1::from(vec![1.0, 2.0]),
+                transition: Array1::from(vec![0.1, 0.2]),
+                crossing: 2.0,
+            },
+            fall: EdgeRef {
+                delay: Array1::from(vec![1.5, 2.5]),
+                transition: Array1::from(vec![0.11, 0.21]),
+                crossing: 2.5,
+            },
         }
     }
 
@@ -494,17 +813,41 @@ mod tests {
             conditions.iter().map(|c| c[1]).sum::<f64>() / n,
         ];
 
+        // The class ids come from the real classifier over the fixture's own
+        // conditions, rather than from numbers written here: `ClassId` is opaque,
+        // and widening it so a test could build one would be widening visibility to
+        // suit a test.
+        let whens: Vec<String> = (0..conditions.len()).map(|i| format!("(C{})", i)).collect();
+        let parsed: Vec<Condition> = whens
+            .iter()
+            .map(|w| Condition::parse(w).expect("a parenthesised pin name is a condition"))
+            .collect();
+        let ids = collision_classes(&parsed);
+
         let raw_arcs: Vec<ConditionedArc> = conditions
             .iter()
             .enumerate()
             .map(|(i, v)| ConditionedArc {
                 source: "D".to_owned(),
                 output: "Q".to_owned(),
-                when: Some(format!("(C{})", i)),
-                timing_type: Some("combinational".to_owned()),
-                timing_sense: Some("positive_unate".to_owned()),
+                when: Some(whens[i].clone()),
+                sense: TimingSense::Positive,
+                // Each condition names a different pin, so each is its own class.
+                class_rise: Some(ids[i]),
+                class_fall: None,
                 cell_rise: Some(table(*v)),
                 cell_fall: None,
+            })
+            .collect();
+
+        let classes: Vec<StateClass> = parsed
+            .iter()
+            .zip(whens.iter())
+            .map(|(condition, when)| StateClass {
+                output: "Q".to_owned(),
+                edge: Transition::Rise,
+                condition: Some(condition.liberty()),
+                members: vec![("D".to_owned(), Some(when.clone()))],
             })
             .collect();
 
@@ -513,13 +856,24 @@ mod tests {
             cell: "DUT".to_owned(),
             when_merge: WhenMerge::Mean,
             raw_arcs,
-            cell_rise_arcs: BTreeMap::from([(("D".to_owned(), "Q".to_owned()), table(mean))]),
-            cell_fall_arcs: BTreeMap::new(),
+            // Positive unate, so the rise tables were contributed by an input rise.
+            constraint_arcs: BTreeMap::from([(
+                (
+                    "D".to_owned(),
+                    "Q".to_owned(),
+                    Transition::Rise,
+                    "cell_rise",
+                ),
+                table(mean),
+            )]),
             ref_arcs: BTreeMap::from([("Q".to_owned(), ref_arc())]),
             mean_ref: ref_arc(),
-            setup_rise: BTreeMap::from([("D".to_owned(), Array1::from(vec![0.5, 0.6]))]),
-            setup_fall: BTreeMap::new(),
+            setup_input_rise: BTreeMap::from([("D".to_owned(), Array1::from(vec![0.5, 0.6]))]),
+            setup_input_fall: BTreeMap::new(),
+            slews: None,
+            loads: None,
             arcs: vec![arc_error("DUT")],
+            classes,
         }
     }
 
@@ -539,7 +893,7 @@ mod tests {
     #[test]
     fn dump_writes_the_label_then_one_table_row_per_array_row() {
         let a = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-        let out = rendered(|s| dump(s, "mean rise arc D -> Q:", &a));
+        let out = rendered(|s| dump(s, "mean rise arc D -> Q:", &a, Labels::default()));
 
         assert_eq!(out.lines().next(), Some("mean rise arc D -> Q:"));
         assert_eq!(table_rows(&out), vec![vec!["1", "2"], vec!["3", "4"]]);
@@ -555,7 +909,7 @@ mod tests {
     #[test]
     fn dump_renders_a_one_dimensional_array_as_a_single_row() {
         let a = Array1::from(vec![1.0, 2.0, 3.0]);
-        let out = rendered(|s| dump(s, "setup rise arc D:", &a));
+        let out = rendered(|s| dump(s, "setup rise arc D:", &a, Labels::default()));
 
         assert_eq!(out.lines().next(), Some("setup rise arc D:"));
         assert_eq!(table_rows(&out), vec![vec!["1", "2", "3"]]);
@@ -616,7 +970,7 @@ mod tests {
         let a = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
         let mut sink = FailOn::carrying(LABEL);
 
-        let err = dump(&mut sink, LABEL, &a)
+        let err = dump(&mut sink, LABEL, &a, Labels::default())
             .expect_err("a report line that could not be stored is not a line that was written");
 
         // The error is the sink's own, raised as it was, rather than some unrelated
@@ -640,7 +994,7 @@ mod tests {
         // A table value. `LABEL` holds no digit, so this cannot match the label write.
         let mut sink = FailOn::carrying("3");
 
-        let err = dump(&mut sink, LABEL, &a)
+        let err = dump(&mut sink, LABEL, &a, Labels::default())
             .expect_err("a table that could not be stored is not a table that was written");
 
         assert_eq!(
@@ -745,13 +1099,15 @@ mod tests {
     ///
     /// The list below is what [`cell_report`] holds, section by section, not a
     /// transcript of a run: the cell heading; one mean arc label per entry of
-    /// `cell_rise_arcs` (one, D -> Q) and of `cell_fall_arcs` (none, the map is
-    /// empty); a rise and a fall label per entry of `ref_arcs` (one output, Q,
-    /// referenced from G at row 0); the mean reference pair; one label per entry of
-    /// `setup_rise` (one source, D) and of `setup_fall` (none); then, per measured
-    /// arc, its heading and the three tables it is compared through, closed by the
-    /// statistics line. A section that appeared for a map the report holds nothing
-    /// in, or went missing for one it does, is what this catches.
+    /// `constraint_arcs` (one, D -> Q, `cell_rise` under an input rise); a rise and
+    /// a fall label per entry of `ref_arcs` (one output, Q, referenced from G at
+    /// row 0); the mean reference pair; one label per entry of `setup_input_rise`
+    /// (one source, D) and of `setup_input_fall` (none); then, per measured
+    /// arc, its heading and the four tables it is compared through — the arc as
+    /// characterised, its reconstruction, the residual and that residual point by
+    /// point as a percentage — closed by the statistics line. A section that
+    /// appeared for a map the report holds nothing in, or went missing for one it
+    /// does, is what this catches.
     ///
     /// Killed by: `dump_cell` iterated `r.ref_arcs.iter().take(0)`, dropping the per-output reference sections.
     #[test]
@@ -762,18 +1118,227 @@ mod tests {
             prose_lines(&out),
             vec![
                 "cell DUT of library testlib",
-                "mean rise arc D -> Q:",
+                // Both keys of the merged table: the family, which names the
+                // output's direction, and the input's own direction.
+                "mean cell_rise arc D -> Q (input rise):",
                 "ref rise arc G -> Q (row 0):",
                 "ref fall arc G -> Q (row 0):",
                 "mean ref rise arc (col 1, row 0):",
                 "mean ref fall arc:",
-                "setup rise arc D:",
-                "rise arc D -> Q  [combinational] when (C0)",
+                // The constraint is captioned by the constrained pin's transition,
+                // which is what `rise_constraint` is keyed on.
+                "setup arc D (input rise):",
+                "rise arc D -> Q  when (C0)",
                 "original:",
                 "reconstructed:",
                 "error:",
+                "error % of original:",
                 ARC_ERROR_STATS,
             ]
+        );
+    }
+
+    /// A fall arc is compared exactly as a rise arc is.
+    ///
+    /// The conversion splits both edges and the report has to account for both, so
+    /// nothing here may be reachable only through `cell_rise`. This renders a cell
+    /// whose only residual is on the fall edge and requires the same four tables,
+    /// labelled for that edge.
+    ///
+    /// The normalised table is checked against a quotient computed here rather than
+    /// read off the renderer: an original of [40, 50] carrying a residual of
+    /// [-2, 5] is -5% and +10% of the arc at those two points.
+    ///
+    /// Killed by: `dump_cell` iterated `r.arcs.iter().filter(|a| a.edge == "rise")`,
+    /// which leaves the rise-only section-list test green.
+    #[test]
+    fn dump_cell_compares_a_fall_arc_the_same_way_as_a_rise_arc() {
+        let original = Array2::from_shape_vec((1, 2), vec![40.0, 50.0]).unwrap();
+        let error = Array2::from_shape_vec((1, 2), vec![-2.0, 5.0]).unwrap();
+        let mut r = cell_report(&[[9.0, 3.0], [11.0, 17.0]]);
+        r.arcs = vec![ArcError {
+            cell: "DUT".to_owned(),
+            source: "M".to_owned(),
+            output: "Q".to_owned(),
+            edge: "fall",
+            when: None,
+            reconstructed: &original + &error,
+            original,
+            error,
+        }];
+
+        let out = rendered(|s| dump_cell(s, &r));
+
+        assert!(
+            prose_lines(&out).contains(&"fall arc M -> Q  unconditioned"),
+            "{}",
+            out
+        );
+        for table in [
+            "original:",
+            "reconstructed:",
+            "error:",
+            "error % of original:",
+        ] {
+            assert!(
+                prose_lines(&out).contains(&table),
+                "{} missing:\n{}",
+                table,
+                out
+            );
+        }
+        // -2/40 and 5/50 as percentages, the last table drawn.
+        assert_eq!(
+            table_rows(&out).last().expect("four tables were drawn"),
+            &vec!["-5", "10"]
+        );
+    }
+
+    /// A table is captioned with the slew and load it was measured at, and a
+    /// mismatched axis is dropped rather than misaligned.
+    ///
+    /// The point of the caption is to say which regime a residual sits in, so it has to
+    /// be the axis the table is actually indexed on. An axis of the wrong length would
+    /// caption every value with a slew or load it was not measured at — a silently wrong
+    /// number — so it is not used at all.
+    ///
+    /// Killed by: `fitted` compared the row axis against the column count, so a 2x3
+    /// table accepted a 3-point slew axis and labelled its two rows with the first two
+    /// of three slews.
+    #[test]
+    fn a_table_is_captioned_with_the_axes_it_is_indexed_on() {
+        let a = Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let slews = vec![0.01, 0.1];
+        let loads = vec![0.005, 0.05, 0.5];
+
+        let out = rendered(|s| dump(s, "error:", &a, Labels::grid(Some(&slews), Some(&loads))));
+
+        assert_eq!(
+            table_rows(&out),
+            vec![
+                vec!["slew \\ load", "0.005", "0.05", "0.5"],
+                vec!["0.01", "1", "2", "3"],
+                vec!["0.1", "4", "5", "6"],
+            ]
+        );
+
+        // A slew axis of the wrong length captions nothing; the load axis still does,
+        // and no corner is drawn because there is no row label to name.
+        let wrong = vec![0.01, 0.1, 1.0];
+        let out = rendered(|s| dump(s, "error:", &a, Labels::grid(Some(&wrong), Some(&loads))));
+
+        assert_eq!(
+            table_rows(&out),
+            vec![
+                vec!["0.005", "0.05", "0.5"],
+                vec!["1", "2", "3"],
+                vec!["4", "5", "6"],
+            ]
+        );
+    }
+
+    /// An arc whose relative error is known point by point, for the summary tests.
+    fn rel_arc(
+        cell: &str,
+        output: &str,
+        edge: &'static str,
+        original: Vec<f64>,
+        error: Vec<f64>,
+    ) -> ArcError {
+        let n = original.len();
+        let original = Array2::from_shape_vec((1, n), original).unwrap();
+        let error = Array2::from_shape_vec((1, n), error).unwrap();
+        ArcError {
+            cell: cell.to_owned(),
+            source: "D".to_owned(),
+            output: output.to_owned(),
+            edge,
+            when: None,
+            reconstructed: &original + &error,
+            original,
+            error,
+        }
+    }
+
+    /// The opening summary groups the relative error by cell, then output, then
+    /// direction, and each level covers exactly the points beneath it.
+    ///
+    /// Four arcs, every relative error computed here rather than read off the
+    /// renderer. Cell A output Q1 rise: residual [1, -2] on an original of [10, 10],
+    /// so [10, -20]. A/Q1 fall: [3] on [10], so [30]. A/Q2 rise: [-1] on [100], so
+    /// [-1]. Cell B output Z rise: [5] on [50], so [10]. Hence A/Q1/rise spans -20
+    /// to 10 averaging -5; A/Q1 adds the fall point for -20 to 30 averaging 20/3;
+    /// cell A adds Q2 for -20 to 30 averaging 19/4; and ALL adds cell B for -20 to
+    /// 30 averaging 29/5.
+    ///
+    /// The percentiles are nearest-rank over the same sorted values, so for cell A's
+    /// four points sorted to [-20, -1, 10, 30] the ranks are round(0.05*3)=0, round(0.5*3)=2
+    /// and round(0.95*3)=3, giving p5 -20, p50 10, p95 30.
+    ///
+    /// Killed by: the direction level dropped `&& a.edge == direction` from its
+    /// predicate, so both direction rows repeated their output's figures.
+    #[test]
+    fn the_opening_summary_groups_relative_error_by_cell_then_output_then_direction() {
+        let arcs = [
+            rel_arc("A", "Q1", "rise", vec![10.0, 10.0], vec![1.0, -2.0]),
+            rel_arc("A", "Q1", "fall", vec![10.0], vec![3.0]),
+            rel_arc("A", "Q2", "rise", vec![100.0], vec![-1.0]),
+            rel_arc("B", "Z", "rise", vec![50.0], vec![5.0]),
+        ];
+        let refs: Vec<&ArcError> = arcs.iter().collect();
+
+        let out = rendered(|s| write_relative_error_summary(s, &refs));
+
+        assert_eq!(
+            table_rows(&out),
+            vec![
+                vec![
+                    "scope", "points", "undef", "min %", "p5 %", "p50 %", "p95 %", "max %", "avg %"
+                ],
+                vec!["cell A", "4", "0", "-20", "-20", "10", "30", "30", "4.75"],
+                vec![
+                    "output Q1",
+                    "3",
+                    "0",
+                    "-20",
+                    "-20",
+                    "10",
+                    "30",
+                    "30",
+                    "6.66667"
+                ],
+                vec!["rise", "2", "0", "-20", "-20", "10", "10", "10", "-5"],
+                vec!["fall", "1", "0", "30", "30", "30", "30", "30", "30"],
+                vec!["output Q2", "1", "0", "-1", "-1", "-1", "-1", "-1", "-1"],
+                vec!["rise", "1", "0", "-1", "-1", "-1", "-1", "-1", "-1"],
+                vec!["cell B", "1", "0", "10", "10", "10", "10", "10", "10"],
+                vec!["output Z", "1", "0", "10", "10", "10", "10", "10", "10"],
+                vec!["rise", "1", "0", "10", "10", "10", "10", "10", "10"],
+                vec!["ALL", "5", "0", "-20", "-20", "10", "30", "30", "5.8"],
+            ]
+        );
+    }
+
+    /// A point characterised as zero has no relative error, and must not be folded
+    /// in as one.
+    ///
+    /// Dividing by it gives an infinity, and admitting that into the aggregate would
+    /// carry every statistic of the group away with it. The original [0, 10] with a
+    /// residual of [5, 1] therefore reports one measured point at 10% and one
+    /// unmeasurable, not a minimum or maximum of infinity.
+    ///
+    /// Killed by: `relative_stats` counted every point, dropping the `is_finite`
+    /// test, which put `inf` in the max and NaN in the average.
+    #[test]
+    fn a_point_characterised_as_zero_is_counted_apart_not_averaged_in() {
+        let arcs = [rel_arc("A", "Q", "rise", vec![0.0, 10.0], vec![5.0, 1.0])];
+        let refs: Vec<&ArcError> = arcs.iter().collect();
+
+        let out = rendered(|s| write_relative_error_summary(s, &refs));
+
+        assert_eq!(
+            table_rows(&out).last().expect("the ALL row is drawn"),
+            &vec!["ALL", "1", "1", "10", "10", "10", "10", "10", "10"]
         );
     }
 
@@ -791,10 +1356,12 @@ mod tests {
             "{}",
             out
         );
-        // The mean's own magnitude must equal the mean of the conditions'.
+        // The mean's own magnitude must equal the mean of the conditions'. The
+        // heading names the family the values came from and the direction the input
+        // was moving in, which under a positive-unate arc agree.
         assert!(
             out.contains(
-                "rise arc D -> Q: mean of 2 condition(s)  |  mean scale 10  mean-of-condition scales 10\n"
+                "cell_rise arc D -> Q (input rise): mean of 2 condition(s)  |  mean scale 10  mean-of-condition scales 10\n"
             ),
             "{}",
             out
@@ -802,10 +1369,7 @@ mod tests {
 
         let stats_for = |when: &str| {
             out.lines()
-                .find(|l| {
-                    l.trim_start()
-                        .starts_with(&format!("[combinational] {}", when))
-                })
+                .find(|l| l.trim_start().starts_with(when))
                 .unwrap_or_else(|| panic!("no line for condition {}: {}", when, out))
                 .to_owned()
         };
@@ -825,6 +1389,68 @@ mod tests {
         );
 
         assert!(out.contains("  worst |mean - condition|: 7\n"), "{}", out);
+    }
+
+    /// The states the cell's arcs describe are listed after the reduction, one
+    /// line per class: which output and which of its edges, the condition in
+    /// Liberty's spelling, how many arcs claim it and which.
+    ///
+    /// Killed by: `dump_collision_classes` iterated `r.classes.iter().take(0)`, which wrote the heading and no rows.
+    #[test]
+    fn dump_reduction_lists_one_line_per_collision_class() {
+        let out = rendered(|s| dump_reduction(s, &cell_report(&[[9.0, 3.0], [11.0, 17.0]])));
+
+        assert!(out.contains("collision classes\n"), "{}", out);
+        // Two conditions naming two different pins, so two classes, each claimed by
+        // the one arc that carries it. `(C0)` renders as `C0`; the member keeps the
+        // library's own spelling.
+        assert!(
+            out.contains(
+                "  Q rise  C0                                           1 arc(s): D((C0))\n"
+            ),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains(
+                "  Q rise  C1                                           1 arc(s): D((C1))\n"
+            ),
+            "{}",
+            out
+        );
+    }
+
+    /// An arc whose `when` this tool could not read is named, rather than passed
+    /// over: it belongs to no class and to no catch-all, so nothing else in the
+    /// block would mention it at all.
+    ///
+    /// Killed by: `dump_collision_classes` dropped the delay-family test from its filter, which then also named a `when`-conditioned arc that simply carried no delay table -- an arc there was never anything to classify about.
+    #[test]
+    fn an_arc_whose_condition_could_not_be_read_is_named_in_the_class_block() {
+        let mut report = cell_report(&[[9.0, 3.0]]);
+        // What the engine leaves behind for an unreadable `when`: the arc keeps its
+        // text and its tables, holds no class, and no class row mentions it.
+        report.raw_arcs[0].when = Some("A'".to_owned());
+        report.raw_arcs[0].class_rise = None;
+        report.classes.clear();
+
+        let out = rendered(|s| dump_reduction(s, &report));
+        assert!(
+            out.contains("  UNREADABLE CONDITION: arc D -> Q when A'\n"),
+            "{}",
+            out
+        );
+
+        // An arc that carries no delay table was never a candidate for a class, so
+        // it is not reported as unreadable either.
+        let mut tableless = cell_report(&[[9.0, 3.0]]);
+        tableless.raw_arcs[0].class_rise = None;
+        tableless.raw_arcs[0].cell_rise = None;
+        tableless.classes.clear();
+        assert!(
+            !rendered(|s| dump_reduction(s, &tableless)).contains("UNREADABLE CONDITION"),
+            "an arc with nothing to classify must not be reported as unreadable"
+        );
     }
 
     /// The marker fires on the ratio between the widest and narrowest condition,
@@ -889,6 +1515,8 @@ mod tests {
                     &reports,
                     &refusals,
                     ReferenceMode::PerOutput,
+                    Anchor::Middle,
+                    OffsetPlacement::Setup,
                     summary_only,
                 )
             });
@@ -919,10 +1547,25 @@ mod tests {
     #[test]
     fn write_report_with_summary_only_omits_the_per_arc_sections() {
         let reports = vec![cell_report(&[[1.0, 1.0], [4.0, 4.0]])];
-        let out = rendered(|s| write_report(s, &reports, &[], ReferenceMode::PerOutput, true));
+        let out = rendered(|s| {
+            write_report(
+                s,
+                &reports,
+                &[],
+                ReferenceMode::PerOutput,
+                Anchor::Middle,
+                OffsetPlacement::Setup,
+                true,
+            )
+        });
 
+        // The four knobs that decide what the numbers below mean, before any of
+        // them: a report read without knowing how the reference was drawn, where
+        // it was anchored and which half carries the offset says nothing.
         assert!(
-            out.starts_with("reference mode: PerOutput\nwhen-arc merge: Mean\n"),
+            out.starts_with(
+                "reference mode: PerOutput\nanchor: Middle\noffset placement: Setup\nwhen-arc merge: Mean\n"
+            ),
             "{}",
             out
         );
@@ -943,7 +1586,17 @@ mod tests {
     #[test]
     fn write_report_in_full_adds_the_reduction_and_per_cell_sections() {
         let reports = vec![cell_report(&[[1.0, 1.0], [4.0, 4.0]])];
-        let out = rendered(|s| write_report(s, &reports, &[], ReferenceMode::PerOutput, false));
+        let out = rendered(|s| {
+            write_report(
+                s,
+                &reports,
+                &[],
+                ReferenceMode::PerOutput,
+                Anchor::Middle,
+                OffsetPlacement::Setup,
+                false,
+            )
+        });
 
         assert!(
             out.contains("== when-reduction error, cell DUT of library testlib ==\n"),

@@ -67,6 +67,8 @@ library block.
 | `-r`, `--reset-pin <regex>` | `(R\|S)N?` | Arcs whose `related_pin` matches are treated as asynchronous set/reset: excluded from the conversion and retained unchanged |
 | `-m`, `--reference-mode <mode>` | `per-output` | `per-output` gives each output its own clock-to-output reference and constrains each input against the outputs it actually drives; `pooled` gives every output the cell-wide mean |
 | `-w`, `--when-merge <mode>` | `mean` | How several `when`-conditioned arcs of one pin pair are merged: `mean` is representative, `max` the pessimistic envelope, `min` the optimistic one. Merging is elementwise, per slew/load point |
+| `--anchor <mode>` | `middle` | Where in each characterised table the value standing for the collapsed axis is read: `middle` takes the middle row, column and element, so every number emitted is one the library measured; `average` takes the mean over that axis instead |
+| `--offset-placement <mode>` | `setup` | Which half of the split carries the constant the two are separated around: `setup` leaves it in the setup constraint, `prop` folds it into the clock-to-output delay. The two halves sum to the same arc either way |
 | `-R`, `--report <path>` | none | Write the reconstruction report here. `-` writes it to standard error |
 | `--report-summary-only` | off | Limit the report's tables to the per-arc and per-cell error statistics. Refusals are still listed |
 

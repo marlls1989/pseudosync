@@ -1,6 +1,7 @@
 //! Timing arcs: how they are averaged, merged across `when` conditions,
 //! reduced to a reference, and restored from the pseudo-flop split.
 
+use crate::templates::{axis_values, Axes};
 use liberty_parser::{ast::Value, liberty::Group};
 use ndarray::prelude::*;
 use std::collections::BTreeMap;
@@ -77,16 +78,204 @@ impl std::str::FromStr for ReferenceMode {
     }
 }
 
+/// The way an input pin logically affects an output pin, as Liberty's
+/// `timing_sense` states it (RM p.328).
+///
+/// Liberty spells these `positive_unate`, `negative_unate` and `non_unate`; the
+/// shared "unate" is dropped from the first two because a set of variants that all
+/// carry one word says the word in every use of the type and none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimingSense {
+    Positive,
+    Negative,
+    NonUnate,
+}
+
+impl TimingSense {
+    /// The three spellings Liberty gives the attribute, and nothing else. An
+    /// unrecognised value is `None` rather than a guess: it is exactly as
+    /// uninformative about the input's direction as a missing attribute.
+    pub(crate) fn from_expr(text: &str) -> Option<Self> {
+        match text {
+            "positive_unate" => Some(TimingSense::Positive),
+            "negative_unate" => Some(TimingSense::Negative),
+            "non_unate" => Some(TimingSense::NonUnate),
+            _ => None,
+        }
+    }
+}
+
+/// Which way a pin is moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Transition {
+    Rise,
+    Fall,
+}
+
+impl Transition {
+    /// The word a report captions this direction with.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Transition::Rise => "rise",
+            Transition::Fall => "fall",
+        }
+    }
+}
+
+/// The direction the INPUT pin was moving in, for an arc whose OUTPUT moved in
+/// `output`. `None` where the sense does not determine one.
+///
+/// This is the one place the derivation is decided; classification, the constraint
+/// routing and the report all call it rather than re-deriving it.
+///
+/// The derivation. `timing_sense` describes the way an input pin logically affects
+/// an output pin (RM p.328): `positive_unate` combines an *incoming* rise with a
+/// *local* rise, `negative_unate` combines an incoming rise with a local fall
+/// (RM p.329), where "incoming" is the input side and "local" is this cell's own
+/// output. The output's direction is the table family the values were read from --
+/// `cell_rise` is paired with `rise_transition`, and a transition is the output's
+/// own slew, so both name the output. Inverting that pairing gives the input's
+/// direction: under `positive_unate` it matches the output's, under
+/// `negative_unate` it is the opposite, and under `non_unate` the same input edge
+/// can drive the output either way, so nothing determines it.
+///
+/// Nothing here rests on the arrow orientation of RM Table 21.
+pub(crate) fn input_transition(sense: TimingSense, output: Transition) -> Option<Transition> {
+    match sense {
+        TimingSense::Positive => Some(output),
+        TimingSense::Negative => Some(match output {
+            Transition::Rise => Transition::Fall,
+            Transition::Fall => Transition::Rise,
+        }),
+        TimingSense::NonUnate => None,
+    }
+}
+
+/// Where in a characterised table the one value standing for a whole axis is read.
+///
+/// A 2-D arc is slew x load, and the split reduces it to a load-indexed profile plus
+/// a slew-indexed one. Something has to stand in for the axis being collapsed, and
+/// the choice is not forced by the model: the middle sample is one measurement the
+/// library actually made, the mean uses every measurement but corresponds to none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Anchor {
+    /// The middle row, column or element of the table. The original behaviour: every
+    /// number emitted is one the library characterised.
+    Middle,
+    /// The mean over the axis being collapsed. Uses every measurement, at the cost of
+    /// standing for no single characterised point.
+    Average,
+}
+
+impl std::str::FromStr for Anchor {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "middle" => Ok(Anchor::Middle),
+            "average" => Ok(Anchor::Average),
+            other => Err(format!(
+                "unknown anchor {:?}, expected \"middle\" or \"average\"",
+                other
+            )),
+        }
+    }
+}
+
+/// Which half of the split carries the constant the two are separated around.
+///
+/// `delay(A→Z) = propagation(G→Z) + setup(A→G)` fixes the sum, not how the constant
+/// at the anchor point is divided between the halves. Moving it changes neither the
+/// sum nor the residual — only which of the two artefacts reads as the larger number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OffsetPlacement {
+    /// The constant stays in the setup constraint, which is therefore referred to the
+    /// anchor point of the propagation delay. The original behaviour.
+    Setup,
+    /// The constant is folded into the propagation delay instead, leaving the setup
+    /// constraint the arc's own slew profile.
+    Prop,
+}
+
+impl std::str::FromStr for OffsetPlacement {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "setup" => Ok(OffsetPlacement::Setup),
+            "prop" => Ok(OffsetPlacement::Prop),
+            other => Err(format!(
+                "unknown offset placement {:?}, expected \"setup\" or \"prop\"",
+                other
+            )),
+        }
+    }
+}
+
+/// The load-indexed profile a table is collapsed to: the row the [`Anchor`] selects.
+///
+/// `Middle` takes the row at `len_of(Axis(0)) / 2`, the same integer division the
+/// reference's own `row` is taken with; `Average` takes the mean down the rows.
+fn prop_profile(t: &Array2<f64>, anchor: Anchor) -> Array1<f64> {
+    match anchor {
+        Anchor::Middle => t.slice(s![t.len_of(Axis(0)) / 2, ..]).to_owned(),
+        Anchor::Average => t.mean_axis(Axis(0)).unwrap_or_else(|| {
+            panic!("internal: a characterisation table reached the split with no rows")
+        }),
+    }
+}
+
+/// The slew-indexed profile a table is collapsed to: the column the [`Anchor`] selects.
+///
+/// `Middle` takes the column at `len_of(Axis(1)) / 2`, the same integer division the
+/// reference's own `col` is taken with; `Average` takes the mean across the columns.
+pub(crate) fn slew_profile(t: &Array2<f64>, anchor: Anchor) -> Array1<f64> {
+    match anchor {
+        Anchor::Middle => t.slice(s![.., t.len_of(Axis(1)) / 2]).to_owned(),
+        Anchor::Average => t.mean_axis(Axis(1)).unwrap_or_else(|| {
+            panic!("internal: a characterisation table reached the split with no columns")
+        }),
+    }
+}
+
+/// The single value where the two profiles meet: the constant the split is taken
+/// around, counted once so it is not charged to both halves.
+fn crossing(t: &Array2<f64>, anchor: Anchor) -> f64 {
+    match anchor {
+        Anchor::Middle => t[[t.len_of(Axis(0)) / 2, t.len_of(Axis(1)) / 2]],
+        Anchor::Average => t.mean().unwrap_or_else(|| {
+            panic!("internal: a characterisation table reached the split with no elements")
+        }),
+    }
+}
+
+/// One output edge's half of a reference arc.
+///
+/// The clock-to-output delay the model emits for this edge, the output slew that
+/// pairs with it, and the constant the constraint half is offset by. Bundled because
+/// the three are read off one table family: a profile paired with another family's
+/// crossing would subtract a fall delay from a rise arc.
+///
+/// A transition table is a 1-D profile and never carries an offset of its own, so
+/// `crossing` belongs to `delay` alone.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EdgeRef {
+    pub(crate) delay: Array1<f64>,
+    pub(crate) transition: Array1<f64>,
+    pub(crate) crossing: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RefArc {
     pub(crate) col: usize,
     pub(crate) row: usize,
     pub(crate) related_pin: String,
     pub(crate) lut_template: String,
-    pub(crate) rise_trans: Array1<f64>,
-    pub(crate) fall_trans: Array1<f64>,
-    pub(crate) cell_rise: Array1<f64>,
-    pub(crate) cell_fall: Array1<f64>,
+    /// How the profiles below were read off the 2-D tables, so a report never
+    /// captions an averaged reference with a row index it did not use.
+    pub(crate) anchor: Anchor,
+    pub(crate) rise: EdgeRef,
+    pub(crate) fall: EdgeRef,
 }
 
 /// The references a cell's constraints and delays were drawn against.
@@ -122,6 +311,14 @@ impl References<'_> {
 #[derive(Debug, Clone)]
 pub(crate) struct TimingTables {
     pub(crate) lut_template: String,
+    /// The `timing_sense` the group declares, where it declares one this tool
+    /// recognises. `None` covers both an absent attribute and an unrecognised
+    /// spelling, which say equally little about the input's direction.
+    pub(crate) sense: Option<TimingSense>,
+    /// The axes the table group declares for itself, which override the named
+    /// template's. `None` where it declares none and the template's stand.
+    pub(crate) slews: Option<Vec<f64>>,
+    pub(crate) loads: Option<Vec<f64>>,
     pub(crate) cell_rise: Option<Array2<f64>>,
     pub(crate) cell_fall: Option<Array2<f64>>,
     pub(crate) rise_trans: Option<Array2<f64>>,
@@ -131,14 +328,14 @@ pub(crate) struct TimingTables {
 /// Running mean of one table family across arcs that share a (related_pin,
 /// output) pair.
 #[derive(Debug, Clone)]
-struct TableAccumulator {
+pub(crate) struct TableAccumulator {
     sum: Option<Array2<f64>>,
     n: f64,
     merge: WhenMerge,
 }
 
 impl TableAccumulator {
-    fn new(merge: WhenMerge) -> Self {
+    pub(crate) fn new(merge: WhenMerge) -> Self {
         Self {
             sum: None,
             n: 0.0,
@@ -146,7 +343,13 @@ impl TableAccumulator {
         }
     }
 
-    fn add(&mut self, table: Array2<f64>, family: &str, related_pin: &str, outpin: &str) {
+    pub(crate) fn add(
+        &mut self,
+        table: Array2<f64>,
+        family: &str,
+        related_pin: &str,
+        outpin: &str,
+    ) {
         let merge = self.merge;
         match self.sum.as_mut() {
             // Conditions of one arc are characterised on a common template, so a
@@ -177,7 +380,7 @@ impl TableAccumulator {
         }
     }
 
-    fn result(&self) -> Option<Array2<f64>> {
+    pub(crate) fn result(&self) -> Option<Array2<f64>> {
         self.sum.as_ref().map(|sum| match self.merge {
             WhenMerge::Mean => sum / self.n,
             WhenMerge::Min | WhenMerge::Max => sum.clone(),
@@ -201,6 +404,12 @@ impl TableAccumulator {
 #[derive(Debug, Clone)]
 pub(crate) struct ArcAccumulator {
     lut_template: Option<String>,
+    /// The axes of the arcs merged here, and whether they all agreed. Labelling a
+    /// merged table with axes only some of its conditions were indexed on would
+    /// caption it with numbers it was not measured at, so disagreement drops the
+    /// labels rather than picks a winner.
+    axes: Option<Axes>,
+    axes_agree: bool,
     cell_rise: TableAccumulator,
     cell_fall: TableAccumulator,
     rise_trans: TableAccumulator,
@@ -211,6 +420,8 @@ impl ArcAccumulator {
     pub(crate) fn new(merge: WhenMerge) -> Self {
         Self {
             lut_template: None,
+            axes: None,
+            axes_agree: true,
             cell_rise: TableAccumulator::new(merge),
             cell_fall: TableAccumulator::new(merge),
             rise_trans: TableAccumulator::new(merge),
@@ -221,6 +432,16 @@ impl ArcAccumulator {
     pub(crate) fn accumulate(&mut self, tables: TimingTables, related_pin: &str, outpin: &str) {
         if self.lut_template.is_none() {
             self.lut_template = Some(tables.lut_template);
+        }
+
+        let arc_axes = Axes {
+            slew: tables.slews,
+            load: tables.loads,
+        };
+        match &self.axes {
+            None => self.axes = Some(arc_axes),
+            Some(seen) if *seen != arc_axes => self.axes_agree = false,
+            Some(_) => {}
         }
 
         for (table, family, acc) in [
@@ -236,8 +457,20 @@ impl ArcAccumulator {
     }
 
     pub(crate) fn result(&self) -> Option<TimingTables> {
+        let (slews, loads) = match (&self.axes, self.axes_agree) {
+            (Some(axes), true) => (axes.slew.clone(), axes.load.clone()),
+            _ => (None, None),
+        };
+
         Some(TimingTables {
             lut_template: self.lut_template.clone()?,
+            // The merged arc is what a reference is drawn from, and a reference is
+            // a clock-to-output quantity that no input's direction bears on. The
+            // constraints are routed per arc, before this merge, so nothing
+            // downstream of it asks.
+            sense: None,
+            slews,
+            loads,
             cell_rise: self.cell_rise.result(),
             cell_fall: self.cell_fall.result(),
             rise_trans: self.rise_trans.result(),
@@ -291,23 +524,36 @@ where
                                    for a common domain before the mean was taken";
             assert_eq!(a.col, b.col, "{}", CHECKED);
             assert_eq!(a.row, b.row, "{}", CHECKED);
+            assert_eq!(a.anchor, b.anchor, "{}", CHECKED);
             assert_eq!(&a.lut_template, &b.lut_template, "{}", CHECKED);
+            // The crossing is reduced alongside the arrays it was read from, so the
+            // mean reference's offset is the mean of the offsets rather than a value
+            // re-read off a table that no longer exists.
             RefArc {
                 col: a.col,
                 row: a.row,
                 related_pin: a.related_pin,
                 lut_template: a.lut_template,
-                rise_trans: a.rise_trans + b.rise_trans,
-                fall_trans: a.fall_trans + b.fall_trans,
-                cell_rise: a.cell_rise + b.cell_rise,
-                cell_fall: a.cell_fall + b.cell_fall,
+                anchor: a.anchor,
+                rise: EdgeRef {
+                    delay: a.rise.delay + b.rise.delay,
+                    transition: a.rise.transition + b.rise.transition,
+                    crossing: a.rise.crossing + b.rise.crossing,
+                },
+                fall: EdgeRef {
+                    delay: a.fall.delay + b.fall.delay,
+                    transition: a.fall.transition + b.fall.transition,
+                    crossing: a.fall.crossing + b.fall.crossing,
+                },
             }
         })
         .map(|mut x| {
-            x.rise_trans /= n;
-            x.fall_trans /= n;
-            x.cell_fall /= n;
-            x.cell_rise /= n;
+            x.rise.transition /= n;
+            x.fall.transition /= n;
+            x.fall.delay /= n;
+            x.rise.delay /= n;
+            x.rise.crossing /= n;
+            x.fall.crossing /= n;
             x
         })
 }
@@ -354,37 +600,41 @@ pub(crate) fn arc_domains(timing_group: &Group) -> Vec<(String, (usize, usize))>
 /// Extract timing tables from a timing group
 pub(crate) fn extract_timing_tables_from_arc(timing_group: &Group) -> Option<TimingTables> {
     let mut lut_template = None;
+    // Whichever family claims the template also supplies the axes, so the two can
+    // never come from different tables.
+    let mut axes: Option<Axes> = None;
+    let mut claim = |group: Option<&&Group>, lut_template: &mut Option<String>| {
+        if let (Some(group), None) = (group, &lut_template) {
+            *lut_template = Some(group.name.clone());
+            axes = Some(Axes {
+                slew: axis_values(group, "index_1"),
+                load: axis_values(group, "index_2"),
+            });
+        }
+    };
 
     let (cell_rise_groups, others): (Vec<&Group>, Vec<&Group>) = timing_group
         .iter_subgroups()
         .partition(|g| g.type_ == "cell_rise");
-    if let (Some(group), None) = (cell_rise_groups.first(), &lut_template) {
-        lut_template = Some(group.name.clone())
-    }
+    claim(cell_rise_groups.first(), &mut lut_template);
     let cell_rise = mean_timingtable(cell_rise_groups);
 
     let (cell_fall_groups, others): (Vec<&Group>, Vec<&Group>) =
         others.into_iter().partition(|g| g.type_ == "cell_fall");
-    if let (Some(group), None) = (cell_fall_groups.first(), &lut_template) {
-        lut_template = Some(group.name.clone())
-    }
+    claim(cell_fall_groups.first(), &mut lut_template);
     let cell_fall = mean_timingtable(cell_fall_groups);
 
     let (rise_trans_groups, others): (Vec<&Group>, Vec<&Group>) = others
         .into_iter()
         .partition(|g| g.type_ == "rise_transition");
-    if let (Some(group), None) = (rise_trans_groups.first(), &lut_template) {
-        lut_template = Some(group.name.clone())
-    }
+    claim(rise_trans_groups.first(), &mut lut_template);
     let rise_trans = mean_timingtable(rise_trans_groups);
 
     let fall_trans_groups: Vec<&Group> = others
         .into_iter()
         .filter(|g| g.type_ == "fall_transition")
         .collect();
-    if let (Some(group), None) = (fall_trans_groups.first(), &lut_template) {
-        lut_template = Some(group.name.clone())
-    }
+    claim(fall_trans_groups.first(), &mut lut_template);
     let fall_trans = mean_timingtable(fall_trans_groups);
 
     // Require at least one timing table to be present
@@ -392,8 +642,23 @@ pub(crate) fn extract_timing_tables_from_arc(timing_group: &Group) -> Option<Tim
         return None;
     }
 
+    let (slews, loads) = axes.map_or((None, None), |a| (a.slew, a.load));
+
+    // Read structurally rather than through `Value::expr`, which panics on a value
+    // spelled as a quoted string. An unrecognised spelling is `None`, and the caller
+    // treats that exactly as it treats an absent attribute.
+    let sense = timing_group
+        .simple_attribute("timing_sense")
+        .and_then(|v| match v {
+            Value::Expression(text) | Value::String(text) => TimingSense::from_expr(text),
+            _ => None,
+        });
+
     Some(TimingTables {
         lut_template: lut_template?,
+        sense,
+        slews,
+        loads,
         cell_rise,
         cell_fall,
         rise_trans,
@@ -401,11 +666,13 @@ pub(crate) fn extract_timing_tables_from_arc(timing_group: &Group) -> Option<Tim
     })
 }
 
-/// Select a reference arc from timing tables (uses middle row)
+/// Select a reference arc from timing tables, collapsing each family at `anchor`.
 /// Returns None if the timing tables don't have all required data
 pub(crate) fn select_reference_arc(
     related_pin: &str,
     timing_tables: &TimingTables,
+    anchor: Anchor,
+    placement: OffsetPlacement,
 ) -> Option<RefArc> {
     // Require all four timing tables for the reference arc
     let cell_rise = timing_tables.cell_rise.as_ref()?;
@@ -416,15 +683,36 @@ pub(crate) fn select_reference_arc(
     let col = cell_rise.len_of(Axis(1)) / 2;
     let row = cell_rise.len_of(Axis(0)) / 2;
 
+    // Placement is applied once, here, so that everything downstream reads one
+    // already-decided pair: the delay this edge emits and the constant the
+    // constraint half still owes. `Prop` folds the constant into the delay and
+    // leaves nothing to subtract; the sum of the two halves is the same either way.
+    let edge = |delays: &Array2<f64>, transitions: &Array2<f64>| {
+        let delay = prop_profile(delays, anchor);
+        let crossing = crossing(delays, anchor);
+        let transition = prop_profile(transitions, anchor);
+        match placement {
+            OffsetPlacement::Setup => EdgeRef {
+                delay,
+                transition,
+                crossing,
+            },
+            OffsetPlacement::Prop => EdgeRef {
+                delay: delay - crossing,
+                transition,
+                crossing: 0.0,
+            },
+        }
+    };
+
     Some(RefArc {
         col,
         row,
+        anchor,
         lut_template: timing_tables.lut_template.clone(),
         related_pin: related_pin.to_owned(),
-        cell_fall: cell_fall.slice(s![row, ..]).to_owned(),
-        cell_rise: cell_rise.slice(s![row, ..]).to_owned(),
-        rise_trans: rise_trans.slice(s![row, ..]).to_owned(),
-        fall_trans: fall_trans.slice(s![row, ..]).to_owned(),
+        rise: edge(cell_rise, rise_trans),
+        fall: edge(cell_fall, fall_trans),
     })
 }
 
@@ -486,10 +774,17 @@ mod tests {
             row: 1,
             related_pin: "A".to_owned(),
             lut_template: "template".to_owned(),
-            rise_trans: Array1::from(vec![0.1, 0.2, 0.3]) * scale,
-            fall_trans: Array1::from(vec![0.15, 0.25, 0.35]) * scale,
-            cell_rise: Array1::from(vec![1.0, 2.0, 3.0]) * scale,
-            cell_fall: Array1::from(vec![1.5, 2.5, 3.5]) * scale,
+            anchor: Anchor::Middle,
+            rise: EdgeRef {
+                delay: Array1::from(vec![1.0, 2.0, 3.0]) * scale,
+                transition: Array1::from(vec![0.1, 0.2, 0.3]) * scale,
+                crossing: 2.0 * scale,
+            },
+            fall: EdgeRef {
+                delay: Array1::from(vec![1.5, 2.5, 3.5]) * scale,
+                transition: Array1::from(vec![0.15, 0.25, 0.35]) * scale,
+                crossing: 2.5 * scale,
+            },
         };
 
         let mean = mean_reference_arc(vec![arc(1.0), arc(2.0)]).expect("two arcs to average");
@@ -513,10 +808,52 @@ mod tests {
                 );
             }
         };
-        close(&mean.rise_trans, [0.15, 0.3, 0.45], "rise_trans");
-        close(&mean.fall_trans, [0.225, 0.375, 0.525], "fall_trans");
-        close(&mean.cell_rise, [1.5, 3.0, 4.5], "cell_rise");
-        close(&mean.cell_fall, [2.25, 3.75, 5.25], "cell_fall");
+        close(&mean.rise.transition, [0.15, 0.3, 0.45], "rise transition");
+        close(
+            &mean.fall.transition,
+            [0.225, 0.375, 0.525],
+            "fall transition",
+        );
+        close(&mean.rise.delay, [1.5, 3.0, 4.5], "rise delay");
+        close(&mean.fall.delay, [2.25, 3.75, 5.25], "fall delay");
+    }
+
+    /// The crossing is a scalar, so it is not covered by the array assertions
+    /// above -- and it is the value the constraint half is offset by, so a mean
+    /// reference carrying one arc's crossing would charge every input that arc's
+    /// offset.
+    ///
+    /// Killed by: `mean_reference_arc` summed the crossings but left them
+    /// undivided -- `x.rise.crossing /= 1.0` in place of `/= n`. That also reddens
+    /// two downstream users of the pooled reference, but the sibling above,
+    /// `mean_reference_arc_averages_all_four_table_families`, stays green under it
+    /// -- which is what shows the crossing is pinned here and nowhere else.
+    #[test]
+    fn mean_reference_arc_averages_the_crossings_alongside_the_arrays() {
+        // Crossings 2 and 4 for rise, 2.5 and 5 for fall: means 3 and 3.75, both
+        // distinct from either input and from each other.
+        let arc = |scale: f64| RefArc {
+            col: 1,
+            row: 1,
+            related_pin: "A".to_owned(),
+            lut_template: "template".to_owned(),
+            anchor: Anchor::Middle,
+            rise: EdgeRef {
+                delay: Array1::from(vec![1.0, 2.0, 3.0]),
+                transition: Array1::from(vec![0.1, 0.2, 0.3]),
+                crossing: 2.0 * scale,
+            },
+            fall: EdgeRef {
+                delay: Array1::from(vec![1.5, 2.5, 3.5]),
+                transition: Array1::from(vec![0.15, 0.25, 0.35]),
+                crossing: 2.5 * scale,
+            },
+        };
+
+        let mean = mean_reference_arc(vec![arc(1.0), arc(2.0)]).expect("two arcs to average");
+
+        assert!((mean.rise.crossing - 3.0).abs() < 1e-10, "{:?}", mean.rise);
+        assert!((mean.fall.crossing - 3.75).abs() < 1e-10, "{:?}", mean.fall);
     }
 
     // --- References::delay_for ---------------------------------------------
@@ -539,10 +876,17 @@ mod tests {
             row: 0,
             related_pin: "A".to_owned(),
             lut_template: "T".to_owned(),
-            rise_trans: Array1::from(vec![0.0]),
-            fall_trans: Array1::from(vec![0.0]),
-            cell_rise: Array1::from(vec![delay]),
-            cell_fall: Array1::from(vec![0.0]),
+            anchor: Anchor::Middle,
+            rise: EdgeRef {
+                delay: Array1::from(vec![delay]),
+                transition: Array1::from(vec![0.0]),
+                crossing: delay,
+            },
+            fall: EdgeRef {
+                delay: Array1::from(vec![0.0]),
+                transition: Array1::from(vec![0.0]),
+                crossing: 0.0,
+            },
         };
 
         // One converted output, and a cell-wide mean distinguishable from it so that
@@ -567,7 +911,8 @@ mod tests {
                 references
                     .delay_for("Q")
                     .expect("a converted output")
-                    .cell_rise[0],
+                    .rise
+                    .delay[0],
                 expected,
                 "{:?}",
                 mode
@@ -603,37 +948,249 @@ mod tests {
         Array2::from_shape_vec((3, 3), (0..9).map(|i| base + i as f64).collect::<Vec<_>>()).unwrap()
     }
 
-    /// Killed by: `select_reference_arc` took `col` as `cell_rise.len_of(Axis(1)) * 0` instead of `/ 2`.
-    #[test]
-    fn select_reference_arc_picks_the_middle_row_and_column() {
-        let tt = TimingTables {
+    fn all_nine() -> TimingTables {
+        TimingTables {
+            slews: None,
+            loads: None,
             lut_template: "T".to_owned(),
+            sense: Some(TimingSense::Positive),
             cell_rise: Some(nine(0.0)),
             cell_fall: Some(nine(100.0)),
             rise_trans: Some(nine(200.0)),
             fall_trans: Some(nine(300.0)),
-        };
-        let arc = select_reference_arc("CK", &tt).expect("all four tables present");
+        }
+    }
+
+    /// Killed by: `select_reference_arc` took `col` as `cell_rise.len_of(Axis(1)) * 0` instead of `/ 2`.
+    #[test]
+    fn select_reference_arc_picks_the_middle_row_and_column() {
+        let arc = select_reference_arc("CK", &all_nine(), Anchor::Middle, OffsetPlacement::Setup)
+            .expect("all four tables present");
         assert_eq!(arc.row, 1);
         assert_eq!(arc.col, 1);
         assert_eq!(arc.related_pin, "CK");
         assert_eq!(arc.lut_template, "T");
+        assert_eq!(arc.anchor, Anchor::Middle);
         // middle row of cell_rise == [3,4,5]
-        assert_eq!(arc.cell_rise, Array1::from(vec![3.0, 4.0, 5.0]));
-        assert_eq!(arc.cell_fall, Array1::from(vec![103.0, 104.0, 105.0]));
+        assert_eq!(arc.rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
+        assert_eq!(arc.fall.delay, Array1::from(vec![103.0, 104.0, 105.0]));
+    }
+
+    /// `Prop` moves the constant out of the constraint and into the delay, and does
+    /// nothing else: the two halves still sum to the same arc.
+    ///
+    /// Derivation from the model. `nine(0)` is `[[0,1,2],[3,4,5],[6,7,8]]`, so under
+    /// `Middle` the rise profile is row 1, `[3,4,5]`, and the crossing is the middle
+    /// element, `4`. `Setup` emits that profile whole and leaves `4` for the
+    /// constraint to subtract; `Prop` emits `[3,4,5] - 4 = [-1,0,1]` and leaves
+    /// nothing. `setup + delay` is `x - 4 + [3,4,5]` either way.
+    ///
+    /// A transition is the output's own slew, not a delay referred to anything, so it
+    /// is the same profile under both placements.
+    ///
+    /// Killed by: `select_reference_arc`'s `Prop` arm kept `crossing` rather than
+    /// zeroing it, so the constant was charged to both halves at once. Observed to
+    /// redden this test alone -- no other test asks for `Prop`.
+    #[test]
+    fn prop_placement_moves_the_crossing_into_the_delay_and_leaves_none_to_subtract() {
+        let setup = select_reference_arc("CK", &all_nine(), Anchor::Middle, OffsetPlacement::Setup)
+            .expect("all four tables present");
+        let prop = select_reference_arc("CK", &all_nine(), Anchor::Middle, OffsetPlacement::Prop)
+            .expect("all four tables present");
+
+        assert_eq!(setup.rise.delay, Array1::from(vec![3.0, 4.0, 5.0]));
+        assert_eq!(setup.rise.crossing, 4.0);
+
+        assert_eq!(prop.rise.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
+        assert_eq!(prop.rise.crossing, 0.0);
+        // cell_fall's middle row is [103,104,105] and its crossing 104.
+        assert_eq!(prop.fall.delay, Array1::from(vec![-1.0, 0.0, 1.0]));
+        assert_eq!(prop.fall.crossing, 0.0);
+
+        // The output's slew is not a delay and moves with neither placement.
+        assert_eq!(prop.rise.transition, setup.rise.transition);
+        assert_eq!(prop.fall.transition, setup.fall.transition);
     }
 
     /// Killed by: `select_reference_arc` read `cell_fall` as `.unwrap_or(cell_rise)` instead of `?`, so a missing table no longer refused the arc.
     #[test]
     fn select_reference_arc_requires_all_four_tables() {
         let tt = TimingTables {
+            slews: None,
+            loads: None,
             lut_template: "T".to_owned(),
+            sense: Some(TimingSense::Positive),
             cell_rise: Some(nine(0.0)),
             cell_fall: None, // missing -> no reference arc
             rise_trans: Some(nine(200.0)),
             fall_trans: Some(nine(300.0)),
         };
-        assert!(select_reference_arc("CK", &tt).is_none());
+        assert!(select_reference_arc("CK", &tt, Anchor::Middle, OffsetPlacement::Setup).is_none());
+    }
+
+    // --- anchor helpers ----------------------------------------------------
+
+    /// A 2x3 table whose rows and columns are all distinct, so a helper that
+    /// collapsed the wrong axis, or picked the wrong index along the right one,
+    /// cannot land on the expected values by coincidence.
+    ///
+    ///     [[1, 2, 3],
+    ///      [7, 11, 15]]
+    fn oblong() -> Array2<f64> {
+        Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 7.0, 11.0, 15.0]).unwrap()
+    }
+
+    /// Killed by: `prop_profile`'s `Average` arm averaged `Axis(1)` rather than `Axis(0)`, collapsing the load axis where the slew axis was asked for. Observed to redden this test alone; mutating the `Middle` arm reddens six neighbours with it, because every default-anchor run reads that arm.
+    #[test]
+    fn prop_profile_is_the_middle_row_or_the_mean_down_the_rows() {
+        // 2 rows, so the middle row is index 2/2 = 1: [7, 11, 15].
+        assert_eq!(
+            prop_profile(&oblong(), Anchor::Middle),
+            Array1::from(vec![7.0, 11.0, 15.0])
+        );
+        // Column means: (1+7)/2, (2+11)/2, (3+15)/2.
+        assert_eq!(
+            prop_profile(&oblong(), Anchor::Average),
+            Array1::from(vec![4.0, 6.5, 9.0])
+        );
+    }
+
+    /// Killed by: `slew_profile`'s `Average` arm averaged `Axis(0)` rather than `Axis(1)`, collapsing the slew axis where the load axis was asked for. Observed to redden this test alone.
+    #[test]
+    fn slew_profile_is_the_middle_column_or_the_mean_across_the_columns() {
+        // 3 columns, so the middle column is index 3/2 = 1: [2, 11].
+        assert_eq!(
+            slew_profile(&oblong(), Anchor::Middle),
+            Array1::from(vec![2.0, 11.0])
+        );
+        // Row means: (1+2+3)/3 = 2, (7+11+15)/3 = 11. Deliberately equal to the
+        // middle column here, so this pair alone would not discriminate -- the
+        // Average assertion below on a table where they differ is what does.
+        assert_eq!(
+            slew_profile(&oblong(), Anchor::Average),
+            Array1::from(vec![2.0, 11.0])
+        );
+        // [[0, 0, 3], [0, 0, 3]]: middle column 0, row mean 1. The two disagree.
+        let skewed = Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 3.0, 0.0, 0.0, 3.0]).unwrap();
+        assert_eq!(
+            slew_profile(&skewed, Anchor::Middle),
+            Array1::from(vec![0.0, 0.0])
+        );
+        assert_eq!(
+            slew_profile(&skewed, Anchor::Average),
+            Array1::from(vec![1.0, 1.0])
+        );
+    }
+
+    /// The crossing is where the two profiles meet, so it must be the element the
+    /// row profile and the column profile share -- not a value read off either
+    /// axis independently.
+    ///
+    /// Killed by: `crossing`'s `Average` arm returned `t.sum()` instead of `t.mean()`. Observed to redden this test alone; mutating the `Middle` arm to `[[0, t.len_of(Axis(1)) / 2]]` reddens nine neighbours with it, because every default-anchor run subtracts that value.
+    #[test]
+    fn crossing_is_the_middle_element_or_the_grand_mean() {
+        // prop_profile(Middle) is row 1 = [7, 11, 15] and slew_profile(Middle) is
+        // column 1 = [2, 11]; they meet at 11.
+        assert_eq!(crossing(&oblong(), Anchor::Middle), 11.0);
+        // (1+2+3+7+11+15)/6 = 39/6 = 6.5.
+        assert_eq!(crossing(&oblong(), Anchor::Average), 6.5);
+    }
+
+    // --- timing_sense --------------------------------------------------------
+
+    /// Killed by: `TimingSense::from_expr` answered `None` for `"non_unate"`. Observed to redden this test alone -- the engine treats an unrecognised spelling exactly as `non_unate`, so its skip still fires with the same message; mutating the `"positive_unate"` arm instead reddens three routing tests with it.
+    #[test]
+    fn timing_sense_from_expr_maps_the_three_liberty_spellings_and_nothing_else() {
+        assert_eq!(
+            TimingSense::from_expr("positive_unate"),
+            Some(TimingSense::Positive)
+        );
+        assert_eq!(
+            TimingSense::from_expr("negative_unate"),
+            Some(TimingSense::Negative)
+        );
+        assert_eq!(
+            TimingSense::from_expr("non_unate"),
+            Some(TimingSense::NonUnate)
+        );
+
+        // Anything else says nothing about the input's direction, and is not
+        // guessed at.
+        assert_eq!(TimingSense::from_expr("positive"), None);
+        assert_eq!(TimingSense::from_expr(""), None);
+    }
+
+    /// The direction the input was moving in, given the direction the output was.
+    ///
+    /// Derivation, from the model rather than from the code. `timing_sense`
+    /// describes how an input pin logically affects an output pin (RM p.328):
+    /// `positive_unate` combines an incoming rise with a local rise, and
+    /// `negative_unate` combines an incoming rise with a local fall (RM p.329),
+    /// where "incoming" is the input side and "local" this cell's output. A delay
+    /// family names the OUTPUT -- `cell_rise` pairs with `rise_transition`, and a
+    /// transition is the output's own slew -- so reading that pairing backwards
+    /// gives the input: the same direction under `positive_unate`, the opposite
+    /// under `negative_unate`. `non_unate` says the same input edge can drive the
+    /// output either way, so it determines nothing.
+    ///
+    /// Killed by: `input_transition`'s `NonUnate` arm returned `Some(output)`. Observed to redden this test alone: the engine skips a non-unate arc before it would ever ask, so only this test reads that arm. Mutating the `Negative` arm reddens the engine's routing tests with it.
+    #[test]
+    fn input_transition_is_the_output_direction_read_back_through_the_sense() {
+        use TimingSense::*;
+
+        assert_eq!(
+            input_transition(Positive, Transition::Rise),
+            Some(Transition::Rise)
+        );
+        assert_eq!(
+            input_transition(Positive, Transition::Fall),
+            Some(Transition::Fall)
+        );
+
+        assert_eq!(
+            input_transition(Negative, Transition::Rise),
+            Some(Transition::Fall)
+        );
+        assert_eq!(
+            input_transition(Negative, Transition::Fall),
+            Some(Transition::Rise)
+        );
+
+        assert_eq!(input_transition(NonUnate, Transition::Rise), None);
+        assert_eq!(input_transition(NonUnate, Transition::Fall), None);
+    }
+
+    // --- Anchor::from_str / OffsetPlacement::from_str -----------------------
+
+    /// Killed by: `Anchor::from_str` mapped `"middle"` to `Anchor::Average`.
+    #[test]
+    fn anchor_from_str_maps_each_spelling() {
+        assert_eq!("middle".parse::<Anchor>(), Ok(Anchor::Middle));
+        assert_eq!("average".parse::<Anchor>(), Ok(Anchor::Average));
+
+        let err = "bogus".parse::<Anchor>().unwrap_err();
+        assert!(
+            err.contains("unknown anchor"),
+            "error message was {:?}",
+            err
+        );
+    }
+
+    /// Killed by: `OffsetPlacement::from_str` mapped `"setup"` to `OffsetPlacement::Prop`.
+    #[test]
+    fn offset_placement_from_str_maps_each_spelling() {
+        assert_eq!(
+            "setup".parse::<OffsetPlacement>(),
+            Ok(OffsetPlacement::Setup)
+        );
+        assert_eq!("prop".parse::<OffsetPlacement>(), Ok(OffsetPlacement::Prop));
+
+        let err = "bogus".parse::<OffsetPlacement>().unwrap_err();
+        assert!(
+            err.contains("unknown offset placement"),
+            "error message was {:?}",
+            err
+        );
     }
 
     // --- extract_timing_tables_from_arc: lut_template precedence ----------
@@ -775,7 +1332,10 @@ mod tests {
     fn tables(cell_rise: Option<f64>, cell_fall: Option<f64>, trans: Option<f64>) -> TimingTables {
         let fill = |v: f64| Array2::from_shape_vec((2, 2), vec![v; 4]).unwrap();
         TimingTables {
+            slews: None,
+            loads: None,
             lut_template: "T".to_owned(),
+            sense: Some(TimingSense::Positive),
             cell_rise: cell_rise.map(fill),
             cell_fall: cell_fall.map(fill),
             rise_trans: trans.map(fill),
@@ -811,7 +1371,10 @@ mod tests {
         acc.accumulate(tables(Some(10.0), None, None), "D", "Q");
 
         let odd = TimingTables {
+            slews: None,
+            loads: None,
             lut_template: "T".to_owned(),
+            sense: Some(TimingSense::Positive),
             cell_rise: Some(Array2::from_shape_vec((1, 3), vec![99.0; 3]).unwrap()),
             cell_fall: None,
             rise_trans: None,

@@ -6,14 +6,21 @@
 
 use crate::arcs::REFERENCE_FAMILIES;
 use crate::pins::{cell_qualifies, is_output_pin, timing_leaves};
-use liberty_parser::liberty::Group;
+use liberty_parser::{
+    ast::Value,
+    liberty::{Attribute, Group},
+};
 use std::collections::BTreeMap;
 
-/// Which of the two axes a lookup template declares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The two axes a lookup template declares, and the points along each.
+///
+/// The values, not merely their presence: the report labels its tables with them, so
+/// a residual can be read against the slew and load it occurs at rather than a row
+/// and column number. `None` is an axis the template does not declare at all.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Axes {
-    pub(crate) slew: bool,
-    pub(crate) load: bool,
+    pub(crate) slew: Option<Vec<f64>>,
+    pub(crate) load: Option<Vec<f64>>,
 }
 
 /// The lookup templates a library declares, and the axes each one carries.
@@ -35,8 +42,8 @@ impl Templates {
                     (
                         g.name.clone(),
                         Axes {
-                            slew: g.attributes.contains_key("index_1"),
-                            load: g.attributes.contains_key("index_2"),
+                            slew: axis_values(g, "index_1"),
+                            load: axis_values(g, "index_2"),
                         },
                     )
                 })
@@ -64,18 +71,56 @@ impl Templates {
         match self.0.get(name) {
             None => Some("is not declared by this library"),
             Some(Axes {
-                slew: false,
-                load: false,
+                slew: None,
+                load: None,
             }) => Some("declares neither a slew nor a load axis"),
-            Some(Axes { slew: false, .. }) => {
+            Some(Axes { slew: None, .. }) => {
                 Some("declares no slew axis, which the setup constraint is indexed on")
             }
-            Some(Axes { load: false, .. }) => {
+            Some(Axes { load: None, .. }) => {
                 Some("declares no load axis, which the clock-to-output delay is indexed on")
             }
             Some(_) => None,
         }
     }
+
+    /// The axes of a named template, for labelling a table indexed on it.
+    pub(crate) fn axes(&self, name: &str) -> Option<&Axes> {
+        self.0.get(name)
+    }
+}
+
+/// The numbers an `index_1` / `index_2` attribute declares, however the parser split
+/// them.
+///
+/// Liberty writes an axis either as one quoted, comma-separated string or as a list of
+/// numbers, and a template may carry an axis attribute that is empty. An axis with no
+/// points is treated as absent, since it can label nothing and satisfies no half of the
+/// conversion.
+pub(crate) fn axis_values(group: &Group, axis: &str) -> Option<Vec<f64>> {
+    let attribute = group.attributes.get(axis)?;
+    let mut values = Vec::new();
+
+    // `index_1 ("0.01, 0.1")` is a complex attribute, `index_1 : 0.01` a simple one, and
+    // both are legal. Reading only one of the two would report a declared axis as absent
+    // and skip every arc indexed on it.
+    for value in attribute.iter().flat_map(|a| match a {
+        Attribute::Simple(v) => std::slice::from_ref(v),
+        Attribute::Complex(v) => v.as_slice(),
+    }) {
+        match value {
+            Value::Float(x) => values.push(*x),
+            Value::FloatGroup(x) => values.extend(x.iter().copied()),
+            Value::String(s) | Value::Expression(s) => values.extend(
+                s.split(',')
+                    .filter_map(|part| part.trim().parse::<f64>().ok()),
+            ),
+            // An axis is numeric; anything else is not a point on one.
+            Value::Bool(_) => {}
+        }
+    }
+
+    (!values.is_empty()).then_some(values)
 }
 
 /// Every characterisation table in a candidate cell that names a lookup template the
@@ -165,6 +210,42 @@ library(template_test) {
         );
     }
 
+    /// An axis is read as the points it declares, not merely as present.
+    ///
+    /// Liberty writes `index_1 ("0.01, 0.1")` as a *complex* attribute — a
+    /// parenthesised list — and `index_1 : 0.01` as a simple one. Reading only the
+    /// simple form reports a declared axis as absent, which then skips at arc scope
+    /// every arc indexed on it: a library the conversion handles becomes one it
+    /// refuses, with a warning blaming the input. The values themselves matter because
+    /// the report captions its tables with them, and a caption is only worth having if
+    /// it is the slew and load the table was measured at.
+    ///
+    /// Killed by: `axis_values` dropped the last point of every axis, so `BOTH` read as
+    /// one slew and one load.
+    ///
+    /// A coarser mutation — matching `Attribute::Simple` alone, so the complex form is
+    /// skipped and every declared axis reads as absent — reddens 26 tests across four
+    /// modules, because arc-scope then refuses every arc in every fixture. That proves
+    /// the function is load-bearing, not that this test pins the values, which is why
+    /// the recorded mutation is the narrower one.
+    #[test]
+    fn an_axis_is_read_as_its_points_however_liberty_spells_the_attribute() {
+        let lib = liberty_parser::parse_lib(TEMPLATE_LIB).expect("parse fixture");
+        let templates = Templates::of_library(&lib[0]);
+
+        let both = templates.axes("BOTH").expect("BOTH is declared");
+        assert_eq!(both.slew.as_deref(), Some([0.01, 0.1].as_slice()));
+        assert_eq!(both.load.as_deref(), Some([0.005, 0.05].as_slice()));
+
+        // An axis the template does not declare stays absent rather than empty, which
+        // is what `missing_axis` reads to refuse the arc.
+        let slew_only = templates.axes("SLEW_ONLY").expect("SLEW_ONLY is declared");
+        assert_eq!(slew_only.slew.as_deref(), Some([0.01, 0.1].as_slice()));
+        assert_eq!(slew_only.load, None);
+
+        assert!(templates.axes("NEVER_DECLARED").is_none());
+    }
+
     // --- undeclared_table_templates ----------------------------------------
 
     /// Two cells whose `cell_rise` names the same undeclared template. `CANDIDATE`
@@ -187,6 +268,7 @@ library(undeclared_test) {
       function: "IQ";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(MISSING) { values("1.0, 2.0", "3.0, 4.0"); }
       }
@@ -199,6 +281,7 @@ library(undeclared_test) {
       function: "A";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(MISSING) { values("1.0, 2.0", "3.0, 4.0"); }
       }

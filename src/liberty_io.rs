@@ -274,12 +274,14 @@ library(io_test) {
       function: "IQ";
       timing() {
         related_pin: "D";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(T) { values("0.1, 0.2", "0.3, 0.4"); }
         cell_fall(T) { values("0.11, 0.21", "0.31, 0.41"); }
       }
       timing() {
         related_pin: "G";
+        timing_sense : positive_unate;
         timing_type: rising_edge;
         cell_rise(T) { values("0.5, 0.6", "0.7, 0.8"); }
         cell_fall(T) { values("0.51, 0.61", "0.71, 0.81"); }
@@ -293,6 +295,7 @@ library(io_test) {
       function: "A";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(T) { values("1.0, 2.0", "3.0, 4.0"); }
       }

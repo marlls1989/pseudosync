@@ -2,9 +2,11 @@
 //! against, and how a library is walked.
 
 use crate::arcs::{
-    arc_domains, extract_timing_tables_from_arc, mean_reference_arc, select_reference_arc,
-    ArcAccumulator, RefArc, ReferenceMode, References, WhenMerge,
+    arc_domains, extract_timing_tables_from_arc, input_transition, mean_reference_arc,
+    select_reference_arc, slew_profile, Anchor, ArcAccumulator, EdgeRef, OffsetPlacement, RefArc,
+    ReferenceMode, References, TableAccumulator, TimingSense, Transition, WhenMerge,
 };
+use crate::conditions::{collision_classes, ClassId, Condition};
 use crate::emit::{
     convert_latch_to_flipflop, create_hold_timing_group, create_pseudo_output_timing_arc,
     create_setup_timing_group, generate_pseudo_lut_templates,
@@ -13,9 +15,10 @@ use crate::pins::{
     cell_qualifies, constraint_targets_mut, is_output_pin, timing_leaves, timing_leaves_mut,
 };
 use crate::report::{
-    collect_arc_errors, ArcError, CellReport, ConditionedArc, LibraryReport, Refusal, FALL, RISE,
+    collect_arc_errors, ArcError, CellReport, ConditionedArc, ConstraintArcs, LibraryReport,
+    Refusal, StateClass, FALL, RISE,
 };
-use crate::templates::Templates;
+use crate::templates::{Axes, Templates};
 use itertools::Itertools;
 use liberty_parser::{
     ast::Value,
@@ -35,91 +38,281 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 /// `arcs` is already restricted to converted outputs by the caller, which is what
 /// makes the mixed-source rule hold: a source driving both a converted and a skipped
 /// output is averaged over the converted ones alone.
+/// The state each present delay family of one arc describes once its input has
+/// settled, in collection order beside the raw arcs.
+///
+/// Engine-internal: the report keeps only the class each of these fell into.
+enum ArcPost {
+    /// A whenless arc, which is the catch-all for its output and edge rather than
+    /// a state of its own.
+    CatchAll,
+    /// The `when` could not be read, so the arc describes no state this tool can
+    /// name. It still converts -- nothing in the split consults a condition.
+    Unreadable,
+    /// The post-settled condition per output edge, present for the delay families
+    /// the arc actually carries, beside the `when` they were built from.
+    Settled {
+        /// The source condition, which remembers the library's own spelling. The
+        /// report names a class's members by that spelling rather than by a second
+        /// copy of the attribute, so a member is always listed with the very text
+        /// that was parsed into the class it is listed under.
+        source: Condition,
+        rise: Option<Condition>,
+        fall: Option<Condition>,
+    },
+}
+
+/// Group one cell's arcs by the post-settled state they describe, writing each
+/// class back onto the arc's own edge field and returning the report's view of them.
+///
+/// One call per cell over every condition at once, so equivalence is decided across
+/// the whole cell rather than within a pin pair: two sources whose conditions denote
+/// the same function collide there, and that collision is exactly what a per-state
+/// model would have to resolve.
+///
+/// A whenless arc is the catch-all of its output and edge -- it covers whatever the
+/// conditioned arcs do not -- and takes a row of its own rather than a class. An arc
+/// whose `when` could not be read takes neither: it was warned about where it was
+/// read, and nothing can be said about the state it describes.
+fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<StateClass> {
+    // Flattened in collection order, with the way back to the arc and edge each
+    // came from, because `collision_classes` numbers by first appearance.
+    let mut conditions: Vec<Condition> = Vec::new();
+    let mut origins: Vec<(usize, Transition)> = Vec::new();
+    for (index, entry) in post.iter().enumerate() {
+        if let ArcPost::Settled { rise, fall, .. } = entry {
+            for (edge, condition) in [(Transition::Rise, rise), (Transition::Fall, fall)] {
+                if let Some(condition) = condition {
+                    conditions.push(condition.clone());
+                    origins.push((index, edge));
+                }
+            }
+        }
+    }
+
+    let ids = collision_classes(&conditions);
+    for ((index, edge), id) in origins.iter().zip(ids.iter()) {
+        match edge {
+            Transition::Rise => raw_arcs[*index].class_rise = Some(*id),
+            Transition::Fall => raw_arcs[*index].class_fall = Some(*id),
+        }
+    }
+
+    // One row per (output, edge, class), plus one catch-all row per (output, edge).
+    // Keyed on `Option<ClassId>` so the catch-all sorts before every class, and
+    // built through an index so the rows keep first-appearance order.
+    let mut rows: Vec<StateClass> = Vec::new();
+    let mut index_of: BTreeMap<(String, Transition, Option<ClassId>), usize> = BTreeMap::new();
+    let mut place = |output: &str,
+                     edge: Transition,
+                     class: Option<ClassId>,
+                     condition: String,
+                     member: (String, Option<String>)| {
+        let slot = index_of
+            .entry((output.to_owned(), edge, class))
+            .or_insert_with(|| {
+                rows.push(StateClass {
+                    output: output.to_owned(),
+                    edge,
+                    condition: class.map(|_| condition),
+                    members: Vec::new(),
+                });
+                rows.len() - 1
+            });
+        rows[*slot].members.push(member);
+    };
+
+    for (arc, entry) in raw_arcs.iter().zip(post.iter()) {
+        match entry {
+            ArcPost::Unreadable => {}
+            ArcPost::CatchAll => {
+                let member = (arc.source.clone(), None);
+                for (edge, present) in [
+                    (Transition::Rise, arc.cell_rise.is_some()),
+                    (Transition::Fall, arc.cell_fall.is_some()),
+                ] {
+                    if present {
+                        place(&arc.output, edge, None, String::new(), member.clone());
+                    }
+                }
+            }
+            ArcPost::Settled { source, rise, fall } => {
+                let member = (arc.source.clone(), Some(source.as_written()));
+                for (edge, condition, class) in [
+                    (Transition::Rise, rise, arc.class_rise),
+                    (Transition::Fall, fall, arc.class_fall),
+                ] {
+                    if let (Some(condition), Some(_)) = (condition, class) {
+                        place(
+                            &arc.output,
+                            edge,
+                            class,
+                            condition.liberty(),
+                            member.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    rows
+}
+
+/// The direction the input was moving in, for an arc that survived the sense skip.
+///
+/// Failing loudly rather than defaulting, because the skip above is what makes this
+/// total: if it is ever relaxed, the result is an unambiguous defect report about
+/// pseudosync and not a constraint quietly filed under the wrong edge.
+fn derived_input_edge(
+    sense: TimingSense,
+    output_edge: Transition,
+    related_pin: &str,
+    outpin_name: &str,
+) -> Transition {
+    input_transition(sense, output_edge).unwrap_or_else(|| {
+        panic!(
+            "internal: arc {} -> {} survived the sense skip with no derivable input direction",
+            related_pin, outpin_name
+        )
+    })
+}
+
+/// The reference half a table of `family` is charged against.
+///
+/// Keyed on the table family and not on the input's direction, because the
+/// clock-to-output delay of an output rise is what a `cell_rise` table has to be
+/// referred to whatever made the input move that way. The sense decides which
+/// constraint the result is written to, never which delay it is measured from.
+fn family_reference<'a>(r: &'a RefArc, family: &str) -> &'a EdgeRef {
+    match family {
+        "cell_rise" => &r.rise,
+        _ => &r.fall,
+    }
+}
+
+/// Reduce the input-to-output arcs of one source pin to a single constraint.
+///
+/// The mean arc from the source to every output it drives, sampled at the
+/// reference column, minus the clock-to-output delay that the pseudo-flop model
+/// will charge for that path. Which delay that is depends on `mode`; see
+/// [`ReferenceMode`].
+///
+/// `arcs` is already restricted to converted outputs by the caller, which is what
+/// makes the mixed-source rule hold: a source driving both a converted and a skipped
+/// output is averaged over the converted ones alone. It is grouped by the direction
+/// the INPUT was moving in, so `input_edge` selects the entries this constraint is
+/// built from.
 fn constraints_from_arcs(
-    arcs: &BTreeMap<(String, String), Array2<f64>>,
+    arcs: &ConstraintArcs,
+    input_edge: Transition,
     ref_arcs: &BTreeMap<String, RefArc>,
     mean_ref: &RefArc,
     mode: ReferenceMode,
-    select: fn(&RefArc) -> &Array1<f64>,
+    anchor: Anchor,
 ) -> BTreeMap<String, Array1<f64>> {
-    let col = mean_ref.col;
-
     arcs.iter()
-        .group_by(|((src, _), _)| src.clone())
+        .filter(|((_, _, edge, _), _)| *edge == input_edge)
+        .group_by(|((src, ..), _)| src.clone())
         .into_iter()
         .filter_map(|(src, group)| {
             let mut n = 0.0;
             let mut arc_sum: Option<Array2<f64>> = None;
             let mut ref_sum = 0.0;
+            let mut families: BTreeSet<&'static str> = BTreeSet::new();
 
-            for ((_, outpin), table) in group {
+            for ((_, outpin, _, family), table) in group {
                 n += 1.0;
+                families.insert(family);
                 arc_sum = Some(match arc_sum {
                     Some(sum) => sum + table,
                     None => table.clone(),
                 });
-                // Only the outputs this source actually drives contribute, so a
-                // rail-private input is referenced against its own rail alone.
-                if mode == ReferenceMode::PerOutput {
+                match mode {
+                    // Only the outputs this source actually drives contribute, so a
+                    // rail-private input is referenced against its own rail alone.
+                    //
                     // Substituting the cell-wide mean here would charge this input a
                     // delay measured on a *different* output, for a path nothing
                     // characterised. The caller's restriction to converted outputs
                     // makes that unreachable, so this fails loudly instead: if the
                     // restriction is ever relaxed, the failure is unambiguous rather
                     // than a plausible number in the emitted library.
-                    ref_sum += ref_arcs.get(outpin).map(|r| select(r)[col]).unwrap_or_else(|| {
-                        panic!(
-                            "arc to output {} reached the constraint arithmetic with no reference of its own",
-                            outpin
-                        )
-                    });
+                    ReferenceMode::PerOutput => {
+                        ref_sum += ref_arcs.get(outpin).map(|r| family_reference(r, family).crossing).unwrap_or_else(|| {
+                            panic!(
+                                "arc to output {} reached the constraint arithmetic with no reference of its own",
+                                outpin
+                            )
+                        })
+                    }
+                    ReferenceMode::Pooled => {
+                        ref_sum += family_reference(mean_ref, family).crossing
+                    }
                 }
             }
 
-            let reference = match mode {
-                // Left as the exact original expression so this mode stays
-                // bit-identical to the pooled behaviour it replaces.
-                ReferenceMode::Pooled => select(mean_ref)[col],
-                ReferenceMode::PerOutput => ref_sum / n,
+            let reference = match (mode, families.iter().next()) {
+                // Every entry of a single-family group charges the same constant, and
+                // (c + c + ... + c) / n is not bit-identical to c, so the original
+                // single-subtraction expression is kept rather than reconstructed. A
+                // group of mixed families -- which takes two senses on one pin pair to
+                // produce -- has no single constant, and takes the summed path below.
+                (ReferenceMode::Pooled, Some(family)) if families.len() == 1 => {
+                    family_reference(mean_ref, family).crossing
+                }
+                (ReferenceMode::Pooled, _) | (ReferenceMode::PerOutput, _) => ref_sum / n,
             };
 
-            arc_sum.map(|sum| (src, (sum / n).slice(s![.., col]).to_owned() - reference))
+            arc_sum.map(|sum| (src, slew_profile(&(sum / n), anchor) - reference))
         })
         .collect()
 }
 
-/// Calculate setup constraints for all input pins
+/// Calculate setup constraints for all input pins, one map per input direction.
 fn calculate_setup_constraints(
-    cell_rise_arcs: &BTreeMap<(String, String), Array2<f64>>,
-    cell_fall_arcs: &BTreeMap<(String, String), Array2<f64>>,
+    constraint_arcs: &ConstraintArcs,
     ref_arcs: &BTreeMap<String, RefArc>,
     mean_ref: &RefArc,
     mode: ReferenceMode,
+    anchor: Anchor,
 ) -> (BTreeMap<String, Array1<f64>>, BTreeMap<String, Array1<f64>>) {
-    let setup_rise =
-        constraints_from_arcs(cell_rise_arcs, ref_arcs, mean_ref, mode, |r| &r.cell_rise);
-    let setup_fall =
-        constraints_from_arcs(cell_fall_arcs, ref_arcs, mean_ref, mode, |r| &r.cell_fall);
+    let setup_input_rise = constraints_from_arcs(
+        constraint_arcs,
+        Transition::Rise,
+        ref_arcs,
+        mean_ref,
+        mode,
+        anchor,
+    );
+    let setup_input_fall = constraints_from_arcs(
+        constraint_arcs,
+        Transition::Fall,
+        ref_arcs,
+        mean_ref,
+        mode,
+        anchor,
+    );
 
-    (setup_rise, setup_fall)
+    (setup_input_rise, setup_input_fall)
 }
 
 /// Calculate hold constraints from setup constraints (negated)
 fn calculate_hold_constraints(
-    setup_rise: &BTreeMap<String, Array1<f64>>,
-    setup_fall: &BTreeMap<String, Array1<f64>>,
+    setup_input_rise: &BTreeMap<String, Array1<f64>>,
+    setup_input_fall: &BTreeMap<String, Array1<f64>>,
 ) -> (BTreeMap<String, Array1<f64>>, BTreeMap<String, Array1<f64>>) {
-    let hold_rise = setup_rise
+    let hold_input_rise = setup_input_rise
         .iter()
         .map(|(k, v)| (k.clone(), v.clone() * -1.0))
         .collect();
 
-    let hold_fall = setup_fall
+    let hold_input_fall = setup_input_fall
         .iter()
         .map(|(k, v)| (k.clone(), v.clone() * -1.0))
         .collect();
 
-    (hold_rise, hold_fall)
+    (hold_input_rise, hold_input_fall)
 }
 
 /// Add pseudo-synchronous timing to an output pin
@@ -157,10 +350,10 @@ fn add_constraints_to_input_pin(
     inpin: &mut Group,
     clock_name: &str,
     ref_arc: &RefArc,
-    setup_rise: &BTreeMap<String, Array1<f64>>,
-    setup_fall: &BTreeMap<String, Array1<f64>>,
-    hold_rise: &BTreeMap<String, Array1<f64>>,
-    hold_fall: &BTreeMap<String, Array1<f64>>,
+    setup_input_rise: &BTreeMap<String, Array1<f64>>,
+    setup_input_fall: &BTreeMap<String, Array1<f64>>,
+    hold_input_rise: &BTreeMap<String, Array1<f64>>,
+    hold_input_fall: &BTreeMap<String, Array1<f64>>,
 ) {
     let inpin_name = inpin.name.as_str();
 
@@ -174,27 +367,30 @@ fn add_constraints_to_input_pin(
     inpin.subgroups.push(create_setup_timing_group(
         clock_name,
         ref_arc,
-        setup_rise.get(inpin_name),
-        setup_fall.get(inpin_name),
+        setup_input_rise.get(inpin_name),
+        setup_input_fall.get(inpin_name),
     ));
 
     // Add hold constraint
     inpin.subgroups.push(create_hold_timing_group(
         clock_name,
         ref_arc,
-        hold_rise.get(inpin_name),
-        hold_fall.get(inpin_name),
+        hold_input_rise.get(inpin_name),
+        hold_input_fall.get(inpin_name),
     ));
 }
 
 /// The knobs that decide how one cell is converted. They are chosen once per
-/// run and travel together, so they are passed as a unit.
-struct CellOptions<'a> {
-    clock_name: &'a str,
-    reset_name: &'a Regex,
-    latch: bool,
-    mode: ReferenceMode,
-    when_merge: WhenMerge,
+/// run and travel together, so they are passed as a unit -- which is also what
+/// keeps the entry point below to a signature a reader can hold in their head.
+pub(crate) struct CellOptions<'a> {
+    pub(crate) clock_name: &'a str,
+    pub(crate) reset_name: &'a Regex,
+    pub(crate) latch: bool,
+    pub(crate) mode: ReferenceMode,
+    pub(crate) when_merge: WhenMerge,
+    pub(crate) anchor: Anchor,
+    pub(crate) placement: OffsetPlacement,
 }
 
 /// Process a single cell to add pseudo-synchronous timing.
@@ -215,13 +411,27 @@ fn process_cell(
         latch,
         mode,
         when_merge,
+        anchor,
+        placement,
     } = *opts;
     let cell_name = cell.name.clone();
     eprintln!("Processing cell {}", cell_name);
 
     let mut ref_arcs: BTreeMap<String, RefArc> = BTreeMap::new();
-    let mut cell_rise_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
-    let mut cell_fall_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
+    // The delay tables the constraints are derived from, keyed by source pin, output
+    // pin, the direction the INPUT was moving in, and the family the values were read
+    // from.
+    //
+    // The input's edge is part of the key because it is what a constraint is keyed on,
+    // and it is not the output's: a negative-unate arc's `cell_rise` values describe an
+    // input that fell. Merging by output family instead would blend two opposite input
+    // directions inside one accumulator wherever a pin pair carries arcs of both senses
+    // -- the shape an XOR is characterised in. Routing here, per arc and before the
+    // `when` merge, is what keeps them apart.
+    let mut constraint_arcs: BTreeMap<
+        (String, String, Transition, &'static str),
+        TableAccumulator,
+    > = BTreeMap::new();
 
     // Phase 1: Collect every arc, folding each pin pair's `when` conditions into
     // one representative arc
@@ -232,6 +442,10 @@ fn process_cell(
     // Kept unreduced so the report can measure the model against every
     // condition, not just against the average it was built from.
     let mut raw_arcs: Vec<ConditionedArc> = Vec::new();
+    // Indexed to `raw_arcs`: the state each arc leaves the cell in once its input
+    // has settled. Classified once per cell after the walk, so the ids run in the
+    // order the library declares the arcs.
+    let mut post_conditions: Vec<ArcPost> = Vec::new();
 
     // Every output leaf, whether or not it turns out to carry a usable arc. The skip
     // decision below is taken over this list rather than over the outputs that
@@ -242,9 +456,19 @@ fn process_cell(
     // The domain of every table the conversion will transform: the lookup template named,
     // and the dimensions its table carries. Judged once, after this loop.
     let mut domains: BTreeSet<(String, (usize, usize))> = BTreeSet::new();
-    // Outputs an arc of which was skipped at arc scope, so that the output-scope warning
-    // can give the reason that is true rather than the one that merely fits.
-    let mut axis_skipped: BTreeSet<String> = BTreeSet::new();
+    // The slew and load points the transformed tables are indexed at, so the report can
+    // caption a residual with the regime it occurs in rather than a row number. A table
+    // may declare its own axes, which override the template's. One pair serves the whole
+    // cell because a cell whose arcs sit on more than one domain is refused below; if the
+    // arcs disagree anyway the labels are dropped rather than taken from one of them.
+    let mut cell_axes: Option<Axes> = None;
+    let mut axes_agree = true;
+    // Outputs an arc of which was skipped at arc scope, and the output-scope reason that
+    // skip gives, so the warning can state the one that is true rather than the one that
+    // merely fits. The first skip's reason is kept: an output whose arcs fell short in
+    // more than one way is described by the first way that was found, rather than by
+    // whichever happened to be looked at last.
+    let mut arc_skipped: BTreeMap<String, &'static str> = BTreeMap::new();
 
     for outpin in timing_leaves(cell, is_output_pin) {
         let outpin_name = &outpin.name;
@@ -287,33 +511,145 @@ fn process_cell(
                         timing_tables.lut_template,
                         missing
                     );
-                    axis_skipped.insert(outpin_name.clone());
+                    arc_skipped.entry(outpin_name.clone()).or_insert(
+                        "every non-reset arc was skipped: no lookup template with both axes",
+                    );
                     continue;
                 }
+
+                // Arc scope, and mode-independent. A constraint is keyed on the
+                // direction the INPUT was moving in, and `timing_sense` is the only
+                // thing that determines it, so an arc that does not state one cannot
+                // be placed in either constraint family under any mode.
+                //
+                // An absent or unrecognised `timing_sense` is treated exactly as
+                // `non_unate`: it says as little, and no Liberty default for the
+                // attribute is stated in RM pp.319-372 or UG pp.7-1..7-65, so there
+                // is nothing to fall back on. Like the axis skip, this arc enters
+                // nothing at all.
+                let sense = match timing_tables.sense {
+                    Some(sense @ (TimingSense::Positive | TimingSense::Negative)) => sense,
+                    unusable => {
+                        let reason = match unusable {
+                            Some(_) => {
+                                "timing_sense non_unate: the input's direction cannot be determined"
+                            }
+                            None => "no timing_sense: the input's direction cannot be determined",
+                        };
+                        eprintln!(
+                            "Skipping arc {} -> {} of cell {} in library {}: {}",
+                            related_pin, outpin_name, cell_name, lib_name, reason
+                        );
+                        arc_skipped.entry(outpin_name.clone()).or_insert(
+                            "every non-reset arc was skipped: no derivable input direction",
+                        );
+                        continue;
+                    }
+                };
 
                 // This arc will be transformed, so its tables' domains are among those
                 // that must agree. Recorded per family rather than per group, because the
                 // four families of one group can name different templates.
                 domains.extend(arc_domains(timing_group));
 
+                let declared = templates.axes(&timing_tables.lut_template);
+                let arc_axes = Axes {
+                    slew: timing_tables
+                        .slews
+                        .clone()
+                        .or_else(|| declared.and_then(|a| a.slew.clone())),
+                    load: timing_tables
+                        .loads
+                        .clone()
+                        .or_else(|| declared.and_then(|a| a.load.clone())),
+                };
+                match &cell_axes {
+                    None => cell_axes = Some(arc_axes),
+                    Some(seen) if *seen != arc_axes => axes_agree = false,
+                    Some(_) => {}
+                }
+
                 let sources = source_order.entry(outpin_name.clone()).or_default();
                 if !sources.contains(&related_pin) {
                     sources.push(related_pin.clone());
                 }
 
+                let when = timing_group.simple_attribute("when").map(|v| v.string());
+
+                // The state this arc leaves the cell in once its input has settled:
+                // the arc's own `when`, conjoined with the literal saying which way
+                // the source pin went. The literal follows the INPUT's transition --
+                // settled high gives `P`, settled low `!P` -- so a negative-unate
+                // `cell_rise` arc is conditioned on `!P`, because what made this
+                // output rise was its input falling.
+                //
+                // A whenless arc is the catch-all for its output and edge: it covers
+                // whatever state the conditioned arcs do not, so putting it through
+                // the same construction would spuriously claim it holds only while
+                // its own source pin is high.
+                let post = match &when {
+                    None => ArcPost::CatchAll,
+                    Some(text) => match Condition::parse(text) {
+                        Err(reason) => {
+                            eprintln!(
+                                "Cannot classify arc {} -> {} of cell {} in library {}: {}",
+                                related_pin, outpin_name, cell_name, lib_name, reason
+                            );
+                            ArcPost::Unreadable
+                        }
+                        Ok(source_when) => {
+                            let settled = |output_edge: Transition, present: bool| {
+                                if !present {
+                                    return None;
+                                }
+                                let input_edge = derived_input_edge(
+                                    sense,
+                                    output_edge,
+                                    &related_pin,
+                                    outpin_name,
+                                );
+                                Some(source_when.and(&Condition::literal(
+                                    &related_pin,
+                                    input_edge == Transition::Rise,
+                                )))
+                            };
+                            let rise = settled(Transition::Rise, timing_tables.cell_rise.is_some());
+                            let fall = settled(Transition::Fall, timing_tables.cell_fall.is_some());
+                            ArcPost::Settled {
+                                source: source_when,
+                                rise,
+                                fall,
+                            }
+                        }
+                    },
+                };
+                post_conditions.push(post);
+
                 raw_arcs.push(ConditionedArc {
                     source: related_pin.clone(),
                     output: outpin_name.clone(),
-                    when: timing_group.simple_attribute("when").map(|v| v.string()),
-                    timing_type: timing_group
-                        .simple_attribute("timing_type")
-                        .map(|v| v.expr()),
-                    timing_sense: timing_group
-                        .simple_attribute("timing_sense")
-                        .map(|v| v.expr()),
+                    when,
+                    sense,
+                    class_rise: None,
+                    class_fall: None,
                     cell_rise: timing_tables.cell_rise.clone(),
                     cell_fall: timing_tables.cell_fall.clone(),
                 });
+
+                // Only the delay families feed a constraint: a transition is the
+                // output's own slew, which the model emits rather than constrains.
+                for (table, family, output_edge) in [
+                    (&timing_tables.cell_rise, "cell_rise", Transition::Rise),
+                    (&timing_tables.cell_fall, "cell_fall", Transition::Fall),
+                ] {
+                    let Some(table) = table else { continue };
+                    let input_edge =
+                        derived_input_edge(sense, output_edge, &related_pin, outpin_name);
+                    constraint_arcs
+                        .entry((related_pin.clone(), outpin_name.clone(), input_edge, family))
+                        .or_insert_with(|| TableAccumulator::new(when_merge))
+                        .add(table.clone(), family, &related_pin, outpin_name);
+                }
 
                 accumulated
                     .entry((related_pin.clone(), outpin_name.clone()))
@@ -347,18 +683,18 @@ fn process_cell(
         ));
     }
 
-    // Reduce each pin pair to its representative arc, then take each output's
-    // reference from the first source whose average has all four tables.
-    for ((related_pin, outpin_name), acc) in &accumulated {
-        let Some(tables) = acc.result() else { continue };
+    // One classification per cell, over every post-settled condition in collection
+    // order, so two arcs describing the same state share an id however they were
+    // spelled -- and the ids run in the order the library declares the arcs.
+    // Informational this wave: nothing in the split consults a condition.
+    let classes = classify_states(&mut raw_arcs, &post_conditions);
 
-        if let Some(cell_rise) = tables.cell_rise {
-            cell_rise_arcs.insert((related_pin.clone(), outpin_name.clone()), cell_rise);
-        }
-        if let Some(cell_fall) = tables.cell_fall {
-            cell_fall_arcs.insert((related_pin.clone(), outpin_name.clone()), cell_fall);
-        }
-    }
+    // Reduce each routed group to its representative arc, then take each output's
+    // reference from the first source whose average has all four tables.
+    let mut constraint_arcs: ConstraintArcs = constraint_arcs
+        .iter()
+        .filter_map(|(key, acc)| acc.result().map(|table| (key.clone(), table)))
+        .collect();
 
     for (outpin_name, sources) in &source_order {
         for related_pin in sources {
@@ -367,7 +703,7 @@ fn process_cell(
                 continue;
             };
 
-            if let Some(ref_arc) = select_reference_arc(related_pin, &tables) {
+            if let Some(ref_arc) = select_reference_arc(related_pin, &tables, anchor, placement) {
                 eprintln!(
                     "  Pin {} selected as reference arc for output {}",
                     related_pin, outpin_name
@@ -405,8 +741,8 @@ fn process_cell(
         // arc was skipped for its template as having carried no table at all.
         let reason = if source_order.contains_key(outpin_name) {
             "no non-reset source supplies a complete reference"
-        } else if axis_skipped.contains(outpin_name) {
-            "every non-reset arc was skipped: no lookup template with both axes"
+        } else if let Some(reason) = arc_skipped.get(outpin_name) {
+            reason
         } else {
             "no non-reset timing arc carrying a characterisation table"
         };
@@ -462,52 +798,56 @@ fn process_cell(
     // no longer present to be averaged. The two halves of the split must sum back to
     // the arc they came from, and a skipped output supplies no propagation half, so
     // there is nothing for an input driving it to be charged against.
-    cell_rise_arcs.retain(|(_, output), _| ref_arcs.contains_key(output));
-    cell_fall_arcs.retain(|(_, output), _| ref_arcs.contains_key(output));
+    constraint_arcs.retain(|(_, output, _, _), _| ref_arcs.contains_key(output));
 
     // Phase 4: Calculate setup/hold constraints against the reference `mode` selects
     let ref_arc = mean_ref_arc;
 
-    let (setup_rise, setup_fall) =
-        calculate_setup_constraints(&cell_rise_arcs, &cell_fall_arcs, &ref_arcs, &ref_arc, mode);
+    let (setup_input_rise, setup_input_fall) =
+        calculate_setup_constraints(&constraint_arcs, &ref_arcs, &ref_arc, mode, anchor);
 
-    let (hold_rise, hold_fall) = calculate_hold_constraints(&setup_rise, &setup_fall);
+    let (hold_input_rise, hold_input_fall) =
+        calculate_hold_constraints(&setup_input_rise, &setup_input_fall);
 
     let references = References {
         per_output: &ref_arcs,
         mean: &ref_arc,
         mode,
     };
+    let (slews, loads) = match (cell_axes, axes_agree) {
+        (Some(axes), true) => (axes.slew, axes.load),
+        _ => (None, None),
+    };
+
+    // Both constraint maps go in, because which of them an arc was folded into is
+    // the arc's own property -- its input direction -- not the caller's to choose.
     let mut arc_errors: Vec<ArcError> = Vec::new();
-    collect_arc_errors(
-        &raw_arcs,
-        &setup_rise,
-        &references,
-        &cell_name,
-        &RISE,
-        &mut arc_errors,
-    );
-    collect_arc_errors(
-        &raw_arcs,
-        &setup_fall,
-        &references,
-        &cell_name,
-        &FALL,
-        &mut arc_errors,
-    );
+    for edge in [&RISE, &FALL] {
+        collect_arc_errors(
+            &raw_arcs,
+            &setup_input_rise,
+            &setup_input_fall,
+            &references,
+            &cell_name,
+            edge,
+            &mut arc_errors,
+        );
+    }
 
     reports.cells.push(CellReport {
         library: lib_name.to_owned(),
         cell: cell_name.clone(),
         when_merge,
         raw_arcs,
-        cell_rise_arcs: cell_rise_arcs.clone(),
-        cell_fall_arcs: cell_fall_arcs.clone(),
+        constraint_arcs: constraint_arcs.clone(),
         ref_arcs: ref_arcs.clone(),
         mean_ref: ref_arc.clone(),
-        setup_rise: setup_rise.clone(),
-        setup_fall: setup_fall.clone(),
+        setup_input_rise: setup_input_rise.clone(),
+        setup_input_fall: setup_input_fall.clone(),
+        slews,
+        loads,
         arcs: arc_errors,
+        classes,
     });
 
     // Phase 5: Add constraints to every input the library characterised against
@@ -518,12 +858,13 @@ fn process_cell(
     //
     // Reset pins need no test of their own: phase 1 skips every arc whose
     // `related_pin` matches `reset_name`, so a reset name never becomes a key of
-    // `accumulated`, hence never of `cell_{rise,fall}_arcs`, hence never of the
-    // setup maps those are grouped into. Membership below therefore already
-    // implies the name is not a reset. The clock has no such skip -- a latch
-    // characterises its output against the enable -- so that test is live.
+    // `constraint_arcs`, hence never of the setup maps those are grouped into.
+    // Membership below therefore already implies the name is not a reset. The clock
+    // has no such skip -- a latch characterises its output against the enable -- so
+    // that test is live.
     let has_constraints = |name: &str| {
-        name != clock_name && (setup_rise.contains_key(name) || setup_fall.contains_key(name))
+        name != clock_name
+            && (setup_input_rise.contains_key(name) || setup_input_fall.contains_key(name))
     };
 
     for inpin in constraint_targets_mut(cell, &has_constraints) {
@@ -531,10 +872,10 @@ fn process_cell(
             inpin,
             clock_name,
             &ref_arc,
-            &setup_rise,
-            &setup_fall,
-            &hold_rise,
-            &hold_fall,
+            &setup_input_rise,
+            &setup_input_fall,
+            &hold_input_rise,
+            &hold_input_fall,
         );
     }
 
@@ -554,23 +895,10 @@ fn process_cell(
 /// reconstruction and its residual, so the cost of the chosen [`ReferenceMode`] can be
 /// measured against the library it replaced -- together with a [`Refusal`] for every
 /// candidate cell, or output of one, the conversion could not honour.
-pub(crate) fn process_library(
-    lib: &mut Group,
-    clock_name: &str,
-    reset_name: &Regex,
-    latch: bool,
-    mode: ReferenceMode,
-    when_merge: WhenMerge,
-) -> LibraryReport {
+pub(crate) fn process_library(lib: &mut Group, opts: &CellOptions) -> LibraryReport {
     eprintln!("Processing library {}", lib.name);
 
-    let opts = CellOptions {
-        clock_name,
-        reset_name,
-        latch,
-        mode,
-        when_merge,
-    };
+    let clock_name = opts.clock_name;
     let mut reports = LibraryReport::default();
 
     let mut lut_templates: HashSet<String> = HashSet::new();
@@ -584,7 +912,7 @@ pub(crate) fn process_library(
         .iter_cells_mut()
         .filter(|x| cell_qualifies(x, clock_name))
     {
-        match process_cell(cell, &opts, &templates, &lib_name, &mut reports) {
+        match process_cell(cell, opts, &templates, &lib_name, &mut reports) {
             Ok(template_name) => {
                 lut_templates.insert(template_name);
             }
@@ -620,7 +948,9 @@ mod tests {
     //! Behaviour of the `engine` module: constraint calculation and bundle traversal.
 
     use super::*;
-    use crate::arcs::{mean_reference_arc, RefArc, ReferenceMode, WhenMerge};
+    use crate::arcs::{
+        mean_reference_arc, Anchor, EdgeRef, OffsetPlacement, RefArc, ReferenceMode, WhenMerge,
+    };
     use crate::liberty_io::parse_liberty_file;
     use crate::pins::{cell_qualifies, is_output_pin};
     use liberty_parser::{
@@ -630,6 +960,27 @@ mod tests {
     use regex::Regex;
     use std::collections::BTreeMap;
     use std::path::Path;
+
+    /// The conversion knobs, with the anchor and offset placement at the defaults
+    /// the command line supplies. Those two are exercised where they are decided,
+    /// in `arcs`; here they only have to stay out of the way.
+    fn opts<'a>(
+        clock_name: &'a str,
+        reset_name: &'a Regex,
+        latch: bool,
+        mode: ReferenceMode,
+        when_merge: WhenMerge,
+    ) -> CellOptions<'a> {
+        CellOptions {
+            clock_name,
+            reset_name,
+            latch,
+            mode,
+            when_merge,
+            anchor: Anchor::Middle,
+            placement: OffsetPlacement::Setup,
+        }
+    }
 
     // --- calculate_setup / hold constraints --------------------------------
 
@@ -643,19 +994,35 @@ mod tests {
         let arc =
             Array2::from_shape_vec((3, 3), vec![0.0, 25.0, 0.0, 0.0, 35.0, 0.0, 0.0, 45.0, 0.0])
                 .unwrap();
-        let mut cell_rise_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
-        cell_rise_arcs.insert(("D".to_owned(), "Q".to_owned()), arc);
-        let cell_fall_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
+        // Positive unate, so a `cell_rise` table is what an input rise contributed.
+        let mut constraint_arcs: ConstraintArcs = BTreeMap::new();
+        constraint_arcs.insert(
+            (
+                "D".to_owned(),
+                "Q".to_owned(),
+                Transition::Rise,
+                "cell_rise",
+            ),
+            arc,
+        );
 
         let ref_arc = RefArc {
             col,
             row: 1,
             related_pin: "CK".to_owned(),
             lut_template: "T".to_owned(),
-            rise_trans: Array1::from(vec![0.0, 0.0, 0.0]),
-            fall_trans: Array1::from(vec![0.0, 0.0, 0.0]),
-            cell_rise: Array1::from(vec![10.0, 20.0, 30.0]), // [col]=20
-            cell_fall: Array1::from(vec![0.0, 0.0, 0.0]),
+            anchor: Anchor::Middle,
+            rise: EdgeRef {
+                delay: Array1::from(vec![10.0, 20.0, 30.0]),
+                transition: Array1::from(vec![0.0, 0.0, 0.0]),
+                // The reference delay at the anchor point: profile[col] = 20.
+                crossing: 20.0,
+            },
+            fall: EdgeRef {
+                delay: Array1::from(vec![0.0, 0.0, 0.0]),
+                transition: Array1::from(vec![0.0, 0.0, 0.0]),
+                crossing: 0.0,
+            },
         };
 
         // With one output there is nothing to pool, so both modes must agree.
@@ -664,11 +1031,11 @@ mod tests {
 
         for mode in [ReferenceMode::Pooled, ReferenceMode::PerOutput] {
             let (setup_rise, setup_fall) = calculate_setup_constraints(
-                &cell_rise_arcs,
-                &cell_fall_arcs,
+                &constraint_arcs,
                 &ref_arcs,
                 &ref_arc,
                 mode,
+                Anchor::Middle,
             );
 
             // [25,35,45] - 20 = [5,15,25]
@@ -707,10 +1074,17 @@ mod tests {
             row: 0,
             related_pin: "CK".to_owned(),
             lut_template: "T".to_owned(),
-            rise_trans: Array1::from(vec![0.0]),
-            fall_trans: Array1::from(vec![0.0]),
-            cell_rise: Array1::from(vec![delay]),
-            cell_fall: Array1::from(vec![0.0]),
+            anchor: Anchor::Middle,
+            rise: EdgeRef {
+                delay: Array1::from(vec![delay]),
+                transition: Array1::from(vec![0.0]),
+                crossing: delay,
+            },
+            fall: EdgeRef {
+                delay: Array1::from(vec![0.0]),
+                transition: Array1::from(vec![0.0]),
+                crossing: 0.0,
+            },
         };
 
         // Rail 1 is fast (ref 10), rail 2 slow (ref 30); pooled mean is 20.
@@ -719,30 +1093,37 @@ mod tests {
             ("Q2".to_owned(), refarc(30.0)),
         ]);
         let mean_ref = mean_reference_arc(ref_arcs.values().cloned()).unwrap();
-        assert_eq!(mean_ref.cell_rise[col], 20.0);
+        assert_eq!(mean_ref.rise.crossing, 20.0);
 
-        let cell_rise_arcs: BTreeMap<(String, String), Array2<f64>> = BTreeMap::from([
+        let rise = |src: &str, out: &str| {
+            (
+                src.to_owned(),
+                out.to_owned(),
+                Transition::Rise,
+                "cell_rise",
+            )
+        };
+        let constraint_arcs: ConstraintArcs = BTreeMap::from([
             // D1 is rail-private: it drives Q1 only.
-            (("D1".to_owned(), "Q1".to_owned()), arc(100.0)),
+            (rise("D1", "Q1"), arc(100.0)),
             // S is shared: it drives both rails.
-            (("S".to_owned(), "Q1".to_owned()), arc(100.0)),
-            (("S".to_owned(), "Q2".to_owned()), arc(100.0)),
+            (rise("S", "Q1"), arc(100.0)),
+            (rise("S", "Q2"), arc(100.0)),
         ]);
-        let empty: BTreeMap<(String, String), Array2<f64>> = BTreeMap::new();
 
         let (pooled, _) = calculate_setup_constraints(
-            &cell_rise_arcs,
-            &empty,
+            &constraint_arcs,
             &ref_arcs,
             &mean_ref,
             ReferenceMode::Pooled,
+            Anchor::Middle,
         );
         let (per_output, _) = calculate_setup_constraints(
-            &cell_rise_arcs,
-            &empty,
+            &constraint_arcs,
             &ref_arcs,
             &mean_ref,
             ReferenceMode::PerOutput,
+            Anchor::Middle,
         );
 
         // Pooled charges both sources the cell-wide mean: 100 - 20.
@@ -764,6 +1145,7 @@ mod tests {
             r#"
         timing() {{
           related_pin: "{}";
+          timing_sense : positive_unate;
           timing_type: {};
           cell_rise(T) {{ values("{}, {}", "{}, {}"); }}
           cell_fall(T) {{ values("{}, {}", "{}, {}"); }}
@@ -970,11 +1352,13 @@ library(bundle_test) {{
         let mut lib = bundle_lib(body);
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let cell = lib[0].get_cell("DUT").expect("DUT");
 
@@ -1055,11 +1439,13 @@ library(bundle_test) {{
         let mut lib = bundle_lib(body);
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let cell = lib[0].get_cell("DUT").expect("DUT");
 
@@ -1127,11 +1513,13 @@ library(bundle_test) {{
         let mut lib = bundle_lib(body);
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let cell = lib[0].get_cell("DUT").expect("DUT");
 
@@ -1231,11 +1619,13 @@ library(test) {
         let mut lib = sample_lib();
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
 
         assert!(
@@ -1285,11 +1675,13 @@ library(latch_cell_test) {{
         let mut lib = latch_cell_lib();
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            latch,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                latch,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         lib
     }
@@ -1512,11 +1904,13 @@ library(clock_sourced_test) {{
 
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let cell = lib[0].get_cell("TRANSPARENT").expect("TRANSPARENT");
 
@@ -1577,6 +1971,7 @@ library(half_characterised_test) {{
       function: "IQN";
       timing() {{
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(T) {{ values("2.0, 3.0", "4.0, 5.0"); }}
         cell_fall(T) {{ values("2.5, 3.5", "4.5, 5.5"); }}
@@ -1649,8 +2044,12 @@ library(tableless_test) {{
     /// `A` drives both outputs. Constrained over the converted output alone, its
     /// arc mean is `Q`'s arc unchanged, sampled at the reference column:
     ///
-    ///     setup_rise(A) = [2, 4]     - 4   = [-2, 0]
-    ///     setup_fall(A) = [2.5, 4.5] - 4.5 = [-2, 0]
+    /// The arc is positive unate, so its `cell_rise` values were measured with the
+    /// input rising and land in the input-rise constraint, and its `cell_fall`
+    /// values in the input-fall one:
+    ///
+    ///     setup_input_rise(A) = [2, 4]     - 4   = [-2, 0]
+    ///     setup_input_fall(A) = [2.5, 4.5] - 4.5 = [-2, 0]
     ///
     /// and hold is the negation, `[2, 0]`. Were `QN` allowed into the arithmetic,
     /// `A` would be charged a delay measured on an output nothing characterised
@@ -1670,11 +2069,13 @@ library(tableless_test) {{
         let mut lib = half_characterised_lib();
         let produced = process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let cell = lib[0].get_cell("HALF").expect("HALF");
 
@@ -1743,11 +2144,13 @@ library(tableless_test) {{
         let mut lib = tableless_output_lib();
         let produced = process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let cell = lib[0].get_cell("TABLELESS").expect("TABLELESS");
 
@@ -1791,11 +2194,13 @@ library(tableless_test) {{
         let mut lib = half_characterised_lib();
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            true,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                true,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let cell = lib[0].get_cell("HALF").expect("HALF");
 
@@ -1851,6 +2256,7 @@ library(mixed_template_test) {
       function: "IQ";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(TA) { values("1.0, 2.0", "3.0, 4.0"); }
         cell_fall(TA) { values("1.5, 2.5", "3.5, 4.5"); }
@@ -1863,6 +2269,7 @@ library(mixed_template_test) {
       function: "IQN";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(TB) { values("2.0, 3.0", "4.0, 5.0"); }
         cell_fall(TB) { values("2.5, 3.5", "4.5, 5.5"); }
@@ -1880,6 +2287,7 @@ library(mixed_template_test) {
       function: "IQ";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(TA) { values("1.0, 2.0", "3.0, 4.0"); }
         cell_fall(TA) { values("1.5, 2.5", "3.5, 4.5"); }
@@ -1912,11 +2320,13 @@ library(mixed_template_test) {
         let mut lib = mixed_template_lib();
         let produced = process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
 
         // Verbatim, and never mutated on the way to being abandoned.
@@ -1976,6 +2386,7 @@ library(mixed_dimensions_test) {
       function: "IQ";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(TA) { values("1.0, 2.0, 3.0", "4.0, 5.0, 6.0"); }
         cell_fall(TA) { values("1.5, 2.5, 3.5", "4.5, 5.5, 6.5"); }
@@ -1988,6 +2399,7 @@ library(mixed_dimensions_test) {
       function: "IQN";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(TA) { values("2.0, 3.0", "4.0, 5.0"); }
         cell_fall(TA) { values("2.5, 3.5", "4.5, 5.5"); }
@@ -2023,11 +2435,13 @@ library(mixed_dimensions_test) {
         let mut lib = same_name_mixed_dimensions_lib();
         let produced = process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
 
         let cell = lib[0].get_cell("WIDE").expect("WIDE");
@@ -2077,6 +2491,7 @@ library(mixed_family_test) {
       function: "IQ";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(T2) { values("1.0, 2.0", "3.0, 4.0"); }
         cell_fall(T2) { values("1.5, 2.5", "3.5, 4.5"); }
@@ -2111,11 +2526,13 @@ library(mixed_family_test) {
         let mut lib = mixed_family_lib();
         let produced = process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
 
         let cell = lib[0].get_cell("SPLITFAM").expect("SPLITFAM");
@@ -2137,6 +2554,588 @@ library(mixed_family_test) {
                 reason: "arcs on more than one domain: T2 at 2x2, T3 at 3x2".to_owned(),
             }]
         );
+    }
+
+    // --- timing_sense: which constraint family an arc lands in ---------------
+
+    /// The `timing_sense` line an arc declares, or nothing at all where the
+    /// library omitted it.
+    fn sense_line(sense: Option<&str>) -> String {
+        match sense {
+            Some(s) => format!("timing_sense : {};", s),
+            None => String::new(),
+        }
+    }
+
+    /// A complete arc -- all four families, so it can supply a reference -- with
+    /// the delay tables the caller names.
+    fn full_sense_arc(related_pin: &str, sense: Option<&str>, rise: &str, fall: &str) -> String {
+        format!(
+            r#"
+      timing() {{
+        related_pin: "{}";
+        {}
+        timing_type: combinational;
+        cell_rise(T) {{ values({}); }}
+        cell_fall(T) {{ values({}); }}
+        rise_transition(T) {{ values("0.1, 0.2", "0.3, 0.4"); }}
+        fall_transition(T) {{ values("0.11, 0.21", "0.31, 0.41"); }}
+      }}"#,
+            related_pin,
+            sense_line(sense),
+            rise,
+            fall
+        )
+    }
+
+    /// A complete arc of the given sense, characterised under a `when`.
+    fn full_sense_arc_when(
+        related_pin: &str,
+        sense: &str,
+        when: Option<&str>,
+        rise: &str,
+        fall: &str,
+    ) -> String {
+        let condition = match when {
+            Some(w) => format!("when : \"{}\";", w),
+            None => String::new(),
+        };
+        full_sense_arc(related_pin, Some(sense), rise, fall).replace(
+            "timing_type: combinational;",
+            &format!("{}\n        timing_type: combinational;", condition),
+        )
+    }
+
+    /// An arc carrying one delay family alone. It supplies no reference, so a
+    /// cell built from these needs another source that does.
+    fn one_family_arc(related_pin: &str, sense: &str, family: &str, values: &str) -> String {
+        format!(
+            r#"
+      timing() {{
+        related_pin: "{}";
+        timing_sense : {};
+        timing_type: combinational;
+        {}(T) {{ values({}); }}
+      }}"#,
+            related_pin, sense, family, values
+        )
+    }
+
+    /// A candidate latch on one shared 2x2 template, whose output Q carries
+    /// exactly the timing groups the caller supplies.
+    fn sense_lib(inputs: &[&str], q_arcs: &str) -> Liberty {
+        let pins: String = inputs
+            .iter()
+            .map(|p| format!("    pin({}) {{ direction: input; }}\n", p))
+            .collect();
+        liberty_parser::parse_lib(&format!(
+            r#"
+library(sense_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }}
+  cell(SENSE) {{
+    latch(IQ, IQN) {{ enable: "G"; data_in: "A"; }}
+    pin(G) {{ direction: input; clock: true; }}
+{}
+    pin(Q) {{
+      direction: output;
+      function: "IQ";
+      {}
+    }}
+  }}
+}}"#,
+            pins, q_arcs
+        ))
+        .expect("parse sense fixture")
+    }
+
+    /// The values of one constraint table of a pin's single group of that type,
+    /// or `None` where that table was not emitted at all.
+    fn constraint_values(pin: &Group, timing_type: &str, table_type: &str) -> Option<Vec<f64>> {
+        let groups = arcs_of_type(pin, timing_type);
+        assert_eq!(
+            groups.len(),
+            1,
+            "pin {} carries one {}",
+            pin.name,
+            timing_type
+        );
+        groups[0]
+            .iter_subgroups_of_type(table_type)
+            .next()
+            .map(table_values)
+    }
+
+    /// The two constraints of one arc, under a stated `timing_sense`.
+    ///
+    /// Derivation, entirely from the model. `T` is 2 slews x 2 loads, so a middle
+    /// anchor reads row 1 and column 1. With
+    ///
+    ///     cell_rise = [[1, 2], [3, 4]]        cell_fall = [[10, 20], [30, 40]]
+    ///
+    /// the reference for Q is `rise.delay = [3, 4]` crossing `4`, and
+    /// `fall.delay = [30, 40]` crossing `40`. A constraint is the arc's column 1
+    /// minus the crossing of the reference half its own FAMILY names -- a
+    /// `cell_rise` table is a delay of an output rise whatever made the input
+    /// move -- so
+    ///
+    ///     from cell_rise: [2, 4]  - 4  = [-2, 0]
+    ///     from cell_fall: [20, 40] - 40 = [-20, 0]
+    ///
+    /// The two are deliberately far apart, so which of them reaches
+    /// `rise_constraint` is visible.
+    fn sense_constraints(sense: &str) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
+        let mut lib = sense_lib(
+            &["A"],
+            &full_sense_arc(
+                "A",
+                Some(sense),
+                r#""1.0, 2.0", "3.0, 4.0""#,
+                r#""10.0, 20.0", "30.0, 40.0""#,
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let a = cell.get_pin("A").expect("A");
+        (
+            constraint_values(a, "setup_rising", "rise_constraint"),
+            constraint_values(a, "setup_rising", "fall_constraint"),
+        )
+    }
+
+    /// Under `positive_unate` an incoming rise makes a local rise (RM p.329), so
+    /// the `cell_rise` values were measured with the input rising and belong in
+    /// `rise_constraint`, which is keyed on the constrained pin's own transition.
+    ///
+    /// Killed by: phase 1 routed a `positive_unate` arc to the opposite edge, leaving every other sense alone. Observed to redden this test and the two below that also carry a positive arc -- and to leave the negative test beside it green, which is the pair that separates the two directions: the mutation recorded there does exactly the reverse.
+    #[test]
+    fn a_positive_unate_arc_constrains_the_input_edge_its_output_family_names() {
+        let (rise, fall) = sense_constraints("positive_unate");
+        assert_eq!(rise, Some(vec![-2.0, 0.0]));
+        assert_eq!(fall, Some(vec![-20.0, 0.0]));
+    }
+
+    /// Under `negative_unate` an incoming rise makes a local FALL (RM p.329), so
+    /// the `cell_fall` values are the ones measured with the input rising, and it
+    /// is those that belong in `rise_constraint`. The pair is exactly the
+    /// positive-unate pair swapped -- nothing else about the arc changed.
+    ///
+    /// Killed by: phase 1 routed a `negative_unate` arc as if it were positive, leaving every other sense alone. Observed to redden this test and the two below that also carry a negative arc -- and to leave the positive test above green, which together with the mutation recorded there is what separates the two directions.
+    #[test]
+    fn a_negative_unate_arc_lands_in_the_opposite_constraint_family() {
+        let (rise, fall) = sense_constraints("negative_unate");
+        assert_eq!(rise, Some(vec![-20.0, 0.0]));
+        assert_eq!(fall, Some(vec![-2.0, 0.0]));
+    }
+
+    /// An arc whose input direction cannot be derived enters nothing at all, and
+    /// its output is refused with the reason that says so.
+    ///
+    /// `non_unate` and a missing attribute are treated identically: neither
+    /// determines which constraint family the values belong in, and no Liberty
+    /// default for `timing_sense` is stated to fall back on. The skip is
+    /// mode-independent, because constraint placement needs the input's direction
+    /// under every reference mode.
+    ///
+    /// Killed by: phase 1's sense match gained a `None => TimingSense::Positive` arm, so a missing `timing_sense` was treated as positive instead of skipped and `QN` gained a clock arc instead of a refusal. Observed to redden this test alone, through the missing-sense case; the `non_unate` case is what still covers the arm the mutation leaves standing.
+    #[test]
+    fn an_arc_with_no_derivable_input_direction_is_skipped_and_enters_nothing() {
+        let reset_name = Regex::new("(R|S)N?").unwrap();
+        for sense in [Some("non_unate"), None] {
+            let mut lib = liberty_parser::parse_lib(&format!(
+                r#"
+library(sense_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }}
+  cell(SENSE) {{
+    latch(IQ, IQN) {{ enable: "G"; data_in: "A"; }}
+    pin(G) {{ direction: input; clock: true; }}
+    pin(A) {{ direction: input; }}
+    pin(Q) {{
+      direction: output;
+      function: "IQ";
+      {}
+    }}
+    pin(QN) {{
+      direction: output;
+      function: "IQN";
+      {}
+    }}
+  }}
+}}"#,
+                full_sense_arc(
+                    "A",
+                    Some("positive_unate"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#
+                ),
+                full_sense_arc(
+                    "A",
+                    sense,
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#
+                ),
+            ))
+            .expect("parse underivable-sense fixture");
+
+            let produced = process_library(
+                &mut lib[0],
+                &opts(
+                    "G",
+                    &reset_name,
+                    false,
+                    ReferenceMode::PerOutput,
+                    WhenMerge::Mean,
+                ),
+            );
+
+            assert_eq!(
+                produced.refusals,
+                vec![Refusal {
+                    library: "sense_test".to_owned(),
+                    cell: "SENSE".to_owned(),
+                    output: Some("QN".to_owned()),
+                    reason: "every non-reset arc was skipped: no derivable input direction"
+                        .to_owned(),
+                }],
+                "sense {:?}",
+                sense
+            );
+
+            // The output keeps exactly the arc the input wrote it and gains no
+            // clock arc, as for any other output-scope skip.
+            let cell = lib[0].get_cell("SENSE").expect("SENSE");
+            assert_eq!(
+                arc_census(cell.get_pin("QN").expect("QN")),
+                census(&[("A", "combinational", 1)]),
+                "sense {:?}",
+                sense
+            );
+
+            // And the arc reached neither the report's raw arcs nor the tables the
+            // constraints were built from: skipped means it entered nothing.
+            let report = produced
+                .cells
+                .iter()
+                .find(|r| r.cell == "SENSE")
+                .expect("a report for SENSE");
+            assert!(
+                report.raw_arcs.iter().all(|a| a.output != "QN"),
+                "sense {:?}: {:?}",
+                sense,
+                report.raw_arcs
+            );
+            assert!(
+                report
+                    .constraint_arcs
+                    .keys()
+                    .all(|(_, output, _, _)| output != "QN"),
+                "sense {:?}",
+                sense
+            );
+        }
+    }
+
+    /// Two arcs on one (source, output) pair differing only in `timing_sense` --
+    /// the shape an XOR is characterised in -- are routed to opposite input edges
+    /// rather than blended together.
+    ///
+    /// Derivation from the model. `B` supplies Q's reference: with
+    /// `cell_rise = [[1,2],[3,4]]` and `cell_fall = [[10,20],[30,40]]` its middle
+    /// row and column give `rise.crossing = 4`, `fall.crossing = 40`. `A` carries
+    /// two `cell_rise`-only arcs, `[[5,6],[7,8]]` positive and
+    /// `[[50,60],[70,80]]` negative. A `cell_rise` table is charged against the
+    /// output-rise reference either way, so both subtract 4, but the positive one
+    /// describes an input that rose and the negative one an input that fell:
+    ///
+    ///     input rise: column 1 of [[5,6],[7,8]]     = [6, 8]   - 4 = [2, 4]
+    ///     input fall: column 1 of [[50,60],[70,80]] = [60, 80] - 4 = [56, 76]
+    ///
+    /// Blending them in one accumulator would instead give the mean of the two
+    /// tables, `[33, 44] - 4 = [29, 40]`, in the rise family alone and nothing at
+    /// all in the fall family -- two opposite input directions averaged together.
+    ///
+    /// Killed by: the constraint key carried the OUTPUT's edge in place of the input's, so both of `A`'s arcs landed in one accumulator and `rise_constraint` came out as the blend `[29, 40]` with no `fall_constraint` at all. Observed to redden this test and the two neighbours that also carry a negative arc; the positive test stays green, because with one sense the two keys coincide -- which is exactly the point this test makes and that one cannot.
+    #[test]
+    fn two_senses_on_one_pin_pair_are_routed_to_opposite_input_edges() {
+        let mut lib = sense_lib(
+            &["A", "B"],
+            &format!(
+                "{}\n{}\n{}",
+                full_sense_arc(
+                    "B",
+                    Some("positive_unate"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#
+                ),
+                one_family_arc(
+                    "A",
+                    "positive_unate",
+                    "cell_rise",
+                    r#""5.0, 6.0", "7.0, 8.0""#
+                ),
+                one_family_arc(
+                    "A",
+                    "negative_unate",
+                    "cell_rise",
+                    r#""50.0, 60.0", "70.0, 80.0""#
+                ),
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let a = cell.get_pin("A").expect("A");
+        assert_eq!(
+            constraint_values(a, "setup_rising", "rise_constraint"),
+            Some(vec![2.0, 4.0])
+        );
+        assert_eq!(
+            constraint_values(a, "setup_rising", "fall_constraint"),
+            Some(vec![56.0, 76.0])
+        );
+    }
+
+    /// A pooled group whose entries come from two different table families has no
+    /// single reference constant, so it takes the per-entry summed path.
+    ///
+    /// Pooled normally subtracts one constant, and that expression is kept because
+    /// `(c + c + ... + c) / n` is not bit-identical to `c`. It only holds while
+    /// every entry of the group names one family, which takes two senses on one
+    /// pin pair to break -- a shape no corpus produces, so this fixture invents it.
+    ///
+    /// Derivation from the model. `B` gives Q the reference `rise.crossing = 4`,
+    /// `fall.crossing = 40`, and with one output the cell-wide mean IS that
+    /// reference. `A`'s two arcs both describe an input RISE: the positive
+    /// `cell_rise` directly, the negative `cell_fall` by inversion. So the
+    /// input-rise group holds two entries of different families:
+    ///
+    ///     mean arc  = ([[100,200],[300,400]] + [[1000,2000],[3000,4000]]) / 2
+    ///               = [[550, 1100], [1650, 2200]]
+    ///     column 1  = [1100, 2200]
+    ///     reference = (4 + 40) / 2 = 22
+    ///     setup(A)  = [1100 - 22, 2200 - 22] = [1078, 2178]
+    ///
+    /// Charging one family's constant to the whole group would give 40 or 4
+    /// throughout -- [1060, 2160] or [1096, 2196] -- neither of which describes
+    /// both halves of what was averaged.
+    ///
+    /// Killed by: the `families.len() == 1` guard dropped, so `Pooled` always took the single-constant expression and charged the whole group `cell_fall`'s crossing, giving [1060, 2160]. Observed to redden this test alone -- every other pooled group in the suite has one family, where the two paths agree.
+    #[test]
+    fn a_pooled_group_of_mixed_families_is_referenced_entry_by_entry() {
+        let mut lib = sense_lib(
+            &["A", "B"],
+            &format!(
+                "{}\n{}\n{}",
+                full_sense_arc(
+                    "B",
+                    Some("positive_unate"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#
+                ),
+                one_family_arc(
+                    "A",
+                    "positive_unate",
+                    "cell_rise",
+                    r#""100.0, 200.0", "300.0, 400.0""#
+                ),
+                one_family_arc(
+                    "A",
+                    "negative_unate",
+                    "cell_fall",
+                    r#""1000.0, 2000.0", "3000.0, 4000.0""#
+                ),
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::Pooled,
+                WhenMerge::Mean,
+            ),
+        );
+
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let a = cell.get_pin("A").expect("A");
+        assert_eq!(
+            constraint_values(a, "setup_rising", "rise_constraint"),
+            Some(vec![1078.0, 2178.0])
+        );
+        // Nothing described an input fall, so no table is emitted for one.
+        assert_eq!(
+            constraint_values(a, "setup_rising", "fall_constraint"),
+            None
+        );
+    }
+
+    // --- post-settled state classification ----------------------------------
+
+    /// The classes of one cell whose single output is characterised by the arcs
+    /// supplied, run through the whole engine.
+    fn classes_of(q_arcs: &str) -> Vec<StateClass> {
+        let mut lib = sense_lib(&["A", "B"], q_arcs);
+        let produced = process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+        produced
+            .cells
+            .iter()
+            .find(|r| r.cell == "SENSE")
+            .expect("a report for SENSE")
+            .classes
+            .clone()
+    }
+
+    /// The literal in a post-settled condition follows the INPUT's transition, not
+    /// the output family the values were read from.
+    ///
+    /// Derivation from the model. The arc is `negative_unate` and conditioned on
+    /// `B`. Its `cell_rise` values describe the output rising, which under that
+    /// sense is what an input FALL produces (RM p.329), so the state they describe
+    /// is `B` with `A` settled low: `B * !A`. Its `cell_fall` values describe the
+    /// output falling, which took an input rise: `B * A`. A construction keyed on
+    /// the output's direction instead would give the two the other way round.
+    ///
+    /// Killed by: the literal was built as `input_edge == Transition::Fall`, which swapped the two conditions.
+    #[test]
+    fn a_negative_unate_arcs_post_settled_literal_follows_its_input() {
+        let classes = classes_of(&full_sense_arc_when(
+            "A",
+            "negative_unate",
+            Some("B"),
+            r#""1.0, 2.0", "3.0, 4.0""#,
+            r#""10.0, 20.0", "30.0, 40.0""#,
+        ));
+
+        let condition = |edge: Transition| {
+            classes
+                .iter()
+                .find(|c| c.edge == edge && c.output == "Q")
+                .unwrap_or_else(|| panic!("no {:?} class: {:?}", edge, classes))
+                .condition
+                .clone()
+        };
+        assert_eq!(condition(Transition::Rise), Some("B * !A".to_owned()));
+        assert_eq!(condition(Transition::Fall), Some("B * A".to_owned()));
+    }
+
+    /// An arc stating no `when` is the catch-all for its output and edge: it covers
+    /// whatever the conditioned arcs do not, so it is recorded with no condition
+    /// rather than run through the construction.
+    ///
+    /// Running it through would be worse than useless: a whenless rise arc on `A`
+    /// would come out conditioned on `A`, a claim the library never made.
+    ///
+    /// Killed by: the whenless arm built `ArcPost::Settled` from `Condition::literal` alone, so the catch-all row came out conditioned on `A`.
+    #[test]
+    fn a_whenless_arc_is_the_catch_all_and_states_no_condition() {
+        let classes = classes_of(&full_sense_arc(
+            "A",
+            Some("positive_unate"),
+            r#""1.0, 2.0", "3.0, 4.0""#,
+            r#""10.0, 20.0", "30.0, 40.0""#,
+        ));
+
+        assert_eq!(classes.len(), 2, "one row per output edge: {:?}", classes);
+        for class in &classes {
+            assert_eq!(class.condition, None, "{:?}", class);
+            assert_eq!(class.members, vec![("A".to_owned(), None)], "{:?}", class);
+        }
+    }
+
+    /// A `when` this tool cannot read leaves the arc classless -- and converts it
+    /// anyway.
+    ///
+    /// Liberty's postfix complement is outside the parse surface, so `A'` is a
+    /// condition the tool must refuse to interpret rather than misread. That
+    /// refusal is confined to the classification: the reference modes this wave
+    /// ships never consult a condition, so the arc's tables are split exactly as
+    /// any other arc's would be. Contrast the sense skip, which is mode-uniform
+    /// because constraint placement needs the input's direction everywhere.
+    ///
+    /// Killed by: the unreadable arm fell back to `ArcPost::CatchAll`, so the arc took a catch-all row instead of staying classless.
+    #[test]
+    fn an_unreadable_when_leaves_the_arc_classless_and_still_converts() {
+        let mut lib = sense_lib(
+            &["A", "B"],
+            &full_sense_arc_when(
+                "A",
+                "positive_unate",
+                Some("A'"),
+                r#""1.0, 2.0", "3.0, 4.0""#,
+                r#""10.0, 20.0", "30.0, 40.0""#,
+            ),
+        );
+        let produced = process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+        let report = produced
+            .cells
+            .iter()
+            .find(|r| r.cell == "SENSE")
+            .expect("a report for SENSE");
+
+        // No class at all, and no catch-all row standing in for one.
+        assert!(report.classes.is_empty(), "{:?}", report.classes);
+        for arc in &report.raw_arcs {
+            assert_eq!(arc.class_rise, None);
+            assert_eq!(arc.class_fall, None);
+        }
+
+        // The conversion itself is untouched: the output still gains its clock arc
+        // and the input still gains its constraints.
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        assert_eq!(
+            arc_census(cell.get_pin("Q").expect("Q")),
+            census(&[("G", "rising_edge", 1)])
+        );
+        assert!(constraint_is_populated(
+            cell.get_pin("A").expect("A"),
+            "setup_rising"
+        ));
     }
 
     // --- constraint arithmetic at full characterisation size ----------------
@@ -2183,6 +3182,7 @@ library(large_table_test) {{
       function: "IQ";
       timing() {{
         related_pin: "D";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(large_template) {{ values({0}); }}
         cell_fall(large_template) {{ values({0}); }}
@@ -2198,11 +3198,13 @@ library(large_table_test) {{
 
         process_library(
             &mut liberty[0],
-            "CLK",
-            &Regex::new("RST").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "CLK",
+                &Regex::new("RST").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
 
         // The reference arc is taken from the middle of a 10x10 table: row 5,
@@ -2296,11 +3298,13 @@ library({}_test) {{
 
             process_library(
                 &mut liberty[0],
-                "G",
-                &reset_name,
-                false,
-                ReferenceMode::PerOutput,
-                WhenMerge::Mean,
+                &opts(
+                    "G",
+                    &reset_name,
+                    false,
+                    ReferenceMode::PerOutput,
+                    WhenMerge::Mean,
+                ),
             );
 
             let cell = liberty[0]
@@ -2469,11 +3473,13 @@ library({}_test) {{
 
         let reports = process_library(
             &mut liberty[0],
-            ASCEND_CLOCK,
-            &reset_name,
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                ASCEND_CLOCK,
+                &reset_name,
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let report = reports
             .cells
@@ -2485,18 +3491,18 @@ library({}_test) {{
         // the delays and constraints are drawn against, not as a constraint of its
         // own. Were the reset skip dropped, RN's 34 arcs would sit in every one of
         // these.
-        for (source, _) in report
-            .cell_rise_arcs
-            .keys()
-            .chain(report.cell_fall_arcs.keys())
-        {
+        for (source, ..) in report.constraint_arcs.keys() {
             assert!(
                 !reset_name.is_match(source),
                 "reset pin {} was folded into the model",
                 source
             );
         }
-        for source in report.setup_rise.keys().chain(report.setup_fall.keys()) {
+        for source in report
+            .setup_input_rise
+            .keys()
+            .chain(report.setup_input_fall.keys())
+        {
             assert!(
                 !reset_name.is_match(source),
                 "reset pin {} was given a constraint",
@@ -2623,11 +3629,13 @@ library({}_test) {{
 
         process_library(
             &mut liberty[0],
-            ASCEND_CLOCK,
-            &reset_name,
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                ASCEND_CLOCK,
+                &reset_name,
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let lib = &liberty[0];
 
@@ -2824,11 +3832,13 @@ library({}_test) {{
 
         process_library(
             &mut liberty[0],
-            ASCEND_CLOCK,
-            &reset_name,
-            true,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                ASCEND_CLOCK,
+                &reset_name,
+                true,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let lib = &liberty[0];
 

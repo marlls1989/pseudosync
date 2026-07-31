@@ -1,4 +1,5 @@
 mod arcs;
+mod conditions;
 mod emit;
 mod engine;
 mod liberty_io;
@@ -7,8 +8,8 @@ mod render;
 mod report;
 mod templates;
 
-use crate::arcs::{ReferenceMode, WhenMerge};
-use crate::engine::process_library;
+use crate::arcs::{Anchor, OffsetPlacement, ReferenceMode, WhenMerge};
+use crate::engine::{process_library, CellOptions};
 use crate::liberty_io::{parse_liberty_file, write_liberty_file, Destination};
 use crate::render::write_report;
 use crate::report::{CellReport, Refusal};
@@ -40,6 +41,19 @@ struct ProgramOptions {
     /// per slew/load point.
     #[structopt(short = "w", long, default_value = "mean")]
     when_merge: WhenMerge,
+
+    /// Where in each characterised table the value standing for the collapsed
+    /// axis is read: "middle" takes the middle row, column and element, so every
+    /// number emitted is one the library measured; "average" takes the mean over
+    /// that axis instead.
+    #[structopt(long, default_value = "middle")]
+    anchor: Anchor,
+
+    /// Which half of the split carries the constant the two are separated
+    /// around: "setup" leaves it in the setup constraint, "prop" folds it into
+    /// the clock-to-output delay. The two halves sum to the same arc either way.
+    #[structopt(long, default_value = "setup")]
+    offset_placement: OffsetPlacement,
 
     /// Write the reconstruction report here. It dumps each original arc, the
     /// reference and setup arcs it was split into, the arc rebuilt from that
@@ -114,17 +128,20 @@ fn run(opts: &ProgramOptions) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let cell_options = CellOptions {
+        clock_name: &opts.clock_pin,
+        reset_name: &opts.reset_pin,
+        latch: opts.latch,
+        mode: opts.reference_mode,
+        when_merge: opts.when_merge,
+        anchor: opts.anchor,
+        placement: opts.offset_placement,
+    };
+
     let mut reports: Vec<CellReport> = Vec::new();
     let mut refusals: Vec<Refusal> = Vec::new();
     for lib in liberty.iter_mut() {
-        let produced = process_library(
-            lib,
-            &opts.clock_pin,
-            &opts.reset_pin,
-            opts.latch,
-            opts.reference_mode,
-            opts.when_merge,
-        );
+        let produced = process_library(lib, &cell_options);
         reports.extend(produced.cells);
         refusals.extend(produced.refusals);
     }
@@ -139,6 +156,8 @@ fn run(opts: &ProgramOptions) -> Result<(), Box<dyn Error>> {
             &reports,
             &refusals,
             opts.reference_mode,
+            opts.anchor,
+            opts.offset_placement,
             opts.report_summary_only,
         )?;
         // The flush is not optional. A buffered sink writes nothing to its backing
@@ -182,6 +201,7 @@ library(ordering_test) {
       function: "IQ";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(T) { values("1.0, 2.0", "3.0, 4.0"); }
         cell_fall(T) { values("1.5, 2.5", "3.5, 4.5"); }
@@ -202,6 +222,8 @@ library(ordering_test) {
             reset_pin: Regex::new("(R|S)N?").expect("reset pin pattern"),
             reference_mode: ReferenceMode::PerOutput,
             when_merge: WhenMerge::Mean,
+            anchor: Anchor::Middle,
+            offset_placement: OffsetPlacement::Setup,
             report,
             report_summary_only: false,
             input,
@@ -266,6 +288,7 @@ library(undeclared_run_test) {
       function: "IQ";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         timing_type: combinational;
         cell_rise(MISSING) { values("1.0, 2.0", "3.0, 4.0"); }
       }

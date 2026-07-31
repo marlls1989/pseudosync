@@ -103,6 +103,28 @@ are summed, and together they do not describe the delay as an explicit function 
 and load. The difference is the **residual**, which the reconstruction report measures. That
 is the method's declared cost, reported rather than hidden.
 
+### Where the split is anchored, and which half keeps the constant
+
+Two knobs decide the arithmetic of the split above, and both are orthogonal to
+`--reference-mode`: that setting chooses *which output's* reference an input is charged
+against, these two choose *how* a reference is read off a table and *where* the constant
+between the two halves is written. Both default to the behaviour the tool has always had,
+so a run that names neither is unchanged.
+
+**`--anchor`** — the 2-D arc is slew x load and the split collapses one axis at a time, so
+something has to stand for the axis being collapsed. `middle` (the default) takes the
+middle row, the middle column and the middle element, so every number emitted is one the
+library actually measured. `average` takes the mean over that axis instead: it uses every
+measurement, at the cost of standing for no single characterised point.
+
+**`--offset-placement`** — `delay(A→Z) = propagation(G→Z) + setup(A→G)` fixes the *sum* of
+the two halves, not how the constant at the anchor point is divided between them. `setup`
+(the default) leaves it in the setup constraint; `prop` folds it into the clock-to-output
+delay and leaves the constraint the arc's own slew profile. Nothing else moves: the
+reconstruction and its residual are identical either way, because the constant is
+subtracted from one half and added to the other. The choice is about which of the two
+artefacts reads as the larger number.
+
 ## 5. An input driving both a converted and a skipped output
 
 Such an input gets a constraint computed over the **converted outputs only**. An input

@@ -1,7 +1,10 @@
 //! What the conversion cost: the arcs as characterised, the arcs rebuilt from
 //! the model, and the residual between them.
 
-use crate::arcs::{restore_arc, RefArc, References, WhenMerge};
+use crate::arcs::{
+    input_transition, restore_arc, EdgeRef, RefArc, References, TimingSense, Transition, WhenMerge,
+};
+use crate::conditions::ClassId;
 use ndarray::prelude::*;
 use std::collections::BTreeMap;
 
@@ -18,10 +21,33 @@ pub(crate) struct ConditionedArc {
     pub(crate) output: String,
     /// The `when` expression this arc was characterised under, if any.
     pub(crate) when: Option<String>,
-    pub(crate) timing_type: Option<String>,
-    pub(crate) timing_sense: Option<String>,
+    /// How this arc's input drives its output. Not optional: an arc whose sense
+    /// determines no input direction is skipped before it can be recorded here.
+    pub(crate) sense: TimingSense,
+    /// The post-settled state each delay family of this arc describes, as a class
+    /// within its cell. `None` where the arc carries no such family, where it has
+    /// no `when` at all -- the catch-all -- or where its `when` could not be read.
+    pub(crate) class_rise: Option<ClassId>,
+    pub(crate) class_fall: Option<ClassId>,
     pub(crate) cell_rise: Option<Array2<f64>>,
     pub(crate) cell_fall: Option<Array2<f64>>,
+}
+
+/// One post-settled state a cell's arcs describe, and which arcs describe it.
+///
+/// Grouped per output and per output edge, because a state is only a collision when
+/// two arcs claim the same one of the same edge of the same output.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct StateClass {
+    pub(crate) output: String,
+    /// The OUTPUT's transition: the table family these arcs were read from.
+    pub(crate) edge: Transition,
+    /// The condition in Liberty's spelling. `None` marks the catch-all row, which
+    /// holds the arcs that state no `when` at all and so cover whatever the
+    /// conditioned ones do not.
+    pub(crate) condition: Option<String>,
+    /// The source pin and `when` of every arc that landed here.
+    pub(crate) members: Vec<(String, Option<String>)>,
 }
 
 /// How far the pseudo-flop split lands from the arc it replaced.
@@ -39,7 +65,6 @@ pub(crate) struct ArcError {
     pub(crate) edge: &'static str,
     /// The `when` condition of the arc being reconstructed, if it had one.
     pub(crate) when: Option<String>,
-    pub(crate) timing_type: Option<String>,
     pub(crate) original: Array2<f64>,
     pub(crate) reconstructed: Array2<f64>,
     pub(crate) error: Array2<f64>,
@@ -62,6 +87,24 @@ impl ArcError {
 
     pub(crate) fn max_abs(&self) -> f64 {
         self.error.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+    }
+
+    /// The residual at each point as a percentage of the arc's value there.
+    ///
+    /// The statistics judge the whole table against one magnitude, which hides
+    /// that a fixed residual matters far more at a fast corner of the table than
+    /// at a slow one. Dividing point by point makes the regions comparable.
+    ///
+    /// The quotient is unbounded where the arc passes through zero, which a real
+    /// delay table does: at a slow enough input slew the output arrives before the
+    /// input has finished switching, and the characterised delay goes negative.
+    /// Near that crossing an ordinary residual divided by a vanishing value is
+    /// arbitrarily large, so these figures are read with the percentiles beside
+    /// them rather than by their extremes. At a point of exactly zero there is no
+    /// quotient at all, and the infinity or NaN is left standing rather than
+    /// replaced by a number the data does not support.
+    pub(crate) fn relative_error(&self) -> Array2<f64> {
+        &self.error / &self.original * 100.0
     }
 
     /// RMS residual as a percentage of the arc's own magnitude.
@@ -100,6 +143,16 @@ pub(crate) struct LibraryReport {
     pub(crate) refusals: Vec<Refusal>,
 }
 
+/// The merged delay tables the constraints are built from, keyed by source pin,
+/// output pin, the direction the INPUT was moving in, and the table family the
+/// values were read from.
+///
+/// The input's direction is part of the key because that is what a constraint is
+/// keyed on, and it is not the output's: a negative-unate arc's `cell_rise` values
+/// describe an input that fell. The family stays in the key beside it because the
+/// reference the values are charged against is still chosen by the family.
+pub(crate) type ConstraintArcs = BTreeMap<(String, String, Transition, &'static str), Array2<f64>>;
+
 /// Everything the reconstruction report shows for one processed cell.
 ///
 /// The engine returns this rather than writing it out itself, so the library
@@ -112,37 +165,59 @@ pub(crate) struct CellReport {
     pub(crate) when_merge: WhenMerge,
     /// Every arc as characterised, one entry per `when` condition.
     pub(crate) raw_arcs: Vec<ConditionedArc>,
-    /// The same arcs after the `when` conditions were folded together; this is
-    /// what the constraints were actually derived from.
-    pub(crate) cell_rise_arcs: BTreeMap<(String, String), Array2<f64>>,
-    pub(crate) cell_fall_arcs: BTreeMap<(String, String), Array2<f64>>,
+    /// The same arcs after the `when` conditions were folded together, keyed by
+    /// source pin, output pin, the direction the INPUT was moving in and the table
+    /// family the values were read from. This is what the constraints were actually
+    /// derived from.
+    pub(crate) constraint_arcs: ConstraintArcs,
     /// Reference arc chosen per output.
     pub(crate) ref_arcs: BTreeMap<String, RefArc>,
     /// Reference the constraints were taken against.
     pub(crate) mean_ref: RefArc,
-    pub(crate) setup_rise: BTreeMap<String, Array1<f64>>,
-    pub(crate) setup_fall: BTreeMap<String, Array1<f64>>,
+    /// The constraints, keyed on the constrained pin's own transition -- which is
+    /// what Liberty's `rise_constraint` and `fall_constraint` are keyed on too.
+    pub(crate) setup_input_rise: BTreeMap<String, Array1<f64>>,
+    pub(crate) setup_input_fall: BTreeMap<String, Array1<f64>>,
+    /// The slew and load points every table of this cell is indexed at, so a residual
+    /// can be read against the regime it occurs in. `None` where the library declares
+    /// no such axis, or where the cell's arcs disagreed about it.
+    pub(crate) slews: Option<Vec<f64>>,
+    pub(crate) loads: Option<Vec<f64>>,
+    /// How much error the conversion introduces over each arc as the source
+    /// library characterised it, one entry per `when` condition. Those originals
+    /// are the only honest baseline: the merged arc is itself a source of error,
+    /// so measuring against it would report less error than is introduced.
     pub(crate) arcs: Vec<ArcError>,
+    /// The post-settled states this cell's arcs describe, grouped by the function
+    /// they denote. Informational: nothing in the conversion consults them yet, so
+    /// this is what says how much of the cell a per-state model would have to
+    /// distinguish.
+    pub(crate) classes: Vec<StateClass>,
 }
 
-/// One half of an arc: which raw table it reads, and which component of a
-/// reference arc pairs with it. Bundled so the two can never be mismatched.
+/// One half of an arc: the direction the OUTPUT moved in, which raw table records
+/// it, and which component of a reference arc pairs with it. Bundled so the three
+/// can never be mismatched.
 pub(crate) struct Edge {
     name: &'static str,
+    /// The output's transition, which is what a delay table family names.
+    output: Transition,
     raw: fn(&ConditionedArc) -> Option<&Array2<f64>>,
-    reference: fn(&RefArc) -> &Array1<f64>,
+    reference: fn(&RefArc) -> &EdgeRef,
 }
 
 pub(crate) const RISE: Edge = Edge {
     name: "rise",
+    output: Transition::Rise,
     raw: |a| a.cell_rise.as_ref(),
-    reference: |r| &r.cell_rise,
+    reference: |r| &r.rise,
 };
 
 pub(crate) const FALL: Edge = Edge {
     name: "fall",
+    output: Transition::Fall,
     raw: |a| a.cell_fall.as_ref(),
-    reference: |r| &r.cell_fall,
+    reference: |r| &r.fall,
 };
 
 /// Measure the reconstruction residual against every condition of every arc.
@@ -154,7 +229,8 @@ pub(crate) const FALL: Edge = Edge {
 /// conditions into one representative arc threw away.
 pub(crate) fn collect_arc_errors(
     arcs: &[ConditionedArc],
-    setup: &BTreeMap<String, Array1<f64>>,
+    setup_input_rise: &BTreeMap<String, Array1<f64>>,
+    setup_input_fall: &BTreeMap<String, Array1<f64>>,
     references: &References,
     cell_name: &str,
     edge: &Edge,
@@ -164,6 +240,15 @@ pub(crate) fn collect_arc_errors(
         let (source, output) = (&arc.source, &arc.output);
         let Some(original) = (edge.raw)(arc) else {
             continue;
+        };
+        // Which constraint this arc was folded into is the arc's own property: the
+        // direction its INPUT was moving in. Reading the map named after the output
+        // family instead would reconstruct a negative-unate arc from a vector no part
+        // of it contributed to.
+        let setup = match input_transition(arc.sense, edge.output) {
+            Some(Transition::Rise) => setup_input_rise,
+            Some(Transition::Fall) => setup_input_fall,
+            None => continue,
         };
         let Some(slew_dependent) = setup.get(source) else {
             continue;
@@ -175,7 +260,7 @@ pub(crate) fn collect_arc_errors(
             continue;
         };
 
-        let reconstructed = restore_arc(slew_dependent, (edge.reference)(delay_ref));
+        let reconstructed = restore_arc(slew_dependent, &(edge.reference)(delay_ref).delay);
         if reconstructed.raw_dim() != original.raw_dim() {
             continue;
         }
@@ -186,7 +271,6 @@ pub(crate) fn collect_arc_errors(
             output: output.clone(),
             edge: edge.name,
             when: arc.when.clone(),
-            timing_type: arc.timing_type.clone(),
             error: reconstructed.clone() - original,
             original: original.clone(),
             reconstructed,
@@ -199,10 +283,31 @@ mod tests {
     //! Behaviour of the `report` module: reconstruction reports and residual measurement.
 
     use super::*;
-    use crate::arcs::{restore_arc, ReferenceMode, WhenMerge};
-    use crate::engine::process_library; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
+    use crate::arcs::{restore_arc, Anchor, OffsetPlacement, ReferenceMode, WhenMerge};
+    use crate::engine::{process_library, CellOptions}; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use liberty_parser::liberty::Liberty;
     use regex::Regex;
+
+    /// The conversion knobs, with the anchor and offset placement at the defaults
+    /// the command line supplies. Those two are exercised where they are decided,
+    /// in `arcs`; here they only have to stay out of the way.
+    fn opts<'a>(
+        clock_name: &'a str,
+        reset_name: &'a Regex,
+        latch: bool,
+        mode: ReferenceMode,
+        when_merge: WhenMerge,
+    ) -> CellOptions<'a> {
+        CellOptions {
+            clock_name,
+            reset_name,
+            latch,
+            mode,
+            when_merge,
+            anchor: Anchor::Middle,
+            placement: OffsetPlacement::Setup,
+        }
+    }
 
     /// Four timing tables for one arc, so `select_reference_arc` accepts it.
     fn arc(related_pin: &str, base: f64) -> String {
@@ -210,6 +315,7 @@ mod tests {
             r#"
         timing() {{
           related_pin: "{}";
+          timing_sense : positive_unate;
           cell_rise(T) {{ values("{}, {}", "{}, {}"); }}
           cell_fall(T) {{ values("{}, {}", "{}, {}"); }}
           rise_transition(T) {{ values("0.1, 0.2", "0.3, 0.4"); }}
@@ -314,7 +420,6 @@ library(bundle_test) {{
             output: "Q".to_owned(),
             edge: "rise",
             when: None,
-            timing_type: None,
             original,
             reconstructed,
             error,
@@ -365,7 +470,10 @@ library(bundle_test) {{
 
         for mode in [ReferenceMode::Pooled, ReferenceMode::PerOutput] {
             let mut lib = reportable_lib();
-            let reports = process_library(&mut lib[0], "G", &reset, false, mode, WhenMerge::Mean);
+            let reports = process_library(
+                &mut lib[0],
+                &opts("G", &reset, false, mode, WhenMerge::Mean),
+            );
 
             let report = reports
                 .cells
@@ -375,11 +483,11 @@ library(bundle_test) {{
 
             assert_eq!(report.library, "bundle_test");
             assert!(
-                !report.cell_rise_arcs.is_empty(),
+                !report.constraint_arcs.is_empty(),
                 "the original arcs must be reported, not just the residual"
             );
             assert!(!report.ref_arcs.is_empty(), "{:?}", mode);
-            assert!(!report.setup_rise.is_empty(), "{:?}", mode);
+            assert!(!report.setup_input_rise.is_empty(), "{:?}", mode);
             assert!(
                 !report.arcs.is_empty(),
                 "at least one arc must be measured in {:?}",
@@ -432,11 +540,13 @@ library(bundle_test) {{
             let mut lib = dual_rail_lib();
             let reports = process_library(
                 &mut lib[0],
-                "G",
-                &Regex::new("(R|S)N?").unwrap(),
-                false,
-                mode,
-                WhenMerge::Mean,
+                &opts(
+                    "G",
+                    &Regex::new("(R|S)N?").unwrap(),
+                    false,
+                    mode,
+                    WhenMerge::Mean,
+                ),
             );
             let report = reports.cells.iter().find(|r| r.cell == "DUT").unwrap();
             report
@@ -487,24 +597,28 @@ library(bundle_test) {{
         let mut lib = reportable_lib();
         let reports = process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let report = reports.cells.iter().find(|r| r.cell == "DUT").unwrap();
         assert!(!report.arcs.is_empty(), "fixture must produce arcs");
 
         for arc in &report.arcs {
+            // The fixture is positive unate throughout, so the input's direction is
+            // the output's and the edge names both.
             let setup = match arc.edge {
-                "rise" => &report.setup_rise[&arc.source],
-                _ => &report.setup_fall[&arc.source],
+                "rise" => &report.setup_input_rise[&arc.source],
+                _ => &report.setup_input_fall[&arc.source],
             };
             let refarc = &report.ref_arcs[&arc.output];
             let delay = match arc.edge {
-                "rise" => &refarc.cell_rise,
-                _ => &refarc.cell_fall,
+                "rise" => &refarc.rise.delay,
+                _ => &refarc.fall.delay,
             };
 
             assert_eq!(arc.reconstructed, restore_arc(setup, delay), "{:?}", arc);
@@ -556,11 +670,13 @@ library(bundle_test) {{
         let mut lib = bundle_lib(body);
         let reports = process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
         let report = reports.cells.iter().find(|r| r.cell == "DUT").unwrap();
 

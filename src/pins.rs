@@ -133,10 +133,31 @@ mod tests {
     //! and which pins constraints are written to.
 
     use super::*;
-    use crate::arcs::{ReferenceMode, WhenMerge};
-    use crate::engine::process_library; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
+    use crate::arcs::{Anchor, OffsetPlacement, ReferenceMode, WhenMerge};
+    use crate::engine::{process_library, CellOptions}; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use liberty_parser::liberty::{Group, Liberty};
     use regex::Regex;
+
+    /// The conversion knobs, with the anchor and offset placement at the defaults
+    /// the command line supplies. Those two are exercised where they are decided,
+    /// in `arcs`; here they only have to stay out of the way.
+    fn opts<'a>(
+        clock_name: &'a str,
+        reset_name: &'a Regex,
+        latch: bool,
+        mode: ReferenceMode,
+        when_merge: WhenMerge,
+    ) -> CellOptions<'a> {
+        CellOptions {
+            clock_name,
+            reset_name,
+            latch,
+            mode,
+            when_merge,
+            anchor: Anchor::Middle,
+            placement: OffsetPlacement::Setup,
+        }
+    }
 
     fn sample_lib() -> Liberty {
         liberty_parser::parse_lib(
@@ -208,6 +229,7 @@ library(non_qualifying_test) {
       function: "A & B";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         cell_rise(T) { values("0.1, 0.2", "0.2, 0.3"); }
         cell_fall(T) { values("0.11, 0.21", "0.21, 0.31"); }
         rise_transition(T) { values("0.01, 0.02", "0.02, 0.03"); }
@@ -224,6 +246,7 @@ library(non_qualifying_test) {
       function: "IQ";
       timing() {
         related_pin: "D";
+        timing_sense : positive_unate;
         cell_rise(T) { values("0.3, 0.4", "0.4, 0.5"); }
         cell_fall(T) { values("0.31, 0.41", "0.41, 0.51"); }
         rise_transition(T) { values("0.03, 0.04", "0.04, 0.05"); }
@@ -240,6 +263,7 @@ library(non_qualifying_test) {
       function: "A";
       timing() {
         related_pin: "A";
+        timing_sense : positive_unate;
         cell_rise(T) { values("0.5, 0.6", "0.6, 0.7"); }
         cell_fall(T) { values("0.51, 0.61", "0.61, 0.71"); }
         rise_transition(T) { values("0.05, 0.06", "0.06, 0.07"); }
@@ -265,11 +289,13 @@ library(non_qualifying_test) {
 
         process_library(
             &mut processed[0],
-            "CLK",
-            &Regex::new(r"RST").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "CLK",
+                &Regex::new(r"RST").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
 
         for (cell_name, why) in [
@@ -385,6 +411,7 @@ library({}_test) {{
       function: "IQ";
       timing() {{
         related_pin: "A";
+        timing_sense : positive_unate;
         cell_rise(test_template) {{ values("0.2, 0.3", "0.3, 0.4"); }}
         cell_fall(test_template) {{ values("0.18, 0.28", "0.28, 0.38"); }}
         rise_transition(test_template) {{ values("0.04, 0.08", "0.08, 0.12"); }}
@@ -401,11 +428,13 @@ library({}_test) {{
                 .unwrap_or_else(|_| panic!("parse {} variation", variation));
             process_library(
                 &mut lib[0],
-                "G",
-                &reset_name,
-                false,
-                ReferenceMode::PerOutput,
-                WhenMerge::Mean,
+                &opts(
+                    "G",
+                    &reset_name,
+                    false,
+                    ReferenceMode::PerOutput,
+                    WhenMerge::Mean,
+                ),
             );
             let cell = lib[0].get_cell("RACELEM_VARIANT").expect("RACELEM_VARIANT");
 

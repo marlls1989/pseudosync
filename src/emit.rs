@@ -45,27 +45,31 @@ fn create_timing_table_group(table_type: &str, lut_template: &str, values: &Arra
 }
 
 /// Create a setup timing group for an input pin
+///
+/// `rise_constraint` and `fall_constraint` are keyed on the CONSTRAINED pin's own
+/// transition (RM p.336), so the two tables are named for the input's direction and
+/// not for the output family the values were characterised in.
 pub(crate) fn create_setup_timing_group(
     clock_name: &str,
     ref_arc: &RefArc,
-    setup_rise: Option<&Array1<f64>>,
-    setup_fall: Option<&Array1<f64>>,
+    input_rise: Option<&Array1<f64>>,
+    input_fall: Option<&Array1<f64>>,
 ) -> Group {
     let mut setup_values = Vec::with_capacity(2);
 
-    if let Some(setup_rise) = setup_rise {
+    if let Some(input_rise) = input_rise {
         setup_values.push(create_constraint_table_group(
             "rise_constraint",
             &ref_arc.lut_template,
-            setup_rise,
+            input_rise,
         ));
     }
 
-    if let Some(setup_fall) = setup_fall {
+    if let Some(input_fall) = input_fall {
         setup_values.push(create_constraint_table_group(
             "fall_constraint",
             &ref_arc.lut_template,
-            setup_fall,
+            input_fall,
         ));
     }
 
@@ -89,27 +93,30 @@ pub(crate) fn create_setup_timing_group(
 }
 
 /// Create a hold timing group for an input pin
+///
+/// As with the setup group above, the two tables are keyed on the constrained pin's
+/// own transition.
 pub(crate) fn create_hold_timing_group(
     clock_name: &str,
     ref_arc: &RefArc,
-    hold_rise: Option<&Array1<f64>>,
-    hold_fall: Option<&Array1<f64>>,
+    input_rise: Option<&Array1<f64>>,
+    input_fall: Option<&Array1<f64>>,
 ) -> Group {
     let mut hold_values = Vec::with_capacity(2);
 
-    if let Some(hold_rise) = hold_rise {
+    if let Some(input_rise) = input_rise {
         hold_values.push(create_constraint_table_group(
             "rise_constraint",
             &ref_arc.lut_template,
-            hold_rise,
+            input_rise,
         ));
     }
 
-    if let Some(hold_fall) = hold_fall {
+    if let Some(input_fall) = input_fall {
         hold_values.push(create_constraint_table_group(
             "fall_constraint",
             &ref_arc.lut_template,
-            hold_fall,
+            input_fall,
         ));
     }
 
@@ -162,22 +169,22 @@ pub(crate) fn create_pseudo_output_timing_arc(
             create_timing_table_group(
                 "rise_transition",
                 &mean_delays.lut_template,
-                &output_transitions.rise_trans,
+                &output_transitions.rise.transition,
             ),
             create_timing_table_group(
                 "fall_transition",
                 &mean_delays.lut_template,
-                &output_transitions.fall_trans,
+                &output_transitions.fall.transition,
             ),
             create_timing_table_group(
                 "cell_rise",
                 &mean_delays.lut_template,
-                &mean_delays.cell_rise,
+                &mean_delays.rise.delay,
             ),
             create_timing_table_group(
                 "cell_fall",
                 &mean_delays.lut_template,
-                &mean_delays.cell_fall,
+                &mean_delays.fall.delay,
             ),
         ],
     }
@@ -263,9 +270,9 @@ mod tests {
     //! Behaviour of the `emit` module: pseudo LUT templates and latch-to-flip-flop conversion.
 
     use super::*;
-    use crate::arcs::RefArc;
-    use crate::arcs::{ReferenceMode, WhenMerge};
-    use crate::engine::process_library; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
+    use crate::arcs::EdgeRef;
+    use crate::arcs::{Anchor, OffsetPlacement, ReferenceMode, WhenMerge};
+    use crate::engine::{process_library, CellOptions}; // Test-only; a unit test observes its subject through the real engine path rather than a stub.
     use indexmap::IndexMap;
     use liberty_parser::{
         ast::Value,
@@ -273,6 +280,27 @@ mod tests {
     };
     use regex::Regex;
     use std::collections::HashSet;
+
+    /// The conversion knobs, with the anchor and offset placement at the defaults
+    /// the command line supplies. Those two are exercised where they are decided,
+    /// in `arcs`; here they only have to stay out of the way.
+    fn opts<'a>(
+        clock_name: &'a str,
+        reset_name: &'a Regex,
+        latch: bool,
+        mode: ReferenceMode,
+        when_merge: WhenMerge,
+    ) -> CellOptions<'a> {
+        CellOptions {
+            clock_name,
+            reset_name,
+            latch,
+            mode,
+            when_merge,
+            anchor: Anchor::Middle,
+            placement: OffsetPlacement::Setup,
+        }
+    }
 
     fn lut_template(name: &str, index_1: [f64; 2], index_2: [f64; 2]) -> Group {
         // A minimal lu_table_template carrying index_1 and index_2, the two
@@ -434,10 +462,17 @@ library(test) {
             row: 0,
             related_pin: "CK".to_owned(),
             lut_template: lut_template.to_owned(),
-            rise_trans: Array1::from(tables[0].to_vec()),
-            fall_trans: Array1::from(tables[1].to_vec()),
-            cell_rise: Array1::from(tables[2].to_vec()),
-            cell_fall: Array1::from(tables[3].to_vec()),
+            anchor: Anchor::Middle,
+            rise: EdgeRef {
+                delay: Array1::from(tables[2].to_vec()),
+                transition: Array1::from(tables[0].to_vec()),
+                crossing: tables[2][0],
+            },
+            fall: EdgeRef {
+                delay: Array1::from(tables[3].to_vec()),
+                transition: Array1::from(tables[1].to_vec()),
+                crossing: tables[3][0],
+            },
         }
     }
 
@@ -460,7 +495,7 @@ library(test) {
     /// the two sources here are given deliberately disjoint value ranges -- 1.x against
     /// 9.x -- that no swap between them can survive.
     ///
-    /// Killed by: `create_pseudo_output_timing_arc` emitted `mean_delays.rise_trans` as the rise_transition table instead of `output_transitions.rise_trans`.
+    /// Killed by: `create_pseudo_output_timing_arc` emitted `mean_delays.rise.transition` as the rise_transition table instead of `output_transitions.rise.transition`.
     #[test]
     fn pseudo_output_arc_takes_transitions_from_the_output_and_delays_from_the_reference() {
         let transitions = ref_arc("tplA", [[1.1, 1.2], [1.3, 1.4], [1.5, 1.6], [1.7, 1.8]]);
@@ -488,15 +523,21 @@ library(test) {
         // The transitions are the output's own ...
         assert_eq!(
             table_values(&group.subgroups[0]),
-            transitions.rise_trans.to_vec()
+            transitions.rise.transition.to_vec()
         );
         assert_eq!(
             table_values(&group.subgroups[1]),
-            transitions.fall_trans.to_vec()
+            transitions.fall.transition.to_vec()
         );
         // ... while the delays are the reference's. Swapping the two is the defect.
-        assert_eq!(table_values(&group.subgroups[2]), delays.cell_rise.to_vec());
-        assert_eq!(table_values(&group.subgroups[3]), delays.cell_fall.to_vec());
+        assert_eq!(
+            table_values(&group.subgroups[2]),
+            delays.rise.delay.to_vec()
+        );
+        assert_eq!(
+            table_values(&group.subgroups[3]),
+            delays.fall.delay.to_vec()
+        );
 
         // Every table indexes the reference's template, not the output's.
         let expected_name = format!("{}_pseudo_delay", delays.lut_template);
@@ -528,6 +569,7 @@ library(pseudo_arc_test) {
       function: "IQ";
       timing() {
         related_pin: "D";
+        timing_sense : positive_unate;
         cell_rise(T) { values("1.0, 2.0", "3.0, 4.0"); }
         cell_fall(T) { values("5.0, 6.0", "7.0, 8.0"); }
         rise_transition(T) { values("0.1, 0.2", "0.3, 0.4"); }
@@ -539,6 +581,7 @@ library(pseudo_arc_test) {
       function: "IQN";
       timing() {
         related_pin: "D";
+        timing_sense : positive_unate;
         cell_rise(T) { values("10.0, 20.0", "30.0, 40.0"); }
         cell_fall(T) { values("50.0, 60.0", "70.0, 80.0"); }
         rise_transition(T) { values("1.1, 1.2", "1.3, 1.4"); }
@@ -567,11 +610,13 @@ library(pseudo_arc_test) {
 
         process_library(
             &mut lib[0],
-            "G",
-            &Regex::new("(R|S)N?").unwrap(),
-            false,
-            ReferenceMode::PerOutput,
-            WhenMerge::Mean,
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
         );
 
         let cell = lib[0].get_cell("DUT").expect("DUT");
