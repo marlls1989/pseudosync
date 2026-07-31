@@ -49,9 +49,10 @@ pub(crate) struct StateClass {
     pub(crate) output: String,
     /// The OUTPUT's transition: the table family these arcs were read from.
     pub(crate) edge: Transition,
-    /// The condition in Liberty's spelling. `None` marks the catch-all row, which
-    /// holds the arcs that state no `when` at all and so cover whatever the
-    /// conditioned ones do not.
+    /// The class's merged condition, in Liberty's spelling -- which can be wider
+    /// than any one member's own, since the class groups by overlap and not by a
+    /// shared spelling. `None` marks the catch-all row, which holds the arcs that
+    /// state no `when` at all and so cover whatever the conditioned ones do not.
     pub(crate) condition: Option<String>,
     /// The source pin and `when` of every arc that landed here.
     pub(crate) members: Vec<(String, Option<String>)>,
@@ -255,10 +256,12 @@ pub(crate) struct CellReport {
     /// are the only honest baseline: the merged arc is itself a source of error,
     /// so measuring against it would report less error than is introduced.
     pub(crate) arcs: Vec<ArcError>,
-    /// The post-settled states this cell's arcs describe, grouped by the function
-    /// they denote. Under per-state these are the states the emitted delays are
-    /// conditioned on; under the other two modes nothing in the split consults them,
-    /// and they say how much of the cell a per-state model would have to distinguish.
+    /// The post-settled states this cell's arcs describe, grouped by OVERLAP:
+    /// conditions that can hold at once are one class, which is weaker than denoting
+    /// the same function. Under per-state these are the states the emitted delays
+    /// are conditioned on; under the other two modes nothing in the split consults
+    /// them, and they say how much of the cell a per-state model would have to
+    /// distinguish.
     pub(crate) classes: Vec<StateClass>,
     /// The condition each of those classes denotes, in Liberty's spelling, so a
     /// reference filed under a class can be captioned with the state it describes

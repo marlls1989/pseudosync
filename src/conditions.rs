@@ -436,7 +436,8 @@ pub(crate) fn merge_conditions(members: &[&Condition]) -> Condition {
 #[cfg(test)]
 mod tests {
     //! Behaviour of the `conditions` module: parsing, rendering and the grouping
-    //! of conditions by the function they denote.
+    //! of conditions by overlap -- conditions that can hold at once, which is
+    //! weaker than denoting the same function.
 
     use super::*;
 

@@ -507,7 +507,12 @@ fn dump_reduction(sink: &mut dyn Write, r: &CellReport) -> Result<(), Box<dyn Er
     dump_collision_classes(sink, r)
 }
 
-/// The states one cell's arcs describe, grouped by the function they denote.
+/// The states one cell's arcs describe, grouped by OVERLAP: conditions that can hold
+/// at once are one row, which is a weaker grouping than denoting the same function.
+///
+/// So a row is headed by its class's merged condition -- the one its arc carries in
+/// the emitted library -- and not by any one member's, which can be strictly narrower
+/// than the state the row heads. The members are listed beside it either way.
 ///
 /// Informational under every mode: nothing in the split consults a condition, so
 /// this changes no emitted byte. What it says is how much of the cell a per-state

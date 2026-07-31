@@ -65,7 +65,17 @@ enum ArcPost {
 }
 
 /// Group one cell's arcs by the post-settled state they describe, writing each
-/// class back onto the arc's own edge field and returning the report's view of them.
+/// class back onto the arc's own edge field and returning the report's view of them
+/// beside the merged condition each class is emitted under.
+///
+/// A row is headed by its class's MERGED condition -- the very condition the class's
+/// arc carries in the emitted library -- and never by the condition of the member
+/// that opened the row. A class's members can hold at once, which is what put them in
+/// one class, so a member's own condition can be strictly narrower than the state its
+/// class is emitted under; heading the row with it would state the class under a
+/// condition its arc was never confined to. That is why the labels are drawn here,
+/// before the rows: [`merged_class_conditions`] reads the classes this function has
+/// just written back, so the rows cannot be headed until it has run.
 ///
 /// Classes are drawn within one OUTPUT and never across two. After the split every
 /// propagation arc of an output is `G -> Q`, so on one output nothing but the `when`
@@ -80,7 +90,10 @@ enum ArcPost {
 /// conditioned arcs do not -- and takes a row of its own rather than a class. An arc
 /// whose `when` could not be read takes neither: it was warned about where it was
 /// read, and nothing can be said about the state it describes.
-fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<StateClass> {
+fn classify_states(
+    raw_arcs: &mut [ConditionedArc],
+    post: &[ArcPost],
+) -> (Vec<StateClass>, BTreeMap<ClassId, Condition>) {
     // Flattened per output, in the collection order of each, with the way back to the
     // arc and edge every condition came from -- because the classes are numbered by
     // first appearance within the group they are drawn in. The outputs themselves are
@@ -119,6 +132,10 @@ fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<Sta
         }
     }
 
+    // The condition each class is stated under, drawn from the write-back above so
+    // that a row can be headed by it rather than by whichever member opened the row.
+    let class_conditions = merged_class_conditions(raw_arcs, post);
+
     // One row per (output, edge, class), plus one catch-all row per (output, edge).
     // Keyed on `Option<ClassId>` so the catch-all sorts before every class, and
     // built through an index so the rows keep first-appearance order.
@@ -127,7 +144,6 @@ fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<Sta
     let mut place = |output: &str,
                      edge: Transition,
                      class: Option<ClassId>,
-                     condition: String,
                      member: (String, Option<String>)| {
         let slot = index_of
             .entry((output.to_owned(), edge, class))
@@ -135,7 +151,18 @@ fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<Sta
                 rows.push(StateClass {
                     output: output.to_owned(),
                     edge,
-                    condition: class.map(|_| condition),
+                    condition: class.map(|class| {
+                        class_conditions
+                            .get(&class)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "internal: state {:?} of output {} was numbered without a \
+                                     merged condition",
+                                    class, output
+                                )
+                            })
+                            .liberty()
+                    }),
                     members: Vec::new(),
                 });
                 rows.len() - 1
@@ -153,31 +180,29 @@ fn classify_states(raw_arcs: &mut [ConditionedArc], post: &[ArcPost]) -> Vec<Sta
                     (Transition::Fall, arc.cell_fall.is_some()),
                 ] {
                     if present {
-                        place(&arc.output, edge, None, String::new(), member.clone());
+                        place(&arc.output, edge, None, member.clone());
                     }
                 }
             }
-            ArcPost::Settled { source, rise, fall } => {
+            ArcPost::Settled { source, .. } => {
                 let member = (arc.source.clone(), Some(source.as_written()));
-                for (edge, condition, class) in [
-                    (Transition::Rise, rise, arc.class_rise),
-                    (Transition::Fall, fall, arc.class_fall),
+                // The class written back above is what says an edge was classified:
+                // it was set for exactly the post-settled conditions this arc
+                // carried, so an edge the arc never described holds none and takes
+                // no row.
+                for (edge, class) in [
+                    (Transition::Rise, arc.class_rise),
+                    (Transition::Fall, arc.class_fall),
                 ] {
-                    if let (Some(condition), Some(_)) = (condition, class) {
-                        place(
-                            &arc.output,
-                            edge,
-                            class,
-                            condition.liberty(),
-                            member.clone(),
-                        );
+                    if class.is_some() {
+                        place(&arc.output, edge, class, member.clone());
                     }
                 }
             }
         }
     }
 
-    rows
+    (rows, class_conditions)
 }
 
 /// The merged condition each post-settled class is emitted under: the least
@@ -318,9 +343,11 @@ fn check_groups(
                     (Some(class), Some(label.clone()))
                 }
                 ArcPost::CatchAll => (None, None),
-                // Only reachable where a condition that could not be read was kept,
-                // which is every mode but per-state -- and those emit one
-                // unconditioned check per pin, so nothing consults this.
+                // Unreachable: this function is called from the per-state arm alone,
+                // and per-state drops an arc whose `when` it could not read before that
+                // arc ever reaches `post`. The arm is here to keep the match total, and
+                // drops the arc, which is what the skip upstream already did -- it is
+                // not the catch-all, whose members cover a state this one does not name.
                 ArcPost::Unreadable => continue,
             };
 
@@ -1006,9 +1033,10 @@ fn process_cell(
     // One classification per output, over its own post-settled conditions in
     // collection order, so two arcs describing the same state of one output share an
     // id however they were spelled -- and the ids run in the order the library
-    // declares the arcs.
-    let classes = classify_states(&mut raw_arcs, &post_conditions);
-    let class_conditions = merged_class_conditions(&raw_arcs, &post_conditions);
+    // declares the arcs. The merged condition of each class comes back with the
+    // classification because the report's rows are headed by it too, so what an arc
+    // is emitted under and what it is reported under are one label read twice.
+    let (classes, class_conditions) = classify_states(&mut raw_arcs, &post_conditions);
 
     // The conditions the checks are grouped under: a second classification, per pin
     // and over the source `when`s alone, numbered independently of the post-settled
@@ -1169,7 +1197,13 @@ fn process_cell(
     // Named here rather than at the skip either way, because a cell that turns out
     // not to convert at all is emitted verbatim and makes no output-scope refusal
     // about anything.
-    for outpin_name in &unreadable_arcs {
+    //
+    // `unique()`d: `unreadable_arcs` carries one entry per skipped arc, and an
+    // output whose `when` could not be read on two separate arcs would otherwise
+    // read this list twice under the same name, and so be given the same refusal
+    // twice over -- an identical reason repeated tells the reader nothing a single
+    // one would not.
+    for outpin_name in unreadable_arcs.iter().unique() {
         if !converted(outpin_name) {
             continue;
         }
@@ -1289,13 +1323,18 @@ fn process_cell(
     // captioned with the condition its checks are stated under. Read off the groups
     // themselves rather than classified a second time, and keyed by the pin as well
     // as the class because the classes are numbered per pin.
+    //
+    // In the source library's own spelling, which is the spelling the emitted `when`
+    // carries: a caption is read to correlate a constraint with the group it ships
+    // in, so it names that group as the library will see it and not as this tool
+    // would have rendered it.
     let check_conditions: BTreeMap<(String, ClassId), String> = check_groups
         .iter()
         .flat_map(|(pin, pin_groups)| {
             pin_groups.iter().filter_map(move |group| {
                 match (group.scope, group.condition.as_ref()) {
                     (Scope::State(class), Some(condition)) => {
-                        Some(((pin.clone(), class), condition.liberty()))
+                        Some(((pin.clone(), class), condition.as_written()))
                     }
                     _ => None,
                 }
@@ -3383,7 +3422,7 @@ library(sense_test) {{
     /// tables, `[33, 44] - 4 = [29, 40]`, in the rise family alone and nothing at
     /// all in the fall family -- two opposite input directions averaged together.
     ///
-    /// Killed by: the constraint key carried the OUTPUT's edge in place of the input's, so both of `A`'s arcs landed in one accumulator and `rise_constraint` came out as the blend `[29, 40]` with no `fall_constraint` at all. Observed to redden this test and the two neighbours that also carry a negative arc; the positive test stays green, because with one sense the two keys coincide -- which is exactly the point this test makes and that one cannot.
+    /// Killed by: the constraint key carried the OUTPUT's edge in place of the input's, so both of `A`'s arcs landed in one accumulator and `rise_constraint` came out as the blend `[29, 40]` with no `fall_constraint` at all. Observed to redden this test and the three other fixtures whose constraint values come off a negative arc -- 146 passed, 4 failed: `a_negative_unate_arc_lands_in_the_opposite_constraint_family` above, `a_pooled_group_of_mixed_families_is_referenced_entry_by_entry` below, and the per-state `a_negative_unate_arcs_per_state_values_land_in_the_flipped_family`; the positive test stays green, because with one sense the two keys coincide -- which is exactly the point this test makes and that one cannot.
     #[test]
     fn two_senses_on_one_pin_pair_are_routed_to_opposite_input_edges() {
         let mut lib = sense_lib(
@@ -3647,6 +3686,84 @@ library(sense_test) {{
             cell.get_pin("A").expect("A"),
             "setup_rising"
         ));
+    }
+
+    /// A class's row is headed by the condition its arc is emitted under, and never
+    /// by the condition of the member that opened the row.
+    ///
+    /// Derivation from the model. `D` is characterised under `A * B` and `E` under
+    /// `A * B * C`, both `positive_unate`, so the post-settled conditions are
+    /// `A * B * D`, `A * B * !D`, `A * B * C * E` and `A * B * C * !E`. `D` and `E`
+    /// are independent pins, so every condition drawn from one shares assignments
+    /// with both drawn from the other, and the closure of that makes the four one
+    /// class -- one row per output edge. Their union is
+    /// `A * B * (D + !D) + A * B * C * (E + !E)`, which is `A * B`: the least
+    /// restrictive condition of the class, and the one Liberty UG p.7-49–50 obliges
+    /// the single emitted arc to state, since the four cannot be emitted as four
+    /// mutually exclusive states.
+    ///
+    /// So both rows read `A * B`. No member states it: each of the four fixes `D` or
+    /// `E`, which `A * B` leaves free, so each is strictly narrower than the state the
+    /// row heads. A row headed by its first member would read `A * B * D` on the rise
+    /// and `A * B * !D` on the fall -- conditions the class's other arcs hold outside,
+    /// and neither of them the condition the emitted arc carries.
+    ///
+    /// The label is spelled from the cover espresso returns, whose column order is its
+    /// own, so the literals are compared as a set.
+    ///
+    /// Killed by: the row was headed by `condition.liberty()` of the member that opened it, passed into `place` at row-construction time, as it was before the merged label reached the report. Observed to redden this test alone: it is the only fixture whose class has no member equal to its union AND asserts the report's row rather than the emitted group, so it is the only one that can tell the two labels apart in the report.
+    #[test]
+    fn a_class_row_is_headed_by_the_merged_condition_and_not_by_its_first_member() {
+        let mut lib = sense_lib(
+            &["D", "E", "A", "B", "C"],
+            &format!(
+                "{}\n{}",
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * B"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#,
+                ),
+                full_sense_arc_when(
+                    "E",
+                    "positive_unate",
+                    Some("A * B * C"),
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#,
+                ),
+            ),
+        );
+        let produced = process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let classes = &produced
+            .cells
+            .iter()
+            .find(|r| r.cell == "SENSE")
+            .expect("a report for SENSE")
+            .classes;
+
+        assert_eq!(
+            classes.len(),
+            2,
+            "four colliding conditions are one class over two output edges: {:?}",
+            classes
+        );
+        for class in classes {
+            let condition = class
+                .condition
+                .as_deref()
+                .unwrap_or_else(|| panic!("a conditioned row states its condition: {:?}", class));
+            assert_eq!(
+                condition.split(" * ").collect::<BTreeSet<&str>>(),
+                BTreeSet::from(["A", "B"]),
+                "{:?}",
+                class
+            );
+        }
     }
 
     // --- per-state emission -------------------------------------------------
@@ -3936,7 +4053,7 @@ library(sense_test) {{
     /// `fall_constraint` is `[2, 4] - 4 = [-2, 0]`. That is exactly the
     /// positive-unate pair swapped, and nothing else about the arc changed.
     ///
-    /// Killed by: `check_groups` routed each group's two slots by the OUTPUT's edge rather than by the input's, so this arc's `cell_rise` values -- an input FALL under this sense -- were filed as the group's rise side and `rise_constraint` came out `[-2, 0]`. Observed to redden this test alone: under `positive_unate` the two edges agree, so no other fixture can tell the two routings apart, which is exactly the point of this one.
+    /// Killed by: the post-settled literal keyed on `output_edge == Transition::Rise` in place of the input's direction, so each state followed the family that carried the table rather than the pin that moved, and `Q`'s two clock arcs came out `when B * A` then `when B * !A` -- the pair swapped. Observed to redden this test and `a_negative_unate_arcs_post_settled_literal_follows_its_input`, the classifier's own test one layer below -- 148 passed, 2 failed -- and nothing else: under `positive_unate` the two edges agree, so no other fixture can tell the two keyings apart. (Carrying the OUTPUT's edge into the constraint key instead -- `derived_input_edge(arc.sense, output_edge, ..)` replaced by `output_edge` -- was applied too, and observed to kill the values half of this test rather than the states, 146 passed and 4 failed -- this test and the three other fixtures whose constraint values come off a negative arc, which is the mutation recorded on `two_senses_on_one_pin_pair_are_routed_to_opposite_input_edges`.)
     #[test]
     fn a_negative_unate_arcs_per_state_values_land_in_the_flipped_family() {
         let mut lib = sense_lib(
@@ -4378,6 +4495,127 @@ library(sense_test) {{
         );
     }
 
+    /// The two classifications can split what the other merged: a third pin's
+    /// condition bridging one source's disjoint `when`s into a single delay state
+    /// leaves that source checked twice all the same.
+    ///
+    /// Derivation from the model. `D` is characterised under `A * B` and `A * !B`,
+    /// which no assignment meets together; `M` under `A`, which every assignment
+    /// meeting either of `D`'s meets too. On the pin pair `G -> Q` the post-settled
+    /// conditions are `A * B * D`, `A * B * !D`, `A * !B * D` and `A * !B * !D` from
+    /// `D`'s two arcs and `A * M`, `A * !M` from `M`'s, each of `D`'s four holding at
+    /// once with each of `M`'s two -- neither names the other's settling pin -- so
+    /// collision's transitive closure (§6) makes the six ONE state, whose union
+    /// `A * M + A * !M + ...` is `A`. The checks are classified over the source `when`s
+    /// of one input pin alone, where `M`'s condition is not present at all, so `D`'s
+    /// two mutually exclusive `when`s stay two groups.
+    ///
+    /// The values follow from that one state having one reference. `D` is the first
+    /// source declared, so the state's reference is `D`'s own accumulated arc, the mean
+    /// of its two conditioned tables: `cell_rise` averages to
+    /// `[[50.5, 101], [151.5, 202]]`, and a middle anchor reads row 1 for the emitted
+    /// delay and its column 1 for the crossing. Each check carries its OWN condition's
+    /// arc at column 1 against that shared crossing,
+    ///
+    ///     A * B  : [2, 4]     - 202 = [-200, -198]
+    ///     A * !B : [200, 400] - 202 = [-2, 198]
+    ///
+    /// and the same on the ten-times fall tables, whose crossing is 2020:
+    /// `[-2000, -1980]` and `[-20, 1980]`. Hold is setup negated. Charging both groups
+    /// the merged state's own arc -- the reading the split does not take -- would give
+    /// `[101, 202] - 202 = [-101, 0]` twice.
+    ///
+    /// Killed by: `check_groups` closed each pin's classification over the whole cell's source conditions rather than over that pin's own -- the pin's `conditions` extended with every other pin's before `collision_classes`, and the pin's own ids read back off the front. `M`'s `A` then bridged `D`'s two, giving `D` ONE check group stated `when A` carrying `[-101, 0]` and `[-1010, 0]`, the merged state's mean arc. Observed to redden this test alone -- 147 passed, 1 failed -- because every other per-state fixture whose pin carries more than one condition carries them on the only pin that has any, so no other test has a second pin's condition to bridge with.
+    #[test]
+    fn a_bridged_delay_state_still_leaves_its_source_two_check_groups() {
+        let mut lib = sense_lib(
+            &["D", "M", "A", "B"],
+            &format!(
+                "{}\n{}\n{}",
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * B"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#,
+                ),
+                full_sense_arc_when(
+                    "D",
+                    "positive_unate",
+                    Some("A * !B"),
+                    r#""100.0, 200.0", "300.0, 400.0""#,
+                    r#""1000.0, 2000.0", "3000.0, 4000.0""#,
+                ),
+                full_sense_arc_when(
+                    "M",
+                    "positive_unate",
+                    Some("A"),
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#,
+                ),
+            ),
+        );
+        process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+
+        // The delay side merged: one state, stated under the union of all six
+        // post-settled conditions. A single-literal function has one spelling, so
+        // this half is compared as text where a minimised union of several cubes
+        // could not be.
+        let q = cell.get_pin("Q").expect("Q");
+        let states: Vec<&Group> = q.iter_subgroups_of_type("timing").collect();
+        assert_eq!(states.len(), 1, "the bridged conditions are one state");
+        assert_eq!(guard_of(states[0]), "when A | sdf A == 1'B1".to_owned());
+        assert_eq!(
+            table_types(states[0]),
+            vec![
+                "rise_transition",
+                "fall_transition",
+                "cell_rise",
+                "cell_fall"
+            ]
+        );
+        assert_eq!(table_values(&states[0].subgroups[2]), vec![151.5, 202.0]);
+        assert_eq!(table_values(&states[0].subgroups[3]), vec![1515.0, 2020.0]);
+
+        // The check side did not: two groups, under the two `when`s the library
+        // wrote, each carrying its own arc against the one crossing above.
+        let d = cell.get_pin("D").expect("D");
+        for (timing_type, sign) in [("setup_rising", 1.0), ("hold_rising", -1.0)] {
+            let groups = arcs_of_type(d, timing_type);
+            assert_eq!(
+                groups.iter().map(|g| guard_of(g)).collect::<Vec<String>>(),
+                vec![
+                    "when A * B | sdf A == 1'B1 && B == 1'B1".to_owned(),
+                    "when A * !B | sdf A == 1'B1 && B == 1'B0".to_owned(),
+                ],
+                "{}",
+                timing_type
+            );
+
+            let values: Vec<Vec<f64>> = groups
+                .iter()
+                .flat_map(|g| g.subgroups.iter().map(table_values))
+                .collect();
+            let want = |v: [f64; 2]| vec![sign * v[0], sign * v[1]];
+            assert_eq!(
+                values,
+                vec![
+                    want([-200.0, -198.0]),
+                    want([-2000.0, -1980.0]),
+                    want([-2.0, 198.0]),
+                    want([-20.0, 1980.0]),
+                ],
+                "{}",
+                timing_type
+            );
+        }
+    }
+
     /// A candidate latch with two outputs on one shared 2x2 template, each carrying
     /// exactly the timing groups the caller supplies.
     fn two_output_lib(inputs: &[&str], q1_arcs: &str, q2_arcs: &str) -> Liberty {
@@ -4675,6 +4913,80 @@ library(two_output_test) {{
         assert_eq!(report.raw_arcs[0].when.as_deref(), Some("B"));
 
         // And the readable arc's two states still converted.
+        let cell = lib[0].get_cell("SENSE").expect("SENSE");
+        let stated: Vec<String> = cell
+            .get_pin("Q")
+            .expect("Q")
+            .iter_subgroups_of_type("timing")
+            .map(guard_of)
+            .collect();
+        assert_eq!(
+            stated,
+            vec![
+                "when B * A | sdf B == 1'B1 && A == 1'B1".to_owned(),
+                "when B * !A | sdf B == 1'B1 && A == 1'B0".to_owned(),
+            ]
+        );
+    }
+
+    /// Under a per-state reference, an output whose `when` could not be read on
+    /// two separate arcs carries exactly one refusal for it, not one per skipped
+    /// arc: the reason is identical across them, so a second, third, ... copy of it
+    /// would tell the reader nothing the first did not.
+    ///
+    /// Killed by: reverting the refusal loop back to a plain `for outpin_name in
+    /// &unreadable_arcs` (dropping the `.unique()`). Observed to redden this test
+    /// alone -- `produced.refusals` then carries `Q`'s refusal twice -- while
+    /// `per_state_skips_an_unreadable_when_and_converts_the_rest_of_the_output`,
+    /// whose output has only one skipped arc, stays green under the same mutation.
+    #[test]
+    fn per_state_dedups_the_unreadable_when_refusal_across_two_skipped_arcs() {
+        let mut lib = sense_lib(
+            &["A", "B"],
+            &format!(
+                "{}\n{}\n{}",
+                full_sense_arc_when(
+                    "A",
+                    "positive_unate",
+                    Some("A'"),
+                    r#""1.0, 2.0", "3.0, 4.0""#,
+                    r#""10.0, 20.0", "30.0, 40.0""#,
+                ),
+                full_sense_arc_when(
+                    "A",
+                    "positive_unate",
+                    Some("B'"),
+                    r#""1.5, 2.5", "3.5, 4.5""#,
+                    r#""15.0, 25.0", "35.0, 45.0""#,
+                ),
+                full_sense_arc_when(
+                    "A",
+                    "positive_unate",
+                    Some("B"),
+                    r#""5.0, 6.0", "7.0, 8.0""#,
+                    r#""50.0, 60.0", "70.0, 80.0""#,
+                ),
+            ),
+        );
+        let produced = process_library(
+            &mut lib[0],
+            &per_state("G", &Regex::new("(R|S)N?").unwrap()),
+        );
+
+        // One refusal for Q, not two, despite two arcs having been skipped for it.
+        assert_eq!(
+            produced.refusals,
+            vec![Refusal {
+                library: "sense_test".to_owned(),
+                cell: "SENSE".to_owned(),
+                output: Some("Q".to_owned()),
+                reason: "an arc was skipped: its `when` could not be read, and a per-state \
+                         reference is drawn per condition"
+                    .to_owned(),
+            }]
+        );
+
+        // And the surviving, readable arc's two states still converted.
         let cell = lib[0].get_cell("SENSE").expect("SENSE");
         let stated: Vec<String> = cell
             .get_pin("Q")

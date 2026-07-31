@@ -236,6 +236,15 @@ classification above and drawn within one input pin, as that one is drawn within
 pin. The conditioned groups come first, the catch-all last — the order Liberty reads a
 `default_timing` group in.
 
+Independent both ways: each classification can split what the other merged. One source
+`when` stays one check group where the post-settled classification splits its two input
+directions into two states, which
+`per_state_checks_carry_their_own_states_arc_minus_its_own_crossing` in `src/engine.rs`
+pins; and two of a pin's `when`s that cannot hold at once stay two check groups even where a
+third pin's condition bridges them into a single delay state, each then carrying its own
+condition's arc against that one state's reference, which
+`a_bridged_delay_state_still_leaves_its_source_two_check_groups` pins.
+
 Each group's `when` and `sdf_cond` state its class's condition **with nothing conjoined**:
 what the check constrains is said by `timing_type` (`setup_rising`/`hold_rising`), never by
 the condition it holds under. That condition is the library's own spelling wherever the
@@ -252,14 +261,22 @@ stays fixed however many conditions the checks multiply into — the fictitious 
 model refers everything to only ever rises.
 
 A condition characterised in both input directions still yields **one** setup group and one
-hold group, not two: UG p.7-56 asks a constraint group for at least one lookup table, not for
-a particular one, and the values for each direction are looked up at the post-settled state
-that direction actually settled into — which is how the input's direction is carried,
-structurally, by which of `rise_constraint`/`fall_constraint` holds the values, rather than by
-the condition or the `timing_type`. One setup group and one hold group is emitted per
-condition the pin was characterised under; a condition whose every arc lost its reference —
-because the state it names carries none — is emitted as neither, rather than as an empty
-group with no lookup table to carry.
+hold group, not two: UG p.7-56 asks a constraint group for at least one lookup table, not
+for a particular one, and the input's direction is carried structurally, by which of
+`rise_constraint`/`fall_constraint` holds the values, rather than by the condition or the
+`timing_type`. Both directions of a group are looked up at the **group's own** scope — the
+class its source `when`s fell into — and at no post-settled state: the group is the unit
+here, one check on one input-to-clock pin pair, whose conditions UG p.7-49–50 requires to
+exclude one another, so one condition is one value per direction however many outputs the
+pin drives under it. What separates the two directions is the constraint family the values
+are written to, not the key they are read at. Each value is that condition's mean arc in
+that direction, over every output the pin drives under it, less the mean of the crossings
+those arcs are charged — each one the reference of its own output and post-settled state.
+`one_check_condition_over_two_outputs_carries_their_mean` in `src/engine.rs` pins that, on a
+pin whose single check condition spans two outputs referred at two different states. One
+setup group and one hold group is emitted per condition the pin was characterised under; a
+condition whose every arc lost its reference — because the state it names carries none — is
+emitted as neither, rather than as an empty group with no lookup table to carry.
 
 The catch-all's `default_timing` marking is written uniformly on both kinds of group it
 applies to: the clock-to-output arc for an output's whenless state, and the setup/hold pair

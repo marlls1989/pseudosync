@@ -9,6 +9,11 @@ A worker executing a step never edits `GUIDELINES.md`. These rules are the const
 the work is done under, not part of the work. A rule that seems wrong or missing is
 raised, never committed.
 
+Only the repository's owner changes these rules, or someone he has authorised for that
+change, and the change is made outside the work it governs — never inside a step that the
+rules are constraining. A commit that edits this file was therefore made deliberately and
+by that route, not by a worker reaching outside its brief.
+
 ## British English
 
 Spelling and grammar throughout: code, comments, documentation, commit messages.
