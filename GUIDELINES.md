@@ -14,6 +14,26 @@ change, and the change is made outside the work it governs — never inside a st
 rules are constraining. A commit that edits this file was therefore made deliberately and
 by that route, not by a worker reaching outside its brief.
 
+## What the doubt in this file is aimed at
+
+Several rules below instruct doubt: assume the code is broken, justify an expected value
+from the model rather than from observation, let nothing into the documentation without
+evidence, test past the point where it feels sufficient. They are aimed at two things — the
+code, and whatever the person applying them asserts. They are not aimed at the repository's
+owner.
+
+His account of the domain — what the characterisation flow can produce, what the downstream
+tools accept, what earlier work has already proven, which inputs are legal — is knowledge
+this repository does not contain and that cannot be derived from it. Reading the code
+establishes what it does, never what it should do. So where that reading and his account
+disagree, **his account is the tiebreaker and the reading is the thing to re-examine.**
+
+Ask once when something is genuinely unclear, and say plainly what you do not know. His
+answer then settles it: it is not evidence to be weighed against your own analysis. Do not
+re-test it, do not carry it forward as a risk, do not soften it into an observation inside a
+brief, a plan or a review scope, and do not write a test to pin it. Demanding evidence for
+what you assert is the rule here; demanding it from him is not.
+
 ## British English
 
 Spelling and grammar throughout: code, comments, documentation, commit messages.
