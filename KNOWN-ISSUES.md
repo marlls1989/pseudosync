@@ -53,3 +53,32 @@ disappears. Nothing detects, guards or reports: the pair is simply not construct
 keeps this inside the settled rule that nothing defends against malformed input.
 
 The change reaches `TimingTables` and every reader of those four fields.
+
+---
+
+## The emission code has not been reviewed for how it selects what it emits
+
+**Where.** Everywhere the tool builds a group it is going to emit — `src/emit.rs`,
+`src/reset.rs`, and the emission paths in `src/engine.rs`.
+
+**What is seen.** Nothing today. This is not a reported fault; it is a review that has not
+been done.
+
+**Why this is registered.** These sites were written at different times against different
+inputs, and nobody has read them together against a single question: does this code take
+the parts the output needs, or does it take whatever arrived and then remove the parts it
+does not want? The second reads as equivalent and is not. It is correct only for the inputs
+that were in front of whoever wrote it, and it silently carries through anything the author
+had not met — so its behaviour on an input nobody has seen is undefined rather than
+conservative.
+
+**The example to follow.** `half` in `src/reset.rs`, which builds one half of a reset arc
+that measured both directions. It was written to clone the arc and delete the opposite
+direction's tables, and it now takes only the tables of the direction it names and discards
+everything else. Same result on every input either has met, and one of them cannot go wrong
+on an input neither has.
+
+**The fix.** Read each emission site and settle, per site, what the emitted group is
+supposed to contain; then have it construct exactly that. Where a site genuinely must pass
+something through unexamined, say so where it does it, so the next reader knows it was
+decided rather than defaulted. The repository's owner intends to do this pass himself.
