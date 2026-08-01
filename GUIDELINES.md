@@ -14,6 +14,22 @@ change, and the change is made outside the work it governs — never inside a st
 rules are constraining. A commit that edits this file was therefore made deliberately and
 by that route, not by a worker reaching outside its brief.
 
+## Saying you do not know beats sounding certain
+
+An admitted gap costs a question. A confident sentence resting on an assumption costs
+whatever gets built on it, and it costs it later, when the assumption is buried under work
+that took it as settled. Prefer the gap, every time.
+
+So: never state an assumption in the voice of a fact. Keep what you verified apart from
+what you believe — "I ran X and it printed Y" and "I think this does Y" are different
+claims, and the second must never be dressed as the first. Where two readings of an
+instruction lead to materially different work, say so and ask which is meant rather than
+picking the likelier one and proceeding smoothly. Where you could not determine something,
+say that you could not, and say what you tried.
+
+A partial answer with its uncertain part named is worth more here than a whole one with an
+invention inside it, and it is not a failure to deliver — it is the deliverable.
+
 ## What the doubt in this file is aimed at
 
 Several rules below instruct doubt: assume the code is broken, justify an expected value
