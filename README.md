@@ -62,9 +62,9 @@ library block.
 | Option | Default | Meaning |
 |---|---|---|
 | `-o`, `--output <path>` | stdout | Where the converted library is written. `-` also means standard output |
-| `-l`, `--latch` | off | Emit the latch model rather than the flop model: keep the `latch` group and every original arc, and add the pseudo-synchronous timing alongside them. This is the library to use when generating SDF for delay-annotated simulation, which needs the real input-to-output delays rather than the fictitious clock's |
+| `-l`, `--latch` | off | Emit the latch model rather than the flop model: keep the `latch` group and every original arc, and add the pseudo-synchronous timing alongside them. This is the library to use when generating SDF for delay-annotated simulation, which needs the real input-to-output delays rather than the fictitious clock's — so every arc keeps the `timing_type` the library wrote it under, reset arcs included |
 | `-c`, `--clock-pin <name>` | `G` | The pin the conversion treats as the clock. It is expected to exist in the `.lib` and nowhere else |
-| `-r`, `--reset-pin <regex>` | `(R\|S)N?` | Arcs whose `related_pin` matches are treated as asynchronous set/reset: excluded from the conversion and retained unchanged |
+| `-r`, `--reset-pin <regex>` | `(R\|S)N?` | Arcs whose `related_pin` matches are treated as asynchronous set/reset: excluded from the conversion and retained. In the flop model a retained arc is restated under an asynchronous `timing_type` — `clear` or `preset`, named by the output direction the arc's own tables state — and under `--latch` it is kept exactly as written. `docs/conversion-policy.md` §10 states the rule |
 | `-m`, `--reference-mode <mode>` | `per-state` | `per-state` gives each post-settled state of each output its own clock-to-output reference and conditions the emitted delays and checks on it; `per-output` coarsens that to one reference per output, constraining each input against only the outputs it actually drives; `pooled` coarsens further still, to the cell-wide mean — a deliberately kept regression, not a designed alternative, retained only so its cost can be measured |
 | `-w`, `--when-merge <mode>` | `mean` | How several arcs sharing one key are merged into the one table emitted for it: `mean` is representative, `max` the pessimistic envelope, `min` the optimistic one. Merging is elementwise, per slew/load point. Under `pooled`/`per-output` the key is the whole output, so this merges every `when`-conditioned arc of a pin pair; under `per-state` the key is one post-settled state, so this instead resolves a collision — conditions that can hold at once, which Liberty may not be told are separate states |
 | `--anchor <mode>` | `middle` | Where in each characterised table the value standing for the collapsed axis is read: `middle` takes the middle row, column and element, so every number emitted is one the library measured; `average` takes the mean over that axis instead |
@@ -96,6 +96,11 @@ pin named by `--clock-pin`. For such a cell:
   `nextstate_type : data`;
 - every converted output gains a clock-to-output arc — `timing_type : rising_edge`,
   carrying `cell_rise`/`cell_fall` delays and `rise_transition`/`fall_transition` slews;
+- in the flop model, a converted output's retained reset arcs are restated under `clear` or
+  `preset` by the direction each arc's own tables state, an arc measuring both directions
+  becoming two — so that a converted output carries sequential arcs alone, an output mixing
+  combinational and sequential arcs being one the synthesis tool will not model
+  (`docs/conversion-policy.md` §10);
 - without `--latch`, the original non-reset arcs of a converted output are removed and
   the `latch` group becomes `ff`, with `enable` becoming `clocked_on` and `data_in`
   becoming `next_state`;

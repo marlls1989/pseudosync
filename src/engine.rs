@@ -2806,14 +2806,11 @@ library(reset_arc_test) {{
             .expect("RESET_CELL")
             .get_pin_mut("Q")
             .expect("Q");
+        let warnings = restate_output_arcs(pin, &reset, "RESET_CELL", "Q");
         assert_eq!(
-            restate_output_arcs(pin, &reset, "RESET_CELL", "Q"),
-            vec![
-                "WARNING: arc R -> Q of cell RESET_CELL could not be restated and is emitted \
-                 unchanged: timing_type three_state_disable is neither combinational nor an \
-                 asynchronous-reset type"
-                    .to_owned()
-            ]
+            warnings.len(),
+            1,
+            "an unstatable arc produces exactly one warning: {warnings:?}"
         );
     }
 

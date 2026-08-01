@@ -297,9 +297,14 @@ one-bit literal (`P == 1'B1`, `P == 1'B0`) rather than as a bare name or its com
 is the form a Verilog timing-check condition takes.
 
 Wherever an original arc is preserved — every arc under `--latch`, and in the default flop
-mode a converted cell's reset arcs (§3) together with every arc of a cell or an output the
-conversion left alone (§1, §2) — it survives unchanged, including whatever `when` and
-whatever `sdf_cond` the library wrote on it. The new pseudo-synchronous groups meanwhile
+mode a converted output's reset arcs (§10) together with every arc of a cell or an output the
+conversion left alone (§1, §2) — whatever `when` and whatever `sdf_cond` the library wrote on
+it survive unchanged, and so do its `timing_sense` and every value in its tables. Under
+`--latch`, and on any cell or output the conversion left alone, the arc survives entire, its
+`timing_type` included. The one exception is a converted output's reset arc in the flop model,
+and it is confined to that tag: §10 restates the `timing_type` asynchronously and may split
+the arc in two, both halves then carrying the one `when`, the one `sdf_cond` and the one
+`timing_sense` the library wrote. The new pseudo-synchronous groups meanwhile
 carry the **least restrictive** condition of their state's collision class: a class whose
 union equals one of its members — a class of one, a class of equal spellings, or a class one
 of whose members covers the rest, as `A * B * C * D` beside `A * B * C` — is stated in that
@@ -347,6 +352,65 @@ Skipped-ness itself is mode-independent — the same outputs are skipped under b
 What differs is what a skip *means*. Under `--latch` a skipped output simply gains no
 pseudo-synchronous arcs, since the originals survive by construction. Under the default it
 keeps its original arcs instead of having them replaced.
+
+### What becomes of a converted output's reset arcs
+
+The flop model gives a converted output a `rising_edge` arc against the phantom clock, while
+the reset arcs kept beside it arrive from the input library under the combinational family of
+timing types. An output stating a sequential arc beside combinational ones is not a model the
+synthesis tool will hold, so each retained arc is restated under the **asynchronous type
+naming the output arrival direction the arc's own tables state**: a fall family (`cell_fall`,
+`fall_transition`) under `clear`, a rise family (`cell_rise`, `rise_transition`) under
+`preset`. Liberty's two asynchronous output types are named for what each does to the output,
+so what the tables measured is what names the type.
+
+The tables are the discriminator, and the cell's `latch`/`latch_bank`/`ff`/`ff_bank` group is
+never consulted for it: that group names **one** asynchronous function for the whole cell, so
+it cannot describe a dual-rail cell whose reset clears one rail and presets the other. The
+library's own practice is the evidence.
+`examples/ASCEND_FREEPDK45_ALHO_nom_1.10V_25C.lib:29193` states `timing_type : clear` over a
+`cell_fall`, and `:29854` states `timing_type : preset` over a `cell_rise` — both on the one
+output bundle at `:28030`, from the same `related_pin : "RN"`, under the same
+`timing_sense : positive_unate`, the same `when` and the same `sdf_cond`. The table family is
+the only thing that differs between those two arcs, so nothing else can be what tells them
+apart. That cell's `latch_bank` at `:36339-36340` meanwhile declares `clear : "!RN"` and no
+`preset` at all — an active-low reset, whose deactivating arrival the library itself states
+as a `preset`, and which the sequential group therefore does not describe.
+
+A `timing` group states exactly one `timing_type`, so an arc measuring both arrivals becomes
+**two** groups, each keeping its own family's tables, with `related_pin`, `timing_sense`,
+`when` and `sdf_cond` unchanged on both, and every subgroup belonging to neither family kept
+on both — such a subgroup describes the path rather than one of its arrivals, so dropping it
+from one half would make two halves of one arc say different things. No order between the two
+is specified: which is emitted first is not a property of the emitted library and must not be
+relied on. `an_arc_carrying_both_edges_becomes_a_preset_and_a_clear` in `src/reset.rs` pins
+the split, asserting the two as a set for that reason;
+`a_split_half_keeps_the_condition_and_sense_the_library_wrote` and
+`a_subgroup_of_neither_family_is_kept_on_both_halves` pin what both halves carry; and
+`flop_mode_states_a_combinational_reset_arc_asynchronously` in `src/engine.rs` pins the whole
+of it through a conversion.
+
+An arc already stating `clear` or `preset` is emitted verbatim: the library, or an earlier run
+over the same file, has already said which way the output arrives, so the restatement is
+idempotent. `an_arc_already_stating_an_asynchronous_type_is_returned_verbatim` in
+`src/reset.rs` pins that. `timing_sense` is neither read nor rewritten anywhere in the
+restatement, which is why no concept of reset polarity exists anywhere in the tool: what the
+tables measured is asked and answered on the output's own side, and the polarity of the pin
+that drove it never enters the question. None of this happens under `--latch`, where the arc
+keeps the tag the library wrote it under —
+`latch_mode_leaves_a_combinational_reset_arc_as_the_library_wrote_it` in `src/engine.rs`.
+
+An arc the rule cannot state is emitted **exactly as the library wrote it**, and a warning
+naming the cell, the output pin and the related pin is printed on standard error
+(`src/engine.rs:711-715`). Four shapes reach that: an arc carrying no delay and no transition
+table either way; one whose `combinational_rise`/`combinational_fall` suffix is contradicted
+by its own tables; one stating no `timing_type`; and one stating a type that is neither
+combinational nor asynchronous. This is **not a refusal** — §3 gains no case from it, nothing
+is refused at any scope over it, and the conversion goes ahead around the arc. An arc this
+tool cannot read is a fact about the input cell, and dropping it, or rejecting a library that
+was accepted before, would cost the caller timing the library does carry.
+`an_arc_that_cannot_be_stated_survives_unchanged_and_warns` in `src/engine.rs` pins that the
+arc survives and the warning is printed.
 
 ## 11. Exit status
 
