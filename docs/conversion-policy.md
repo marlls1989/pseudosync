@@ -378,17 +378,25 @@ apart. That cell's `latch_bank` at `:36339-36340` meanwhile declares `clear : "!
 as a `preset`, and which the sequential group therefore does not describe.
 
 A `timing` group states exactly one `timing_type`, so an arc measuring both arrivals becomes
-**two** groups, each keeping its own family's tables, with `related_pin`, `timing_sense`,
-`when` and `sdf_cond` unchanged on both, and every subgroup belonging to neither family kept
-on both — such a subgroup describes the path rather than one of its arrivals, so dropping it
-from one half would make two halves of one arc say different things. No order between the two
-is specified: which is emitted first is not a property of the emitted library and must not be
-relied on. `an_arc_carrying_both_edges_becomes_a_preset_and_a_clear` in `src/reset.rs` pins
+**two** groups. Each half is **built from the two table families of the arrival it names**, and
+every other subgroup the arc carried is discarded — including any group belonging to neither
+family. Taking what the half needs, rather than taking the whole arc and removing the opposite
+direction's tables, is what makes a half unable to carry data describing the direction it does
+not name: a list of what to shed can only name the group types whoever wrote it had met, so an
+unfamiliar one would ride onto both halves unexamined, while a list of what to keep has no such
+gap. The attributes are untouched — `related_pin`, `timing_sense`, `when` and `sdf_cond` are
+unchanged on both halves, as are the values of the tables that survive. No order between the
+two is specified: which is emitted first is not a property of the emitted library and must not
+be relied on. `an_arc_carrying_both_edges_becomes_a_preset_and_a_clear` in `src/reset.rs` pins
 the split, asserting the two as a set for that reason;
 `a_split_half_keeps_the_condition_and_sense_the_library_wrote` and
-`a_subgroup_of_neither_family_is_kept_on_both_halves` pin what both halves carry; and
+`a_subgroup_of_neither_family_is_discarded_from_both_halves` pin what both halves carry; and
 `flop_mode_states_a_combinational_reset_arc_asynchronously` in `src/engine.rs` pins the whole
 of it through a conversion.
+
+This applies to the split alone. An arc whose tables state **one** arrival is not split: it is
+retagged and keeps every subgroup it had, which
+`a_single_edge_arc_keeps_every_subgroup_it_had` in `src/reset.rs` pins.
 
 An arc already stating `clear` or `preset` is emitted verbatim: the library, or an earlier run
 over the same file, has already said which way the output arrives, so the restatement is

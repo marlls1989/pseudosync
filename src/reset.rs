@@ -54,18 +54,6 @@ fn async_timing_type(edge: Transition) -> &'static str {
     }
 }
 
-/// The other direction, which is the one a half of a split arc has to shed.
-///
-/// The two family lists are disjoint, so "the tables this half keeps" is exactly
-/// "everything that is not the opposite edge's" -- which is what carries the
-/// subgroups belonging to neither family onto both halves.
-fn opposite(edge: Transition) -> Transition {
-    match edge {
-        Transition::Rise => Transition::Fall,
-        Transition::Fall => Transition::Rise,
-    }
-}
-
 /// An arc with no delay and no transition table in either direction: nothing it
 /// carries says which way the output arrived, so no type can be chosen for it.
 const NO_TABLE: &str = "carries no delay or transition table, so no output direction states it";
@@ -86,18 +74,23 @@ fn retagged(arc: &Group, edge: Transition) -> Group {
     restated
 }
 
-/// One half of an arc that measured both directions: the tables of `edge`, plus
-/// every subgroup belonging to neither family, under `edge`'s asynchronous type.
+/// One half of an arc that measured both directions: the tables of `edge` under
+/// `edge`'s asynchronous type, and nothing else.
 ///
-/// The subgroups of neither family are kept on BOTH halves. They describe the arc
-/// rather than one of its arrivals, and dropping them from one half would silently
-/// make the two halves say different things about the same path.
+/// The half is built from what it needs rather than by shedding what it does not
+/// want. It names one arrival, so it carries that arrival's two families and every
+/// other subgroup is discarded -- which is what makes it unable to acquire data
+/// describing the direction it does not name, WHATEVER the input arc contained. A
+/// list of what to drop can only name the shapes whoever wrote it had met, so an
+/// unfamiliar subgroup would ride onto both halves unexamined; a list of what to keep
+/// has no such gap. The attributes are untouched: `related_pin`, `timing_sense`,
+/// `when`, `sdf_cond` and the group name come through [`retagged`] by clone.
 fn half(arc: &Group, edge: Transition) -> Group {
-    let shed = edge_families(opposite(edge));
+    let keep = edge_families(edge);
     let mut restated = retagged(arc, edge);
     restated
         .subgroups
-        .retain(|g| !shed.contains(&g.type_.as_str()));
+        .retain(|g| keep.contains(&g.type_.as_str()));
     restated
 }
 
@@ -278,7 +271,7 @@ library(reset_test) {{
     /// arriving in both directions cannot be stated as one asynchronous arc: it takes
     /// one `preset` for the rise it measured and one `clear` for the fall.
     ///
-    /// Killed by: `half` shed its own edge's families instead of the opposite one's -- `let shed = edge_families(edge);`.
+    /// Killed by: `half` kept the opposite edge's families instead of its own -- `let keep = edge_families(match edge { Transition::Rise => Transition::Fall, Transition::Fall => Transition::Rise });`. It also reddens `engine::tests::flop_mode_states_a_combinational_reset_arc_asynchronously` and nothing else -- 163 passed, 2 failed. No mutation separates the two: which families a half carries is one rule, and that test is the same rule witnessed through a whole conversion rather than on the function.
     #[test]
     fn an_arc_carrying_both_edges_becomes_a_preset_and_a_clear() {
         let restated = restate_reset_arc(&timing_arc(BOTH_EDGES)).expect("both edges are statable");
@@ -325,15 +318,19 @@ library(reset_test) {{
         }
     }
 
-    /// A subgroup of neither family describes the arc rather than one of its
-    /// arrivals, so it is still true of both halves -- and dropping it from one would
-    /// make two halves of one arc say different things about the same path.
+    /// A half is built from the families of the one arrival it names, so a subgroup
+    /// belonging to neither family is carried by neither half. Nothing here can say
+    /// which arrival such a subgroup describes -- so putting it on a half would state,
+    /// on the authority of nothing, that it is true of that direction. The fixture's
+    /// `unclassified_table` is invented for this test and names no Liberty group type
+    /// the tool knows: what is pinned is that an UNRECOGNISED subgroup is discarded,
+    /// which is the property a list of what to shed cannot have.
     ///
-    /// Killed by: `half` retained only its own edge's families -- `restated.subgroups.retain(|g| keep.contains(&g.type_.as_str()))` -- so the foreign subgroup was dropped from both halves.
+    /// Killed by: `half` shed the opposite edge's families in place of keeping its own -- `let keep = edge_families(match edge { Transition::Rise => Transition::Fall, Transition::Fall => Transition::Rise });` with the retain negated to `!keep.contains(&g.type_.as_str())` -- so the unclassified subgroup rode onto both halves. Observed to redden this test alone: every other fixture reaching `half` carries the four families and nothing else, on which shedding the opposite edge's two and keeping its own two select the same subgroups.
     #[test]
-    fn a_subgroup_of_neither_family_is_kept_on_both_halves() {
+    fn a_subgroup_of_neither_family_is_discarded_from_both_halves() {
         let arc = timing_arc(&format!(
-            "{}\n        ocv_sigma_cell_rise(T) {{ values(\"0.01, 0.02\", \"0.03, 0.04\"); }}",
+            "{}\n        unclassified_table(T) {{ values(\"0.01, 0.02\", \"0.03, 0.04\"); }}",
             BOTH_EDGES
         ));
 
@@ -342,8 +339,8 @@ library(reset_test) {{
         assert_eq!(restated.len(), 2);
         for half in &restated {
             assert!(
-                subgroup_types(half).contains(&"ocv_sigma_cell_rise".to_owned()),
-                "the {} half dropped a subgroup of neither family: {:?}",
+                !subgroup_types(half).contains(&"unclassified_table".to_owned()),
+                "the {} half kept a subgroup of neither family: {:?}",
                 timing_type_of(half),
                 subgroup_types(half)
             );
