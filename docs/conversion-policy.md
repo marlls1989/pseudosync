@@ -414,8 +414,7 @@ a fact about the input cell, and dropping it, or rejecting a library that was ac
 before, would cost the caller timing the library does carry.
 `an_arc_that_cannot_be_stated_survives_unchanged_and_warns` in `src/engine.rs` pins that the
 arc survives and that the warning is *produced*: it calls `restate_output_arcs` directly and
-asserts one warning came back. Nothing in the suite reaches the print, and no test asserts
-the message's wording.
+asserts one warning came back. No test asserts the message's wording.
 
 ## 11. Exit status
 
