@@ -56,9 +56,9 @@ report is built from the arcs that survived phase 1, and these never reach it:
   determines it (RM p.328): under `positive_unate` the input's direction matches the
   output's, under `negative_unate` it is the opposite, and under `non_unate` — or with no
   `timing_sense` stated, for which Liberty gives no default — nothing determines it. Warn on
-  standard error, naming the cell, the arc and the reason, and skip that arc. This holds in
-  every reference mode alike: none of the three has a fallback direction to charge a
-  constraint to.
+  standard error, naming the cell, the arc, the library and the reason
+  (`src/engine.rs:944-947`), and skip that arc. This holds in every reference mode alike:
+  none of the three has a fallback direction to charge a constraint to.
 - Under `--reference-mode per-state` only: the arc's `when` does not parse as a Liberty
   Boolean expression. Per-state files every arc under the post-settled state its `when`
   describes, and a `when` this tool cannot read names no state, so under this mode alone the
@@ -401,16 +401,21 @@ keeps the tag the library wrote it under —
 `latch_mode_leaves_a_combinational_reset_arc_as_the_library_wrote_it` in `src/engine.rs`.
 
 An arc the rule cannot state is emitted **exactly as the library wrote it**, and a warning
-naming the cell, the output pin and the related pin is printed on standard error
-(`src/engine.rs:711-715`). Four shapes reach that: an arc carrying no delay and no transition
-table either way; one whose `combinational_rise`/`combinational_fall` suffix is contradicted
-by its own tables; one stating no `timing_type`; and one stating a type that is neither
-combinational nor asynchronous. This is **not a refusal** — §3 gains no case from it, nothing
-is refused at any scope over it, and the conversion goes ahead around the arc. An arc this
-tool cannot read is a fact about the input cell, and dropping it, or rejecting a library that
-was accepted before, would cost the caller timing the library does carry.
+naming the related pin, the output pin, the cell and the library is produced. It is built by
+`restate_output_arcs`, which returns it rather than printing it (`src/engine.rs:714-718`),
+and printed on standard error by the caller (`src/engine.rs:1319`), inside the `if !latch`
+branch that gates the whole restatement (`src/engine.rs:1315`). Four shapes reach that: an
+arc carrying no delay and no transition table either way; one whose
+`combinational_rise`/`combinational_fall` suffix is contradicted by its own tables; one
+stating no `timing_type`; and one stating a type that is neither combinational nor
+asynchronous. This is **not a refusal** — §3 gains no case from it, nothing is refused at any
+scope over it, and the conversion goes ahead around the arc. An arc this tool cannot read is
+a fact about the input cell, and dropping it, or rejecting a library that was accepted
+before, would cost the caller timing the library does carry.
 `an_arc_that_cannot_be_stated_survives_unchanged_and_warns` in `src/engine.rs` pins that the
-arc survives and the warning is printed.
+arc survives and that the warning is *produced*: it calls `restate_output_arcs` directly and
+asserts one warning came back. Nothing in the suite reaches the print, and no test asserts
+the message's wording.
 
 ## 11. Exit status
 

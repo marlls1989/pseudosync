@@ -680,13 +680,16 @@ fn add_pseudo_timing_to_output_pin(outpin: &mut Group, clock_name: &str, arcs: &
 /// refusal here at any scope: an arc this tool cannot read is a fact about the input
 /// cell, and dropping it, or rejecting a library that was accepted before, would cost
 /// the user timing the library does carry. Returns one warning line per such arc, in
-/// the caller's stderr idiom, for the caller to print beside its own -- so what the
-/// tool could not state is still said out loud.
+/// the same loud form the caller's own warnings take -- the shared prefix, and the arc,
+/// the cell and the library it happened in -- for the caller to print beside them, so
+/// what the tool could not state is still said out loud. `lib_name` is threaded in for
+/// that reason alone: nothing in the restatement itself reads it.
 fn restate_output_arcs(
     outpin: &mut Group,
     reset_name: &Regex,
     cell_name: &str,
     outpin_name: &str,
+    lib_name: &str,
 ) -> Vec<String> {
     let mut warnings: Vec<String> = Vec::new();
 
@@ -709,9 +712,9 @@ fn restate_output_arcs(
             Ok(restated) => outpin.subgroups.extend(restated),
             Err(reason) => {
                 warnings.push(format!(
-                    "WARNING: arc {} -> {} of cell {} could not be restated and is emitted \
-                     unchanged: {}",
-                    related, outpin_name, cell_name, reason
+                    "WARNING: arc {} -> {} of cell {} in library {} could not be restated and \
+                     is emitted unchanged: {}",
+                    related, outpin_name, cell_name, lib_name, reason
                 ));
                 outpin.subgroups.push(group);
             }
@@ -904,7 +907,8 @@ fn process_cell(
                 // rather than calling the input malformed.
                 if let Some(missing) = templates.missing_axis(&timing_tables.lut_template) {
                     eprintln!(
-                        "Skipping arc {} -> {} of cell {} in library {}: lookup template {} {}",
+                        "WARNING: skipping arc {} -> {} of cell {} in library {}: \
+                         lookup template {} {}",
                         related_pin,
                         outpin_name,
                         cell_name,
@@ -938,7 +942,7 @@ fn process_cell(
                             None => "no timing_sense: the input's direction cannot be determined",
                         };
                         eprintln!(
-                            "Skipping arc {} -> {} of cell {} in library {}: {}",
+                            "WARNING: skipping arc {} -> {} of cell {} in library {}: {}",
                             related_pin, outpin_name, cell_name, lib_name, reason
                         );
                         arc_skipped.entry(outpin_name.clone()).or_insert(
@@ -988,7 +992,8 @@ fn process_cell(
                     Some(text) => match Condition::parse(text) {
                         Err(reason) => {
                             eprintln!(
-                                "Cannot classify arc {} -> {} of cell {} in library {}: {}",
+                                "WARNING: cannot classify arc {} -> {} of cell {} in \
+                                 library {}: {}",
                                 related_pin, outpin_name, cell_name, lib_name, reason
                             );
                             ArcPost::Unreadable
@@ -1223,7 +1228,7 @@ fn process_cell(
             "no non-reset timing arc carrying a characterisation table"
         };
         eprintln!(
-            "Skipping output {} of cell {} in library {}: {}",
+            "WARNING: skipping output {} of cell {} in library {}: {}",
             outpin_name, cell_name, lib_name, reason
         );
         reports.refusals.push(Refusal {
@@ -1308,7 +1313,9 @@ fn process_cell(
         // every original arc for SDF annotation, so this gate is what makes that mode
         // provably untouched by the restatement.
         if !latch {
-            for warning in restate_output_arcs(outpin, reset_name, &cell_name, &outpin_name) {
+            for warning in
+                restate_output_arcs(outpin, reset_name, &cell_name, &outpin_name, lib_name)
+            {
                 eprintln!("{}", warning);
             }
         }
@@ -1527,7 +1534,7 @@ pub(crate) fn process_library(lib: &mut Group, opts: &CellOptions) -> LibraryRep
             // reached only one of them would be half invisible.
             Err(reason) => {
                 eprintln!(
-                    "Failed to process cell {} of library {}: {}",
+                    "WARNING: failed to process cell {} in library {}: {}",
                     cell.name, lib_name, reason
                 );
                 reports.refusals.push(Refusal {
@@ -2806,7 +2813,7 @@ library(reset_arc_test) {{
             .expect("RESET_CELL")
             .get_pin_mut("Q")
             .expect("Q");
-        let warnings = restate_output_arcs(pin, &reset, "RESET_CELL", "Q");
+        let warnings = restate_output_arcs(pin, &reset, "RESET_CELL", "Q", "reset_arc_test");
         assert_eq!(
             warnings.len(),
             1,
