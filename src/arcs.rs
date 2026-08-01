@@ -632,6 +632,21 @@ pub(crate) const REFERENCE_FAMILIES: [&str; 4] = [
     "fall_transition",
 ];
 
+/// The two table families that state one arrival direction of an output: its delay
+/// and its own slew.
+///
+/// This is the one place the pairing is written down. Both families name the OUTPUT
+/// -- `cell_rise` is the delay to a rising output, and a transition is that output's
+/// own slew -- so which of the two directions an arc measures is read off the
+/// families it carries and off nothing else. Everything that has to split a timing
+/// group by arrival direction asks here rather than spelling the pair out again.
+pub(crate) fn edge_families(edge: Transition) -> [&'static str; 2] {
+    match edge {
+        Transition::Rise => ["cell_rise", "rise_transition"],
+        Transition::Fall => ["cell_fall", "fall_transition"],
+    }
+}
+
 /// The domain each present reference family in one timing group is characterised on: the
 /// lookup template it names, and the number of rows and columns its table carries — which
 /// is the length of that template's two index lists.

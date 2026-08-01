@@ -6,6 +6,7 @@ mod liberty_io;
 mod pins;
 mod render;
 mod report;
+mod reset;
 mod templates;
 
 use crate::arcs::{Anchor, ReferenceMode, WhenMerge};

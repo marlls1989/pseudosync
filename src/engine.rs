@@ -20,6 +20,7 @@ use crate::report::{
     collect_arc_errors, ArcError, CellReport, CheckClass, ConditionedArc, ConstraintArcs,
     ConstraintKey, Constraints, LibraryReport, Refusal, StateClass, FALL, RISE,
 };
+use crate::reset::restate_reset_arc;
 use crate::templates::{Axes, Templates};
 use itertools::Itertools;
 use liberty_parser::{
@@ -646,24 +647,10 @@ struct PseudoArc<'a> {
 /// One arc per state the output was converted in. Under a mode that draws one
 /// reference per output there is exactly one, unguarded, which is the arc this
 /// emitted before there were states.
-fn add_pseudo_timing_to_output_pin(
-    outpin: &mut Group,
-    clock_name: &str,
-    reset_name: &Regex,
-    arcs: &[PseudoArc],
-    latch: bool,
-) {
-    // If creating a pseudo_flop model, erase the original arcs
-    if !latch {
-        outpin.subgroups.retain(|x| {
-            x.type_ != "timing"
-                || reset_name.is_match(
-                    &x.simple_attribute("related_pin")
-                        .map_or("".to_owned(), |x| x.string()),
-                )
-        });
-    }
-
+///
+/// Purely additive. What becomes of the arcs the output arrived with is
+/// [`restate_output_arcs`]'s question, and the flop model's call site asks it first.
+fn add_pseudo_timing_to_output_pin(outpin: &mut Group, clock_name: &str, arcs: &[PseudoArc]) {
     // Add the new pseudo-synchronous timing arcs:
     // - Use this output's own transitions (decoupled from input)
     // - Use mean cell_rise/cell_fall delays (averaged across outputs)
@@ -675,6 +662,63 @@ fn add_pseudo_timing_to_output_pin(
             &arc.guard,
         ));
     }
+}
+
+/// What the flop model does to the arcs an output arrived with: drop the ones it
+/// restates against the clock, and restate the reset arcs it keeps.
+///
+/// The flop model states every non-reset path as a clock-to-output delay, so the
+/// original arcs for those paths go -- a group with no `related_pin` names no path
+/// and goes with them. The reset arcs stay, but they cannot stay as they were: they
+/// arrive tagged with the combinational family, and an output carrying a sequential
+/// arc beside combinational ones is not a model a synthesiser can hold. Each is
+/// restated by [`restate_reset_arc`] under the asynchronous type its own tables
+/// name, in place -- one arc where it measured one arrival, two where it measured
+/// both.
+///
+/// An arc the restatement cannot state is kept EXACTLY as it arrived. There is no
+/// refusal here at any scope: an arc this tool cannot read is a fact about the input
+/// cell, and dropping it, or rejecting a library that was accepted before, would cost
+/// the user timing the library does carry. Returns one warning line per such arc, in
+/// the caller's stderr idiom, for the caller to print beside its own -- so what the
+/// tool could not state is still said out loud.
+fn restate_output_arcs(
+    outpin: &mut Group,
+    reset_name: &Regex,
+    cell_name: &str,
+    outpin_name: &str,
+) -> Vec<String> {
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Drained and rebuilt rather than filtered in place, because one arc may become
+    // two and each restatement belongs where the arc it came from sat.
+    for group in std::mem::take(&mut outpin.subgroups) {
+        if group.type_ != "timing" {
+            outpin.subgroups.push(group);
+            continue;
+        }
+
+        let related = group
+            .simple_attribute("related_pin")
+            .map_or("".to_owned(), |x| x.string());
+        if !reset_name.is_match(&related) {
+            continue;
+        }
+
+        match restate_reset_arc(&group) {
+            Ok(restated) => outpin.subgroups.extend(restated),
+            Err(reason) => {
+                warnings.push(format!(
+                    "WARNING: arc {} -> {} of cell {} could not be restated and is emitted \
+                     unchanged: {}",
+                    related, outpin_name, cell_name, reason
+                ));
+                outpin.subgroups.push(group);
+            }
+        }
+    }
+
+    warnings
 }
 
 /// One emitted setup/hold pair on an input pin: the values each direction carries,
@@ -1224,11 +1268,12 @@ fn process_cell(
         // One arc per state this output was converted in, conditioned states first
         // and the catch-all last -- which is `Scope`'s own order, so the map supplies
         // it. A skipped output has none, is left exactly as the input wrote it, and
-        // phase 2 has already named it. Note that the retain which strips a converted
-        // output's original non-reset arcs lives inside
-        // `add_pseudo_timing_to_output_pin`, so an empty list here is what keeps a
-        // skipped output's originals in the default mode -- under `--latch` they
-        // survive by construction either way.
+        // phase 2 has already named it. Note that everything done to a converted
+        // output's ORIGINAL arcs -- stripping the non-reset ones, restating the reset
+        // ones -- lives in `restate_output_arcs`, which the `arcs.is_empty()` guard
+        // below sits in front of; so an empty list here is what keeps a skipped
+        // output's originals in the default mode -- under `--latch` they survive by
+        // construction either way.
         let arcs: Vec<PseudoArc> = ref_arcs
             .iter()
             .filter(|((output, _), _)| *output == outpin_name)
@@ -1259,7 +1304,16 @@ fn process_cell(
             continue;
         }
 
-        add_pseudo_timing_to_output_pin(outpin, clock_name, reset_name, &arcs, latch);
+        // Only the flop model touches what the output arrived with. `--latch` keeps
+        // every original arc for SDF annotation, so this gate is what makes that mode
+        // provably untouched by the restatement.
+        if !latch {
+            for warning in restate_output_arcs(outpin, reset_name, &cell_name, &outpin_name) {
+                eprintln!("{}", warning);
+            }
+        }
+
+        add_pseudo_timing_to_output_pin(outpin, clock_name, &arcs);
     }
 
     // An input driving both a converted and a skipped output is constrained over the
@@ -1805,13 +1859,20 @@ library(bundle_test) {{
     /// pin started with.
     ///
     /// Both halves follow from the model rather than from any run.
-    /// [`add_pseudo_timing_to_output_pin`] retains a `timing` group if and only if
-    /// its `related_pin` matches the reset pattern, so every reset arc survives
-    /// with exactly the count the library declared -- that count is a property of
-    /// the FIXTURE, not of the tool -- and every other arc goes. In their place a
-    /// pseudo-flop declares one `rising_edge` arc against the clock per output it
-    /// could characterise. So the expected census is the original one filtered to
-    /// the reset, plus that single arc.
+    /// [`restate_output_arcs`] keeps a `timing` group if and only if its
+    /// `related_pin` matches the reset pattern, so every reset arc survives -- and
+    /// every other arc goes. In their place a pseudo-flop declares one `rising_edge`
+    /// arc against the clock per output it could characterise. So the expected census
+    /// is the original one filtered to the reset, plus that single arc.
+    ///
+    /// The COUNTS carry a precondition. Flop mode no longer keeps a reset arc as it
+    /// found it: it restates each one under the asynchronous type the arc's own
+    /// tables name, and an arc measuring both arrivals becomes TWO. So a filtered
+    /// original is the right expectation only where every reset-matching arc already
+    /// states `clear` or `preset` -- the arm that returns an arc verbatim -- and
+    /// measures one arrival. That holds of the ASCEND libraries, and the caller that
+    /// uses this over them asserts it of the fixture before the run rather than
+    /// leaving the identity to coincidence.
     fn ff_census(original: &ArcCensus, clock: &str, reset_name: &Regex) -> ArcCensus {
         let mut expected: ArcCensus = original
             .iter()
@@ -2272,7 +2333,7 @@ library(latch_cell_test) {{
     /// Latch mode is additive: every characterised arc survives and the pseudo
     /// clock-to-output arc is appended alongside them.
     ///
-    /// Killed by: `add_pseudo_timing_to_output_pin` guarded its retain with `if latch` instead of `if !latch`, stripping the original arcs in latch mode.
+    /// Killed by: the phase 3 gate was inverted -- `if latch { restate_output_arcs(..) }` -- stripping the original arcs in latch mode.
     #[test]
     fn latch_mode_appends_the_pseudo_arc_to_the_original_ones() {
         let lib = converted_latch_cell(true);
@@ -2302,7 +2363,7 @@ library(latch_cell_test) {{
     /// Flip-flop mode replaces the combinational model rather than extending it:
     /// every arc the reset does not own is stripped off the output.
     ///
-    /// Killed by: `add_pseudo_timing_to_output_pin`'s retain negated its reset test -- `|| !reset_name.is_match(..)` -- keeping exactly the arcs it should drop.
+    /// Killed by: `restate_output_arcs` negated its reset test -- `if reset_name.is_match(&related) { continue; }` -- keeping exactly the arcs it should drop.
     #[test]
     fn ff_mode_strips_every_output_arc_the_reset_does_not_own() {
         let lib = converted_latch_cell(false);
@@ -2485,6 +2546,392 @@ library(clock_sourced_test) {{
                 );
             }
         }
+    }
+
+    // --- how a retained reset arc is stated ---------------------------------
+
+    /// A latch with one characterised data arc and whatever reset arc the caller
+    /// hands it, so what the conversion does to a retained reset arc can be varied
+    /// with nothing else varying.
+    ///
+    /// The `latch` group declares NEITHER `clear` NOR `preset`, and that omission is
+    /// load-bearing. A fixture whose sequential group names no asynchronous behaviour
+    /// at all, on an output that still comes out carrying `clear` or `preset` arcs,
+    /// is what proves the type was read off the arc's own tables rather than off the
+    /// sequential group -- which could not describe a dual-rail cell anyway.
+    /// [`latch_cell_lib`] declares `clear: "!RN"` and so cannot prove it.
+    fn reset_arc_cell_lib(reset_arc: String) -> Liberty {
+        liberty_parser::parse_lib(&format!(
+            r#"
+library(reset_arc_test) {{
+  lu_table_template(T) {{
+    variable_1: input_net_transition;
+    variable_2: total_output_net_capacitance;
+    index_1("0.01, 0.1");
+    index_2("0.005, 0.05");
+  }}
+  cell(RESET_CELL) {{
+    latch(IQ, IQN) {{ data_in: "A"; enable: "G"; }}
+    pin(G) {{ direction: input; clock: true; }}
+    pin(R) {{ direction: input; }}
+    pin(A) {{ direction: input; }}
+    pin(Q) {{
+      direction: output;
+      function: "IQ";
+      {}
+      {}
+    }}
+  }}
+}}"#,
+            arc("A", "combinational", 1.0),
+            reset_arc
+        ))
+        .expect("parse reset arc fixture")
+    }
+
+    /// One timing arc carrying ONE table family: the delay to a single output
+    /// arrival and that arrival's own slew.
+    ///
+    /// [`arc`] writes all four families, which states both arrivals at once. A rail
+    /// the library characterised in one direction only is a different shape, and it
+    /// is the shape that says which single asynchronous type the arc names.
+    fn one_edge_arc(
+        related_pin: &str,
+        timing_type: &str,
+        delay: &str,
+        transition: &str,
+        base: f64,
+    ) -> String {
+        format!(
+            r#"
+        timing() {{
+          related_pin: "{}";
+          timing_sense : positive_unate;
+          timing_type: {};
+          {}(T) {{ values("{}, {}", "{}, {}"); }}
+          {}(T) {{ values("0.1, 0.2", "0.3, 0.4"); }}
+        }}"#,
+            related_pin,
+            timing_type,
+            delay,
+            base,
+            base + 1.0,
+            base + 2.0,
+            base + 3.0,
+            transition,
+        )
+    }
+
+    /// Which of the four reference families a timing group carries.
+    fn families_of(arc: &Group) -> Vec<String> {
+        arc.iter_subgroups()
+            .map(|g| g.type_.clone())
+            .filter(|t| crate::arcs::REFERENCE_FAMILIES.contains(&t.as_str()))
+            .collect()
+    }
+
+    /// A converted output cannot carry a `rising_edge` arc beside combinational ones
+    /// and still be a model a synthesiser can hold, so every retained reset arc is
+    /// restated asynchronously. The fixture's reset arc measures the output arriving
+    /// in both directions; a `timing` group states ONE `timing_type`, so an arc
+    /// measuring two arrivals has to become two arcs -- one `preset` for the rise it
+    /// measured, one `clear` for the fall. The data arc from `A` is restated against
+    /// the clock and so goes, which is what the flop model has always done.
+    ///
+    /// Killed by: `restate_output_arcs` kept only the first restatement -- `outpin.subgroups.extend(restated.into_iter().take(1))` -- so the `clear` half never reached the pin.
+    #[test]
+    fn flop_mode_states_a_combinational_reset_arc_asynchronously() {
+        let mut lib = reset_arc_cell_lib(arc("R", "combinational", 2.0));
+        process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                // One reference per output, so the model states exactly one
+                // clock-to-output arc and the census reads the reset restatement
+                // rather than a per-state split.
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+
+        let q = output_pin(&lib[0], "RESET_CELL", "Q");
+        assert_eq!(
+            arc_census(q),
+            census(&[
+                ("R", "preset", 1),
+                ("R", "clear", 1),
+                ("G", "rising_edge", 1)
+            ])
+        );
+
+        // Which half took which type is decided by the tables it kept, so that is
+        // what is asserted -- never the order the two came back in.
+        assert_eq!(
+            families_of(arcs_of_type(q, "preset")[0]),
+            vec!["cell_rise", "rise_transition"],
+            "the preset states the rise the library measured, and only that"
+        );
+        assert_eq!(
+            families_of(arcs_of_type(q, "clear")[0]),
+            vec!["cell_fall", "fall_transition"],
+            "the clear states the fall the library measured, and only that"
+        );
+    }
+
+    /// The latch model exists so SDF can be generated from real input-to-output
+    /// delays rather than the phantom clock's (README.md:65,
+    /// docs/conversion-policy.md:342-344), which it can only do if every original arc
+    /// survives exactly as the library tagged it. So `--latch` restates nothing: the
+    /// reset arc is still `combinational`, the data arc from `A` is still there, and
+    /// the pseudo arc is added beside them.
+    ///
+    /// Killed by: the mode gate was narrowed to the drop alone -- `latch` threaded into
+    /// `restate_output_arcs`, whose non-reset branch became
+    /// `if latch { outpin.subgroups.push(group); } continue;`, and the call site made
+    /// unconditional -- so latch mode kept every arc but retagged the reset one.
+    /// It also reddens [`latch_mode_leaves_the_reset_arcs_as_the_library_tagged_them`]
+    /// and nothing else: latch mode reaches the restatement through one branch, so the
+    /// single-pin and the bundle witness of it cannot be separated by any mutation.
+    /// This test is the single-pin one, where the retagging SPLITS one arc into two.
+    #[test]
+    fn latch_mode_leaves_a_combinational_reset_arc_as_the_library_wrote_it() {
+        let mut lib = reset_arc_cell_lib(arc("R", "combinational", 2.0));
+        process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                true,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+
+        let q = output_pin(&lib[0], "RESET_CELL", "Q");
+        assert_eq!(
+            arc_census(q),
+            census(&[
+                ("A", "combinational", 1),
+                ("R", "combinational", 1),
+                ("G", "rising_edge", 1)
+            ]),
+            "latch mode is purely additive"
+        );
+    }
+
+    /// An arc whose type this tool cannot read is a fact about the input cell, not a
+    /// reason to reject it. Dropping it would cost the user timing the library does
+    /// carry, and refusing the cell or the output would reject a library that was
+    /// accepted before -- so the arc is emitted exactly as it arrived, the conversion
+    /// goes ahead around it, and the warning is the whole of the signal.
+    ///
+    /// Killed by: `restate_output_arcs`'s `Err` arm dropped the arc instead of keeping it -- the `outpin.subgroups.push(group)` beside the warning removed.
+    #[test]
+    fn an_arc_that_cannot_be_stated_survives_unchanged_and_warns() {
+        // `three_state_disable` is neither combinational nor an asynchronous reset
+        // type, so no output arrival can be read off it. It carries a `when` and an
+        // `sdf_cond` so that "unchanged" is checked over the arc's condition too and
+        // not merely over its tables.
+        let offending = r#"
+      timing() {
+        related_pin: "R";
+        timing_sense : positive_unate;
+        timing_type: three_state_disable;
+        when : "A";
+        sdf_cond : "A";
+        cell_fall(T) { values("2.0, 3.0", "4.0, 5.0"); }
+        fall_transition(T) { values("0.11, 0.21", "0.31, 0.41"); }
+      }"#
+        .to_owned();
+        let reset = Regex::new("(R|S)N?").unwrap();
+
+        // The arc as the fixture wrote it, read off an unconverted copy: "unchanged"
+        // is then the fixture's own group rather than a transcription of it.
+        let untouched = reset_arc_cell_lib(offending.clone());
+        let original = arcs_of_type(
+            output_pin(&untouched[0], "RESET_CELL", "Q"),
+            "three_state_disable",
+        )[0]
+        .clone();
+
+        let mut lib = reset_arc_cell_lib(offending.clone());
+        let produced = process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &reset,
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+
+        // The cell converted around the arc it could not state.
+        let cell = lib[0].get_cell("RESET_CELL").expect("RESET_CELL");
+        assert_eq!(
+            cell.iter_subgroups()
+                .filter(|g| g.type_.starts_with("ff"))
+                .count(),
+            1,
+            "the sequential group became the flop form"
+        );
+        let q = output_pin(&lib[0], "RESET_CELL", "Q");
+        assert_eq!(
+            arc_census(q),
+            census(&[("R", "three_state_disable", 1), ("G", "rising_edge", 1)]),
+            "the output gained its clock arc and kept the arc that could not be stated"
+        );
+
+        // And kept it whole: name, condition, sense and every table value.
+        assert_eq!(
+            arcs_of_type(q, "three_state_disable")[0],
+            &original,
+            "an arc that cannot be stated is emitted exactly as it arrived"
+        );
+
+        // No refusal, at any scope. This case must never reject a cell or an output.
+        assert!(
+            produced.refusals.is_empty(),
+            "an unstatable arc is warned about, never refused: {:?}",
+            produced.refusals
+        );
+
+        // The warning itself, taken from the function that produces it -- the same
+        // call phase 3 makes, on the same pin, before the run mutates anything.
+        let mut probe = reset_arc_cell_lib(offending);
+        let pin = probe[0]
+            .get_cell_mut("RESET_CELL")
+            .expect("RESET_CELL")
+            .get_pin_mut("Q")
+            .expect("Q");
+        assert_eq!(
+            restate_output_arcs(pin, &reset, "RESET_CELL", "Q"),
+            vec![
+                "WARNING: arc R -> Q of cell RESET_CELL could not be restated and is emitted \
+                 unchanged: timing_type three_state_disable is neither combinational nor an \
+                 asynchronous-reset type"
+                    .to_owned()
+            ]
+        );
+    }
+
+    /// Two rails of one bundle, each carrying its own reset arc, characterised in
+    /// opposite directions.
+    ///
+    /// `Q1`'s reset arc measures the output arriving high and `Q2`'s measures it
+    /// arriving low, which is the shape a dual-rail cell's reset takes: it clears one
+    /// rail while it presets the other. Nothing about the cell can decide either --
+    /// the `latch_bank` names one behaviour for the whole bank -- so each rail's type
+    /// has to come from its own arc.
+    fn dual_rail_reset_lib() -> Liberty {
+        bundle_lib(format!(
+            r#"
+    pin(D) {{ direction: input; }}
+    pin(R) {{ direction: input; }}
+    bundle(Q) {{
+      members(Q1, Q2);
+      direction: output;
+      function: "IQ";
+      pin(Q1) {{ {} {} }}
+      pin(Q2) {{ {} {} }}
+    }}"#,
+            arc("D", "combinational", 1.0),
+            one_edge_arc(
+                "R",
+                "combinational_rise",
+                "cell_rise",
+                "rise_transition",
+                3.0
+            ),
+            arc("D", "combinational", 2.0),
+            one_edge_arc(
+                "R",
+                "combinational_fall",
+                "cell_fall",
+                "fall_transition",
+                4.0
+            ),
+        ))
+    }
+
+    /// Each rail takes the asynchronous type ITS OWN arc names. `Q1` was
+    /// characterised arriving high, and the type that drives an output high is
+    /// `preset`; `Q2` was characterised arriving low, which is `clear`. The pin pair
+    /// is two arcs, not one unit, and pooling them would give both rails whichever
+    /// answer was reached first.
+    ///
+    /// Killed by: the `combinational_rise` arm named the other direction -- `(true, false) => Ok(vec![retagged(arc, Transition::Fall)])` -- so the rise-only rail came back `clear` and both rails cleared.
+    #[test]
+    fn each_rail_of_a_bundle_takes_the_asynchronous_type_its_own_arc_names() {
+        let mut lib = dual_rail_reset_lib();
+        process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                false,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+        let cell = lib[0].get_cell("DUT").expect("DUT");
+
+        assert_eq!(
+            arc_census(member(cell, "Q", "Q1")),
+            census(&[("R", "preset", 1), ("G", "rising_edge", 1)]),
+            "Q1 was characterised arriving high"
+        );
+        assert_eq!(
+            arc_census(member(cell, "Q", "Q2")),
+            census(&[("R", "clear", 1), ("G", "rising_edge", 1)]),
+            "Q2 was characterised arriving low"
+        );
+    }
+
+    /// The same two rails under `--latch`: neither reset arc is restated, so each
+    /// keeps the combinational type the library tagged it with, and both data arcs
+    /// survive beside the added pseudo arc.
+    ///
+    /// Killed by: the mode gate was narrowed to the drop alone -- `latch` threaded into
+    /// `restate_output_arcs`, whose non-reset branch became
+    /// `if latch { outpin.subgroups.push(group); } continue;`, and the call site made
+    /// unconditional -- so both rails' reset arcs were retagged in latch mode. It also
+    /// reddens [`latch_mode_leaves_a_combinational_reset_arc_as_the_library_wrote_it`]
+    /// and nothing else; this test is the bundle witness, where the two rails carry
+    /// two DIFFERENT tags and a leak would have to get both of them wrong.
+    #[test]
+    fn latch_mode_leaves_the_reset_arcs_as_the_library_tagged_them() {
+        let mut lib = dual_rail_reset_lib();
+        process_library(
+            &mut lib[0],
+            &opts(
+                "G",
+                &Regex::new("(R|S)N?").unwrap(),
+                true,
+                ReferenceMode::PerOutput,
+                WhenMerge::Mean,
+            ),
+        );
+        let cell = lib[0].get_cell("DUT").expect("DUT");
+
+        assert_eq!(
+            arc_census(member(cell, "Q", "Q1")),
+            census(&[
+                ("D", "combinational", 1),
+                ("R", "combinational_rise", 1),
+                ("G", "rising_edge", 1)
+            ])
+        );
+        assert_eq!(
+            arc_census(member(cell, "Q", "Q2")),
+            census(&[
+                ("D", "combinational", 1),
+                ("R", "combinational_fall", 1),
+                ("G", "rising_edge", 1)
+            ])
+        );
     }
 
     // --- a cell only half of whose outputs can be characterised --------------
@@ -5396,7 +5843,7 @@ library({}_test) {{
     /// genuinely owns arcs to the output -- 34 of them -- so it is the only place
     /// where both halves of the reset treatment are observable: `process_cell`
     /// keeps reset arcs out of the model it builds, and
-    /// `add_pseudo_timing_to_output_pin` keeps them in the library it emits.
+    /// `restate_output_arcs` keeps them in the library it emits.
     ///
     /// Killed by: `process_cell`'s phase 1 reset skip disabled -- `if reset_name.is_match(&related_pin) && false`.
     #[test]
@@ -5537,7 +5984,7 @@ library({}_test) {{
     /// recorded output: the arcs the fixture declares are asserted before the run
     /// and the arcs expected after it are derived from those by [`ff_census`].
     ///
-    /// Killed by: `add_pseudo_timing_to_output_pin`'s retain negated its reset test -- `|| !reset_name.is_match(..)`.
+    /// Killed by: `restate_output_arcs` negated its reset test -- `if reset_name.is_match(&related) { continue; }`.
     #[test]
     fn ascend_ff_mode_emits_the_pseudo_flop_model_for_every_qualifying_cell() {
         let mut liberty =
@@ -5557,6 +6004,57 @@ library({}_test) {{
             "cells qualifying for conversion: {:?}",
             qualifying
         );
+
+        // The precondition [`ff_census`] rests on, asserted of the fixture rather
+        // than assumed of it. Flop mode restates every retained reset arc under the
+        // asynchronous type the arc's own tables name, and an arc measuring both
+        // arrivals becomes two -- so a census identical to the filtered original is
+        // only right where every reset-matching arc ALREADY states `clear` or
+        // `preset`, which is returned verbatim, and measures ONE arrival. Read over
+        // every output leaf of every qualifying cell, not merely the two censused
+        // below, because `ff_census` is the expectation for all of them.
+        for name in &qualifying {
+            let cell = liberty[0]
+                .get_cell(name)
+                .unwrap_or_else(|| panic!("cell {} not found", name));
+            for pin in timing_leaves(cell, is_output_pin) {
+                for timing in pin.iter_subgroups_of_type("timing") {
+                    let Some(related) = timing.simple_attribute("related_pin").map(|v| v.string())
+                    else {
+                        continue;
+                    };
+                    if !reset_name.is_match(&related) {
+                        continue;
+                    }
+                    let kind = timing
+                        .simple_attribute("timing_type")
+                        .map_or_else(String::new, |v| v.expr());
+                    assert!(
+                        kind == "clear" || kind == "preset",
+                        "{}.{}: reset arc from {} states {:?}, so flop mode would restate it \
+                         and the census could not be the original one",
+                        name,
+                        pin.name,
+                        related,
+                        kind
+                    );
+                    let carries = |families: [&str; 2]| {
+                        timing
+                            .iter_subgroups()
+                            .any(|g| families.contains(&g.type_.as_str()))
+                    };
+                    assert!(
+                        carries(crate::arcs::edge_families(Transition::Rise))
+                            != carries(crate::arcs::edge_families(Transition::Fall)),
+                        "{}.{}: reset arc from {} does not measure exactly one arrival, so one \
+                         arc in would not be one arc out",
+                        name,
+                        pin.name,
+                        related
+                    );
+                }
+            }
+        }
 
         // Q's arc population before the run, so what is retained afterwards can be
         // counted against what there was to keep.
@@ -5773,7 +6271,7 @@ library({}_test) {{
     /// purely additive, so the assertion is stated as the original arc census plus
     /// the one pseudo arc rather than as a fresh set of numbers.
     ///
-    /// Killed by: `add_pseudo_timing_to_output_pin` guarded its retain with `if latch` instead of `if !latch`, stripping the original arcs in latch mode.
+    /// Killed by: the phase 3 gate was inverted -- `if latch { restate_output_arcs(..) }` -- stripping the original arcs in latch mode.
     #[test]
     fn ascend_latch_mode_keeps_every_original_arc_and_appends_the_pseudo_arc() {
         let mut liberty =
