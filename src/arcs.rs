@@ -361,6 +361,21 @@ pub(crate) struct TimingTables {
     pub(crate) fall_trans: Option<Array2<f64>>,
 }
 
+/// Where the tables fed to an accumulator came from: the arc's two pins, the cell
+/// they sit on and the library that cell was read from.
+///
+/// Carried as one value because the accumulators read none of it while summing --
+/// it exists solely so that a condition dropped mid-merge can be reported against
+/// the arc, cell and library it was dropped in, which is what the caller needs to
+/// find it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ArcSite<'a> {
+    pub(crate) related_pin: &'a str,
+    pub(crate) outpin: &'a str,
+    pub(crate) cell: &'a str,
+    pub(crate) lib: &'a str,
+}
+
 /// Running mean of one table family across arcs that share a (related_pin,
 /// output) pair.
 #[derive(Debug, Clone)]
@@ -379,23 +394,20 @@ impl TableAccumulator {
         }
     }
 
-    pub(crate) fn add(
-        &mut self,
-        table: Array2<f64>,
-        family: &str,
-        related_pin: &str,
-        outpin: &str,
-    ) {
+    pub(crate) fn add(&mut self, table: Array2<f64>, family: &str, site: ArcSite) {
         let merge = self.merge;
         match self.sum.as_mut() {
             // Conditions of one arc are characterised on a common template, so a
             // shape change means these are not the same transition. Averaging
             // them would be meaningless, and adding them would panic.
             Some(sum) if sum.raw_dim() != table.raw_dim() => eprintln!(
-                "  Ignoring a {} arc {} -> {}: table shape {:?} differs from {:?}",
+                "WARNING: ignoring a {} arc {} -> {} of cell {} in library {}: \
+                 table shape {:?} differs from {:?}",
                 family,
-                related_pin,
-                outpin,
+                site.related_pin,
+                site.outpin,
+                site.cell,
+                site.lib,
                 table.shape(),
                 sum.shape()
             ),
@@ -465,7 +477,7 @@ impl ArcAccumulator {
         }
     }
 
-    pub(crate) fn accumulate(&mut self, tables: TimingTables, related_pin: &str, outpin: &str) {
+    pub(crate) fn accumulate(&mut self, tables: TimingTables, site: ArcSite) {
         if self.lut_template.is_none() {
             self.lut_template = Some(tables.lut_template);
         }
@@ -487,7 +499,7 @@ impl ArcAccumulator {
             (tables.fall_trans, "fall_transition", &mut self.fall_trans),
         ] {
             if let Some(table) = table {
-                acc.add(table, family, related_pin, outpin);
+                acc.add(table, family, site);
             }
         }
     }
@@ -1492,6 +1504,16 @@ mod tests {
 
     // --- when-condition averaging -----------------------------------------
 
+    /// The arc these merges are said to belong to. Nothing an accumulator computes
+    /// reads it -- it only names a dropped condition on standard error -- so one
+    /// site serves every merge test.
+    const SITE: ArcSite<'static> = ArcSite {
+        related_pin: "D",
+        outpin: "Q",
+        cell: "TESTFF",
+        lib: "testlib",
+    };
+
     fn tables(cell_rise: Option<f64>, cell_fall: Option<f64>, trans: Option<f64>) -> TimingTables {
         let fill = |v: f64| Array2::from_shape_vec((2, 2), vec![v; 4]).unwrap();
         TimingTables {
@@ -1515,9 +1537,9 @@ mod tests {
         // only two of them characterise cell_fall (100, 200 -> mean 150), which
         // is the combinational_rise / combinational_fall split. Each family must
         // divide by its own count, and neither may take the last value (60/200).
-        acc.accumulate(tables(Some(10.0), Some(100.0), None), "D", "Q");
-        acc.accumulate(tables(Some(20.0), None, None), "D", "Q");
-        acc.accumulate(tables(Some(60.0), Some(200.0), None), "D", "Q");
+        acc.accumulate(tables(Some(10.0), Some(100.0), None), SITE);
+        acc.accumulate(tables(Some(20.0), None, None), SITE);
+        acc.accumulate(tables(Some(60.0), Some(200.0), None), SITE);
 
         let mean = acc.result().expect("a template was recorded");
         assert_eq!(mean.cell_rise.unwrap()[[0, 0]], 30.0);
@@ -1531,7 +1553,7 @@ mod tests {
     #[test]
     fn a_condition_on_a_different_table_shape_is_ignored_rather_than_panicking() {
         let mut acc = ArcAccumulator::new(WhenMerge::Mean);
-        acc.accumulate(tables(Some(10.0), None, None), "D", "Q");
+        acc.accumulate(tables(Some(10.0), None, None), SITE);
 
         let odd = TimingTables {
             slews: None,
@@ -1543,7 +1565,7 @@ mod tests {
             rise_trans: None,
             fall_trans: None,
         };
-        acc.accumulate(odd, "D", "Q");
+        acc.accumulate(odd, SITE);
 
         // The mismatched condition is dropped, leaving the first untouched.
         assert_eq!(acc.result().unwrap().cell_rise.unwrap()[[0, 0]], 10.0);
@@ -1566,8 +1588,8 @@ mod tests {
 
         for (merge, want_rise, want_fall) in cases {
             let mut acc = ArcAccumulator::new(merge);
-            acc.accumulate(tables(Some(10.0), Some(200.0), None), "D", "Q");
-            acc.accumulate(tables(Some(50.0), Some(100.0), None), "D", "Q");
+            acc.accumulate(tables(Some(10.0), Some(200.0), None), SITE);
+            acc.accumulate(tables(Some(50.0), Some(100.0), None), SITE);
 
             let got = acc.result().expect("a template was recorded");
             assert_eq!(

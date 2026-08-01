@@ -3,8 +3,9 @@
 
 use crate::arcs::{
     arc_domains, extract_timing_tables_from_arc, input_transition, mean_reference_arc,
-    select_reference_arc, slew_profile, Anchor, ArcAccumulator, EdgeRef, RefArc, ReferenceMode,
-    References, Scope, TableAccumulator, TimingSense, TimingTables, Transition, WhenMerge,
+    select_reference_arc, slew_profile, Anchor, ArcAccumulator, ArcSite, EdgeRef, RefArc,
+    ReferenceMode, References, Scope, TableAccumulator, TimingSense, TimingTables, Transition,
+    WhenMerge,
 };
 use crate::conditions::{
     collision_classes, collision_classes_within, merge_conditions, ClassId, Condition,
@@ -1107,6 +1108,14 @@ fn process_cell(
     for (index, tables) in arc_tables.iter().enumerate() {
         let arc = &raw_arcs[index];
         let whenless = arc.when.is_none();
+        // What a table dropped inside either accumulator is reported against. Read
+        // only when one is dropped, never while summing.
+        let site = ArcSite {
+            related_pin: &arc.source,
+            outpin: &arc.output,
+            cell: &cell_name,
+            lib: lib_name,
+        };
         // The check group this arc's values are summed into, which is its own pin's
         // condition and not its output's state. Drawn through the same construction
         // as the scope below, so a group and the values it reads cannot be keyed
@@ -1146,7 +1155,7 @@ fn process_cell(
                 accumulated
                     .entry((arc.source.clone(), arc.output.clone(), scope))
                     .or_insert_with(|| ArcAccumulator::new(when_merge))
-                    .accumulate(half, &arc.source, &arc.output);
+                    .accumulate(half, site);
             }
 
             // Only the delay families feed a constraint: a transition is the
@@ -1163,7 +1172,7 @@ fn process_cell(
                     family,
                 })
                 .or_insert_with(|| TableAccumulator::new(when_merge))
-                .add(table.clone(), family, &arc.source, &arc.output);
+                .add(table.clone(), family, site);
         }
     }
 

@@ -57,7 +57,7 @@ report is built from the arcs that survived phase 1, and these never reach it:
   output's, under `negative_unate` it is the opposite, and under `non_unate` — or with no
   `timing_sense` stated, for which Liberty gives no default — nothing determines it. Warn on
   standard error, naming the cell, the arc, the library and the reason
-  (`src/engine.rs:944-947`), and skip that arc. This holds in every reference mode alike:
+  (`src/engine.rs:945-948`), and skip that arc. This holds in every reference mode alike:
   none of the three has a fallback direction to charge a constraint to.
 - Under `--reference-mode per-state` only: the arc's `when` does not parse as a Liberty
   Boolean expression. Per-state files every arc under the post-settled state its `when`
@@ -402,9 +402,9 @@ keeps the tag the library wrote it under —
 
 An arc the rule cannot state is emitted **exactly as the library wrote it**, and a warning
 naming the related pin, the output pin, the cell and the library is produced. It is built by
-`restate_output_arcs`, which returns it rather than printing it (`src/engine.rs:714-718`),
-and printed on standard error by the caller (`src/engine.rs:1319`), inside the `if !latch`
-branch that gates the whole restatement (`src/engine.rs:1315`). Four shapes reach that: an
+`restate_output_arcs`, which returns it rather than printing it (`src/engine.rs:715-719`),
+and printed on standard error by the caller (`src/engine.rs:1328`), inside the `if !latch`
+branch that gates the whole restatement (`src/engine.rs:1324`). Four shapes reach that: an
 arc carrying no delay and no transition table either way; one whose
 `combinational_rise`/`combinational_fall` suffix is contradicted by its own tables; one
 stating no `timing_type`; and one stating a type that is neither combinational nor
