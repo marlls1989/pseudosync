@@ -13,7 +13,16 @@ standard tools will use it and time it. It is described in
 > Constraining QDI Circuits Cycle Time Using Traditional EDA Tools", *IEEE ASYNC 2019*,
 > pp. 114–123. DOI 10.1109/ASYNC.2019.00023.
 
-Section III and Figure 7 of that paper define the models this tool emits.
+Section III and Figure 7 of that paper define the models this tool emits. The technique Pulsar
+builds on is
+
+> Y. Thonnart, E. Beigné, P. Vivet, "A Pseudo-Synchronous Implementation Flow for WCHB QDI
+> Asynchronous Circuits", *IEEE ASYNC 2012*, pp. 73–80. DOI 10.1109/ASYNC.2012.29.
+
+which referred the model to the cell's real `Reset` pin. Pulsar extends it with a fictitious
+clock pin, which preserves the cell's reset arcs, and with two models built on that pin — the
+flop model used for synthesis and the latch model used for delay annotation — which are the
+two this tool emits.
 
 ## What the conversion does
 
@@ -31,10 +40,7 @@ delay(A→Z) = propagation(G→Z) + setup(A→G)
 
 The clock pin exists only in the emitted `.lib` file. It is absent from the cell's layout
 and from its abstract views, and there is no such net in the silicon. That is what makes
-the real reset and set pins' own arcs survivable: the method's predecessor repurposed the
-real `Reset` pin as the pseudo-clock, which tied the reset network to a clock tree the
-tool was simultaneously trying to synthesise, and forced loop breakers before delays
-could be annotated. Introducing a pin that exists nowhere else avoids both.
+the real reset and set pins' own arcs survivable.
 
 The two halves must sum back to the arc they came from. They do not do so exactly: two
 independent values are summed, and together they do not describe the delay as a function
@@ -62,7 +68,7 @@ library block.
 | Option | Default | Meaning |
 |---|---|---|
 | `-o`, `--output <path>` | stdout | Where the converted library is written. `-` also means standard output |
-| `-l`, `--latch` | off | Emit the latch model rather than the flop model: keep the `latch` group and every original arc, and add the pseudo-synchronous timing alongside them. This is the library to use when generating SDF for delay-annotated simulation, which needs the real input-to-output delays rather than the fictitious clock's — so every arc keeps the `timing_type` the library wrote it under, reset arcs included |
+| `-l`, `--latch` | off | Emit the latch model rather than the flop model: keep the `latch` group and every original arc, and add the pseudo-synchronous timing alongside them. This is the library to use when generating SDF for delay-annotated simulation, which needs the real input-to-output delays rather than the fictitious clock's — so every arc keeps the `timing_type` the library wrote it under, reset arcs included. A design synthesised against the flop library has its SDF extracted by swapping this library in for that one, nothing else about the design changing: the latch's sequential arcs keep the timing loop broken, while the original arcs supply the real delays to annotate |
 | `-c`, `--clock-pin <name>` | `G` | The pin the conversion treats as the clock. It is expected to exist in the `.lib` and nowhere else |
 | `-r`, `--reset-pin <regex>` | `(R\|S)N?` | Arcs whose `related_pin` matches are treated as asynchronous set/reset: excluded from the conversion and retained. In the flop model a retained arc is restated under an asynchronous `timing_type` — `clear` or `preset`, named by the output direction the arc's own tables state — and under `--latch` it is kept exactly as written. `docs/conversion-policy.md` §10 states the rule |
 | `-m`, `--reference-mode <mode>` | `per-state` | `per-state` gives each post-settled state of each output its own clock-to-output reference and conditions the emitted delays and checks on it; `per-output` coarsens that to one reference per output, constraining each input against only the outputs it actually drives; `pooled` coarsens further still, to the cell-wide mean — a deliberately kept regression, not a designed alternative, retained only so its cost can be measured |
