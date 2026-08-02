@@ -349,7 +349,7 @@ needs the real input-to-output delays rather than the phantom clock's. The `latc
 all original arcs are preserved, and the pseudo-synchronous arcs are added alongside them.
 
 Skipped-ness itself is mode-independent — the same outputs are skipped under both modes.
-What differs is what a skip *means*. Under `--latch` a skipped output simply gains no
+What differs is what a skip *means*. Under `--latch` a skipped output gains no
 pseudo-synchronous arcs, since the originals survive by construction. Under the default it
 keeps its original arcs instead of having them replaced.
 
