@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-02
+
 ### Added
 
 - **`--reference-mode` (`-m`), defaulting to `per-state`.** Three rungs of one ladder: `pooled` draws
@@ -143,5 +145,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by load, synthesised per template the conversion used and prepended to the library.
 - **Bundle pin support**, and `voltage_map` preservation through the parser.
 
-[Unreleased]: https://github.com/marlls1989/pseudosync/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/marlls1989/pseudosync/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/marlls1989/pseudosync/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/marlls1989/pseudosync/releases/tag/v0.1.0
