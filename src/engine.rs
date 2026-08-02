@@ -280,6 +280,18 @@ struct CheckGroup {
 ///
 /// The conditioned groups come out in first-appearance order and the catch-all last,
 /// which is the order Liberty reads a `default_timing` group in.
+///
+/// The two classifications being independent is pinned from both sides:
+/// `per_state_checks_carry_their_own_states_arc_minus_its_own_crossing` for one source
+/// `when` staying one group where the post-settled classification splits its two input
+/// directions, and `a_bridged_delay_state_still_leaves_its_source_two_check_groups`
+/// for two of a pin's `when`s staying two groups where a third pin's condition bridges
+/// them into one delay state. `two_spellings_of_one_condition_are_one_check_group`
+/// pins the common case and
+/// `overlapping_check_conditions_on_one_pin_are_grouped_under_their_union` the class
+/// that can be stated under no member of itself.
+/// `one_check_condition_over_two_outputs_carries_their_mean` pins that one condition
+/// yields one value per direction however many outputs the pin drives under it.
 fn check_groups(
     raw_arcs: &mut [ConditionedArc],
     post: &[ArcPost],
@@ -685,6 +697,10 @@ fn add_pseudo_timing_to_output_pin(outpin: &mut Group, clock_name: &str, arcs: &
 /// the cell and the library it happened in -- for the caller to print beside them, so
 /// what the tool could not state is still said out loud. `lib_name` is threaded in for
 /// that reason alone: nothing in the restatement itself reads it.
+///
+/// `an_arc_that_cannot_be_stated_survives_unchanged_and_warns` pins that the arc
+/// survives and that the warning is *produced*: it calls this function directly and
+/// asserts one warning came back. No test asserts the message's wording.
 fn restate_output_arcs(
     outpin: &mut Group,
     reset_name: &Regex,
@@ -2697,8 +2713,8 @@ library(reset_arc_test) {{
     }
 
     /// The latch model exists so SDF can be generated from real input-to-output
-    /// delays rather than the phantom clock's (README.md:65,
-    /// docs/conversion-policy.md:342-344), which it can only do if every original arc
+    /// delays rather than the phantom clock's (`docs/emitting-the-two-models.md` §1),
+    /// which it can only do if every original arc
     /// survives exactly as the library tagged it. So `--latch` restates nothing: the
     /// reset arc is still `combinational`, the data arc from `A` is still there, and
     /// the pseudo arc is added beside them.

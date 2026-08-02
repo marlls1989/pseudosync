@@ -299,6 +299,14 @@ pub(crate) struct ClassId(usize);
 /// library's conditions behave is upstream of this tool.
 ///
 /// Quadratic in the number of conditions, which is one cell's or one pin's — tens.
+///
+/// Five cases pin the relation and its closure:
+/// `collision_classes_intern_by_function_in_first_appearance_order` for two spellings
+/// of one function, `two_overlapping_conditions_are_one_class` for an overlap without
+/// containment, `a_condition_covering_another_is_one_class_with_it` for containment,
+/// `disjoint_conditions_are_two_classes` for the negative case, and
+/// `a_bridging_condition_closes_two_disjoint_ones_into_one_class` for the transitivity
+/// the closure supplies and pairwise collision does not.
 pub(crate) fn collision_classes(conditions: &[Condition]) -> Vec<ClassId> {
     let builder = bdd_builder!();
     let bdds: Vec<_> = conditions
@@ -351,6 +359,10 @@ pub(crate) fn collision_classes(conditions: &[Condition]) -> Vec<ClassId> {
 /// the whole call, because a class is filed under keys that do not all carry the
 /// group it was drawn within: two groups' classes sharing a number would be read as
 /// one state wherever they meet in such a key.
+///
+/// `a_collision_is_sought_within_a_group_and_never_across_two` pins the classifier
+/// alone; `two_outputs_whose_conditions_overlap_are_not_one_state` in `src/engine.rs`
+/// pins the same rule through a conversion.
 pub(crate) fn collision_classes_within(groups: &[Vec<Condition>]) -> Vec<Vec<ClassId>> {
     let mut issued = 0usize;
     groups

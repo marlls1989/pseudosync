@@ -41,10 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `preset`, and an arc measuring both becomes two. `related_pin`, `timing_sense`, `when`, `sdf_cond`
   and every table value pass through unchanged, and the sequential group is never consulted. An arc
   the rule cannot state is emitted unchanged with a warning, never refused; `--latch` restates nothing.
-- **`README.md`, `GUIDELINES.md`, `docs/conversion-policy.md` and `KNOWN-ISSUES.md`.**
-  `docs/conversion-policy.md` states what the tool emits and is the contract; `GUIDELINES.md` carries
-  the contributor rules, under which nothing enters the documentation without what backs it — a
-  Liberty manual page, a section of the Pulsar paper, a named test, or a measurement actually run.
+- **`README.md`, `GUIDELINES.md`, `KNOWN-ISSUES.md`, and `docs/`.** `GUIDELINES.md` carries the
+  contributor rules, under which nothing enters the documentation without what backs it — a Liberty
+  manual page, a section of the Pulsar paper, a named test, or a measurement actually run. `docs/`
+  describes the algorithms in seven documents: the Liberty timing model, the pseudo-synchronous
+  split, reference selection, post-settled states, the two emitted models, the limits of the model,
+  and running the tool. Implementation detail — line numbers and the tests pinning a behaviour —
+  lives in the source doc comments rather than in `docs/`, so that the prose describes the code
+  without standing over it.
 
 ### Changed
 

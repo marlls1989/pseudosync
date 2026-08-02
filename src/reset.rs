@@ -85,6 +85,10 @@ fn retagged(arc: &Group, edge: Transition) -> Group {
 /// unfamiliar subgroup would ride onto both halves unexamined; a list of what to keep
 /// has no such gap. The attributes are untouched: `related_pin`, `timing_sense`,
 /// `when`, `sdf_cond` and the group name come through [`retagged`] by clone.
+///
+/// `a_subgroup_of_neither_family_is_discarded_from_both_halves` pins the discard, and
+/// `a_split_half_keeps_the_condition_and_sense_the_library_wrote` the attributes that
+/// survive it.
 fn half(arc: &Group, edge: Transition) -> Group {
     let keep = edge_families(edge);
     let mut restated = retagged(arc, edge);
@@ -108,6 +112,15 @@ fn half(arc: &Group, edge: Transition) -> Group {
 /// `latch_bank` group ever read.
 ///
 /// Idempotent: an arc that already states `clear` or `preset` is returned verbatim.
+///
+/// `an_arc_carrying_both_edges_becomes_a_preset_and_a_clear` pins the split, asserting
+/// the two as a set because the order is not a property of the result;
+/// `a_single_edge_arc_keeps_every_subgroup_it_had` pins that a one-arrival arc is
+/// retagged rather than rebuilt; and
+/// `an_arc_already_stating_an_asynchronous_type_is_returned_verbatim` the idempotence.
+/// `flop_mode_states_a_combinational_reset_arc_asynchronously` and
+/// `latch_mode_leaves_a_combinational_reset_arc_as_the_library_wrote_it` in
+/// `src/engine.rs` pin both modes through a whole conversion.
 pub(crate) fn restate_reset_arc(arc: &Group) -> Result<Vec<Group>, String> {
     let present = |edge: Transition| {
         let families = edge_families(edge);

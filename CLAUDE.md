@@ -15,8 +15,8 @@ original combinational timing tables, not re-characterised.
 
 - **`GUIDELINES.md`** — how work is done in this repository. **Owner-only: never edit it.**
   A rule that seems wrong or missing is raised, never committed.
-- **`docs/conversion-policy.md`** — the behaviour contract: what the tool emits and what it
-  refuses. Sections are numbered and cited as §N.
+- **`docs/`** — seven documents describing the algorithms, starting with
+  `the-pseudo-synchronous-split.md`. Sections are numbered and cited as §N.
 - **`KNOWN-ISSUES.md`** — defects found and deliberately deferred, with what someone using
   the tool actually sees.
 - **`README.md`** — the user-facing description.
@@ -99,10 +99,21 @@ and `anchor`.
 Timing tables are `ndarray` `Array2<f64>` LUTs over input slew × output load; a `RefArc`
 holds the one-dimensional slices used as the constraint reference.
 
-**`docs/conversion-policy.md` is the contract for what the conversion does** — the
-refusal scopes, the reference-mode ladder, the post-settled state model, the `sdf_cond`
-regeneration and the two output modes. Read it there rather than inferring the rules from
-the engine.
+**`docs/` describes how the conversion works** — read it rather than inferring the
+algorithms from the engine:
+
+| Document | Covers |
+|---|---|
+| `the-liberty-timing-model.md` | the format: arcs, families, templates, unateness, state-dependence |
+| `the-pseudo-synchronous-split.md` | why the loops need breaking, the identity, the anchor, the residual |
+| `reference-selection.md` | the pooled/per-output/per-state ladder |
+| `post-settled-states.md` | input direction, BDD collision, the two classifications |
+| `emitting-the-two-models.md` | flop vs latch, reset restatement, `sdf_cond` regeneration |
+| `limits-of-the-model.md` | what the split cannot express, and what happens then |
+| `running-the-tool.md` | artefacts, exit status, diagnostics |
+
+These describe the code as it stands. They are not a specification the code owes
+anything to, and a design change the owner asks for is not a defect against them.
 
 The two modes correspond to the committed example outputs: `examples/*_pseudolatch.lib`
 (`--latch`) and `examples/*_pseudoflop.lib` (default); `examples/*.lib` with no suffix are

@@ -24,7 +24,7 @@ by that route, not by a worker reaching outside its brief.
 A command-line tool that rewrites Liberty standard-cell timing files, re-describing a
 latch-based asynchronous cell on the axes a flip-flop is characterised on so that
 synchronous synthesis and timing tools will use it. It implements the method of the Pulsar
-paper; `README.md` states the method and `docs/conversion-policy.md` states the contract.
+paper; `README.md` states the method and `docs/` describes the algorithms it is built from.
 
 **It is a binary, not a library.** No public API surface, no `lib.rs`. Every module sits
 behind a private `mod`, and tests reach private items from a `#[cfg(test)]` module inside
